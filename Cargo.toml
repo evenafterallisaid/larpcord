@@ -38,3 +38,7 @@ panic = "abort"
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
+
+# gpui 0.2.2 pulls xattr 0.2.3, which uses the linux enoattr alias removed in newer libc.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "=0.2.177"
