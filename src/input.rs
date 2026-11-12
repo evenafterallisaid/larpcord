@@ -34,7 +34,7 @@ pub struct TextInput {
     focus_handle: FocusHandle,
     pub content: SharedString,
     secret: bool,
-    placeholder: SharedString,
+    pub placeholder: SharedString,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,

@@ -16,7 +16,7 @@ use tokio_tungstenite::{
 };
 use zeroize::Zeroizing;
 
-use crate::model::{Channel, Guild, Message};
+use crate::model::{Channel, Guild, Message, Page, User};
 
 pub enum Event {
     Auth {
@@ -28,12 +28,17 @@ pub enum Event {
     History {
         channel: String,
         started: u64,
-        older: bool,
-        messages: Vec<Message>,
+        request: u64,
+        page: Page,
+        result: Result<Vec<Message>, String>,
     },
     Sent {
         nonce: String,
-        result: Result<Message, String>,
+        result: Result<Box<Message>, String>,
+    },
+    Profile {
+        id: String,
+        result: Result<User, String>,
     },
     Error(String),
     SavedSession(Option<Zeroizing<String>>),
@@ -58,7 +63,9 @@ pub enum Command {
     History {
         channel: String,
         started: u64,
-        before: Option<String>,
+        request: u64,
+        page: Page,
+        cursor: Option<String>,
     },
     Send {
         channel: String,
@@ -69,6 +76,7 @@ pub enum Command {
         title: String,
         body: String,
     },
+    Profile(String),
     Forget,
 }
 
@@ -196,7 +204,7 @@ async fn emit(events: &Sender<Envelope>, generation: u64, event: Event) {
 }
 
 impl Backend {
-    pub fn start() -> (Self, async_channel::Receiver<Envelope>) {
+    pub fn start(load_saved_session: bool) -> (Self, async_channel::Receiver<Envelope>) {
         let (tx, mut commands) = mpsc::channel::<Command>(32);
         let (events, receiver) = async_channel::bounded(256);
         std::thread::Builder::new().name("larpcord-network".into()).spawn(move || {
@@ -208,10 +216,10 @@ impl Backend {
                 let mut api = None::<Api>;
                 let mut generation = 0;
                 let saved_events = events.clone();
-                tokio::task::spawn_blocking(move || {
+                if load_saved_session { tokio::task::spawn_blocking(move || {
                     let token = credential().ok().and_then(|entry| entry.get_password().ok()).map(Zeroizing::new);
                     let _ = saved_events.send_blocking(Envelope { generation: 0, event: Event::SavedSession(token) });
-                });
+                }); }
                 loop {
                     tokio::select! {
                         Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
@@ -276,19 +284,26 @@ impl Backend {
                                         }
                                     });
                                 }
-                                Command::History { channel, started, before } => {
+                                Command::Profile(id) => {
                                     let Some(client) = api.clone() else { continue; };
-                                    if !snowflake(&channel) || before.as_ref().is_some_and(|id| !snowflake(id)) { continue; }
+                                    if !snowflake(&id) { continue; }
                                     let events = events.clone();
                                     requests.spawn(async move {
-                                        let older = before.is_some();
+                                        let result = client.request(Method::GET, &format!("/users/{id}"), None).await;
+                                        emit(&events, generation, Event::Profile {id, result}).await;
+                                    });
+                                }
+                                Command::History { channel, started, request, page, cursor } => {
+                                    let Some(client) = api.clone() else { continue; };
+                                    if !snowflake(&channel) || cursor.as_ref().is_some_and(|id| !snowflake(id)) { continue; }
+                                    let events = events.clone();
+                                    requests.spawn(async move {
                                         let mut path = format!("/channels/{channel}/messages?limit=100");
-                                        if let Some(before) = before { path.push_str(&format!("&before={before}")); }
-                                        let event = match client.request(Method::GET, &path, None).await {
-                                            Ok(messages) => Event::History { channel, started, older, messages },
-                                            Err(error) => Event::Error(error),
-                                        };
-                                        emit(&events, generation, event).await;
+                                        if let Some(cursor) = cursor {
+                                            match page { Page::Before => path.push_str(&format!("&before={cursor}")), Page::After => path.push_str(&format!("&after={cursor}")), Page::Latest => {} }
+                                        }
+                                        let result = client.request(Method::GET, &path, None).await;
+                                        emit(&events, generation, Event::History { channel, started, request, page, result }).await;
                                     });
                                 }
                                 Command::Send { channel, content, nonce } => {
@@ -296,8 +311,8 @@ impl Backend {
                                     if !snowflake(&channel) || content.is_empty() || content.chars().count() > 2000 { continue; }
                                     let events = events.clone();
                                     requests.spawn(async move {
-                                        let result = client.request(Method::POST, &format!("/channels/{channel}/messages"), Some(json!({"content":content, "nonce":nonce, "enforce_nonce":true, "allowed_mentions":{"parse":[]}}))).await;
-                                        emit(&events, generation, Event::Sent { nonce, result }).await;
+                                        let result = client.request::<Message>(Method::POST, &format!("/channels/{channel}/messages"), Some(json!({"content":content, "nonce":nonce, "enforce_nonce":true, "allowed_mentions":{"parse":[]}}))).await;
+                                        emit(&events, generation, Event::Sent { nonce, result: result.map(Box::new) }).await;
                                     });
                                 }
                                 Command::Notify { title, body } => {
