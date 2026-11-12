@@ -11,6 +11,11 @@ pub struct User {
     #[serde(default)]
     pub username: String,
     pub global_name: Option<String>,
+    pub avatar: Option<String>,
+    pub banner: Option<String>,
+    pub accent_color: Option<u32>,
+    #[serde(default)]
+    pub bot: bool,
 }
 
 impl User {
@@ -39,6 +44,7 @@ pub struct Channel {
     #[serde(default)]
     pub recipients: Vec<User>,
     pub topic: Option<String>,
+    pub last_message_id: Option<String>,
 }
 
 impl Channel {
@@ -62,6 +68,60 @@ impl Channel {
 pub struct Attachment {
     pub filename: String,
     pub url: String,
+    pub proxy_url: Option<String>,
+    pub content_type: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct EmbedMedia {
+    pub url: Option<String>,
+    pub proxy_url: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct EmbedField {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct EmbedAuthor {
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct EmbedFooter {
+    pub text: Option<String>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct Embed {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub url: Option<String>,
+    pub color: Option<u32>,
+    pub author: Option<EmbedAuthor>,
+    pub footer: Option<EmbedFooter>,
+    pub image: Option<EmbedMedia>,
+    pub thumbnail: Option<EmbedMedia>,
+    #[serde(default)]
+    pub fields: Vec<EmbedField>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct Member {
+    pub nick: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Page {
+    Latest,
+    Before,
+    After,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -79,6 +139,47 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub mentions: Vec<User>,
+    #[serde(default)]
+    pub embeds: Vec<Embed>,
+    #[serde(rename = "type", default)]
+    pub kind: u8,
+    pub member: Option<Member>,
+    pub webhook_id: Option<String>,
+    pub message_reference: Option<serde_json::Value>,
+}
+
+impl Message {
+    pub fn name(&self) -> &str {
+        self.member
+            .as_ref()
+            .and_then(|m| m.nick.as_deref())
+            .unwrap_or_else(|| self.author.name())
+    }
+
+    pub fn continues(&self, previous: &Self) -> bool {
+        if self.author.id != previous.author.id
+            || self.name() != previous.name()
+            || self.author.avatar != previous.author.avatar
+            || self.channel_id != previous.channel_id
+            || self.webhook_id != previous.webhook_id
+            || self.kind != 0
+            || previous.kind != 0
+            || self.message_reference.is_some()
+            || previous.message_reference.is_some()
+        {
+            return false;
+        }
+        let (Ok(a), Ok(b)) = (
+            chrono::DateTime::parse_from_rfc3339(&previous.timestamp),
+            chrono::DateTime::parse_from_rfc3339(&self.timestamp),
+        ) else {
+            return false;
+        };
+        let seconds = (b - a).num_seconds();
+        (0..=300).contains(&seconds)
+            && a.with_timezone(&chrono::Local).date_naive()
+                == b.with_timezone(&chrono::Local).date_naive()
+    }
 }
 
 #[derive(Default)]
@@ -175,7 +276,7 @@ impl Store {
                 .patches
                 .entry(id.into())
                 .or_insert_with(|| serde_json::json!({}));
-            for key in ["content", "edited_timestamp", "attachments"] {
+            for key in ["content", "edited_timestamp", "attachments", "embeds"] {
                 if let Some(value) = patch.get(key) {
                     fields[key] = value.clone();
                 }
@@ -195,7 +296,7 @@ impl Store {
         Self::apply_patch(message, patch);
     }
 
-    fn apply_patch(message: &mut Message, patch: &serde_json::Value) {
+    pub fn apply_patch(message: &mut Message, patch: &serde_json::Value) {
         if let Some(content) = patch["content"].as_str() {
             message.content = content.into();
         }
@@ -207,6 +308,12 @@ impl Store {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
         {
             message.attachments = attachments;
+        }
+        if let Some(embeds) = patch
+            .get("embeds")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        {
+            message.embeds = embeds;
         }
     }
 
@@ -235,10 +342,10 @@ impl Store {
         channel: &str,
         fetched: Vec<Message>,
         started: u64,
-        older: bool,
+        page: Page,
     ) {
         let history = self.history(channel);
-        if !older {
+        if page == Page::Latest {
             history.messages.retain(|message| {
                 history
                     .revisions
@@ -271,7 +378,7 @@ impl Store {
                 None => history.messages.push(message),
             }
         }
-        Self::trim(history, older);
+        Self::trim(history, page == Page::Before);
     }
 
     fn trim(history: &mut History, keep_oldest: bool) {
@@ -298,7 +405,7 @@ impl Store {
             user: User {
                 id: "me".into(),
                 username: "you".into(),
-                global_name: None,
+                ..User::default()
             },
             ..Self::default()
         };
@@ -350,13 +457,37 @@ impl Store {
                 author: User {
                     id: name.into(),
                     username: name.into(),
-                    global_name: None,
+                    ..User::default()
                 },
                 content: text.into(),
                 timestamp: format!("2026-11-12T18:{:02}:00Z", 30 + index),
                 ..Message::default()
             });
         }
+        let sample: Message = serde_json::from_value(serde_json::json!({
+            "id":"5", "channel_id":"campfire", "author":{"id":"clover", "username":"clover"},
+            "timestamp":"2026-11-12T18:34:00Z", "content":"same person, a little less clutter. 🙂"
+        }))
+        .expect("sample message");
+        store.insert(sample.clone());
+        let mut next = sample.clone();
+        next.id = "6".into();
+        next.timestamp = "2026-11-12T18:35:00Z".into();
+        next.content = "images and bot cards live here too.".into();
+        next.attachments.push(Attachment {
+            filename: "sample.png".into(),
+            url: "https://cdn.discordapp.com/embed/avatars/0.png".into(),
+            width: Some(256),
+            height: Some(256),
+            content_type: Some("image/png".into()),
+            ..Attachment::default()
+        });
+        store.insert(next);
+        store.insert(serde_json::from_value(serde_json::json!({
+            "id":"7", "channel_id":"campfire", "author":{"id":"helper", "username":"little helper", "bot":true}, "timestamp":"2026-11-12T18:36:00Z",
+            "embeds":[{"title":"a native little card", "description":"bot embeds, fields and pictures, without a webview.", "url":"https://github.com/evenafterallisaid/larpcord", "color":5793266,
+            "fields":[{"name":"conversation history", "value":"scroll up to browse. jump down to catch up."}, {"name":"profiles", "value":"click a name or avatar to open a profile."}], "footer":{"text":"larpcord preview"}}]
+        })).expect("sample embed"));
         store.insert(Message { id: "20".into(), channel_id: "build-log".into(), author: store.user.clone(), content: "Native Rust + GPUI. This preview uses sample messages. Connect your account when you're ready.".into(), ..Message::default() });
         store
     }
@@ -383,7 +514,12 @@ mod tests {
         store.update(&serde_json::json!({"id":"1", "channel_id":"a", "content":"edited"}));
         store.delete("a", "2");
         store.insert(message(3, "a"));
-        store.merge_history("a", vec![message(1, "a"), message(2, "a")], started, false);
+        store.merge_history(
+            "a",
+            vec![message(1, "a"), message(2, "a")],
+            started,
+            Page::Latest,
+        );
         assert_eq!(store.channel_messages("a").len(), 2);
         assert_eq!(store.channel_messages("a")[0].content, "edited");
         assert_eq!(store.channel_messages("a")[1].id, "3");
@@ -411,7 +547,7 @@ mod tests {
         let started = store.revision();
         store.update(&serde_json::json!({"id":"1", "channel_id":"a", "content":"new"}));
         store.update(&serde_json::json!({"id":"1", "channel_id":"a", "edited_timestamp":"later"}));
-        store.merge_history("a", vec![message(1, "a")], started, false);
+        store.merge_history("a", vec![message(1, "a")], started, Page::Latest);
         assert_eq!(store.channel_messages("a")[0].content, "new");
         assert_eq!(
             store.channel_messages("a")[0].edited_timestamp.as_deref(),
@@ -424,6 +560,70 @@ mod tests {
     }
 
     #[test]
+    fn grouping_respects_identity_time_and_reply_boundaries() {
+        let a = Message {
+            author: User {
+                id: "1".into(),
+                username: "a".into(),
+                ..User::default()
+            },
+            timestamp: "2026-11-12T10:00:00Z".into(),
+            ..Message::default()
+        };
+        let mut b = a.clone();
+        b.timestamp = "2026-11-12T10:04:59Z".into();
+        assert!(b.continues(&a));
+        b.timestamp = "2026-11-12T10:05:01Z".into();
+        assert!(!b.continues(&a));
+        b.timestamp = a.timestamp.clone();
+        b.author.id = "2".into();
+        assert!(!b.continues(&a));
+        b.author = a.author.clone();
+        b.message_reference = Some(serde_json::json!({"message_id":"5"}));
+        assert!(!b.continues(&a));
+    }
+
+    #[test]
+    fn sliding_history_can_return_to_latest_without_gaps_or_lost_edits() {
+        let mut store = Store::default();
+        store.merge_history(
+            "a",
+            (400..500).map(|id| message(id, "a")).collect(),
+            0,
+            Page::Latest,
+        );
+        for start in [300, 200, 100, 0] {
+            store.merge_history(
+                "a",
+                (start..start + 100).map(|id| message(id, "a")).collect(),
+                store.revision(),
+                Page::Before,
+            );
+        }
+        assert_eq!(store.channel_messages("a").last().unwrap().id, "199");
+        for start in [200, 300, 400] {
+            let revision = store.revision();
+            store.update(&serde_json::json!({"id":start.to_string(), "channel_id":"a", "content":"edited", "embeds": [{"title":"new embed"}]}));
+            store.merge_history(
+                "a",
+                (start..start + 100).map(|id| message(id, "a")).collect(),
+                revision,
+                Page::After,
+            );
+            let edited = store
+                .channel_messages("a")
+                .iter()
+                .find(|m| m.id == start.to_string())
+                .unwrap();
+            assert_eq!(edited.content, "edited");
+            assert_eq!(edited.embeds[0].title.as_deref(), Some("new embed"));
+            assert_eq!(store.channel_messages("a").len(), MESSAGE_LIMIT);
+            assert!(store.channel_messages("a").windows(2).all(|p| p[1].id.parse::<u64>().unwrap() == p[0].id.parse::<u64>().unwrap()+1));
+        }
+        assert_eq!(store.channel_messages("a").last().unwrap().id, "499");
+    }
+
+    #[test]
     fn paging_back_moves_the_bounded_window_into_older_history() {
         let mut store = Store::default();
         for id in 100..300 {
@@ -433,7 +633,7 @@ mod tests {
             "a",
             (0..100).map(|id| message(id, "a")).collect(),
             store.revision(),
-            true,
+            Page::Before,
         );
         assert_eq!(store.channel_messages("a")[0].id, "0");
         assert_eq!(store.channel_messages("a").last().unwrap().id, "199");
