@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_channel::Sender;
 use futures_util::{SinkExt, StreamExt};
@@ -6,7 +6,7 @@ use reqwest::{Client, Method};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::{Mutex, mpsc, watch},
     task::JoinSet,
     time::{Instant, sleep, sleep_until},
 };
@@ -16,7 +16,7 @@ use tokio_tungstenite::{
 };
 use zeroize::Zeroizing;
 
-use crate::model::{Channel, Guild, Message, Page, User};
+use crate::model::{Channel, Guild, Member, Message, Page, Profile, User};
 
 pub enum Event {
     Auth {
@@ -38,7 +38,19 @@ pub enum Event {
     },
     Profile {
         id: String,
-        result: Result<User, String>,
+        guild: Option<String>,
+        request: u64,
+        result: Result<Box<Profile>, String>,
+    },
+    ProfileEffect {
+        id: String,
+        guild: Option<String>,
+        request: u64,
+        effect: Option<Box<crate::effects::Effect>>,
+    },
+    Interaction {
+        message: String,
+        result: Result<(), String>,
     },
     Error(String),
     SavedSession(Option<Zeroizing<String>>),
@@ -76,7 +88,23 @@ pub enum Command {
         title: String,
         body: String,
     },
-    Profile(String),
+    Profile {
+        id: String,
+        guild: Option<String>,
+        request: u64,
+        roles_needed: bool,
+    },
+    Typing(String),
+    ViewGuild(Option<String>),
+    Interact {
+        message: String,
+        channel: String,
+        guild: Option<String>,
+        application: String,
+        flags: u64,
+        data: Value,
+        nonce: String,
+    },
     Forget,
 }
 
@@ -84,11 +112,31 @@ pub struct Backend {
     tx: mpsc::Sender<Command>,
 }
 
+#[derive(Default)]
+struct EffectCache {
+    by_id: HashMap<String, crate::effects::Effect>,
+    attempted: Option<Instant>,
+}
+
+impl EffectCache {
+    fn remember(&mut self, id: String, effect: crate::effects::Effect) {
+        if self.by_id.len() >= 1024
+            && !self.by_id.contains_key(&id)
+            && let Some(old) = self.by_id.keys().next().cloned()
+        {
+            self.by_id.remove(&old);
+        }
+        self.by_id.insert(id, effect);
+    }
+}
+
 #[derive(Clone)]
 struct Api {
     client: Client,
     token: Arc<Zeroizing<String>>,
     gate: Arc<Mutex<Instant>>,
+    effects: Arc<Mutex<EffectCache>>,
+    session_id: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl Api {
@@ -107,7 +155,81 @@ impl Api {
             client,
             token: Arc::new(token),
             gate: Arc::new(Mutex::new(Instant::now())),
+            effects: Arc::new(Mutex::new(EffectCache::default())),
+            session_id: Arc::new(std::sync::Mutex::new(None)),
         })
+    }
+
+    async fn effect(&self, id: &str) -> Option<crate::effects::Effect> {
+        if !snowflake(id) {
+            return None;
+        }
+        let mut cache = self.effects.lock().await;
+        if let Some(effect) = cache.by_id.get(id) {
+            return Some(effect.clone());
+        }
+        if let Ok(value) = self
+            .request::<Value>(Method::GET, &format!("/collectibles-products/{id}"), None)
+            .await
+        {
+            for (id, effect) in crate::effects::catalog(&value) {
+                cache.remember(id, effect);
+            }
+        }
+        if let Some(effect) = cache.by_id.get(id) {
+            return Some(effect.clone());
+        }
+        if cache
+            .attempted
+            .is_none_or(|at| at.elapsed() > Duration::from_secs(300))
+        {
+            cache.attempted = Some(Instant::now());
+            if let Ok(value) = self
+                .request::<Value>(
+                    Method::GET,
+                    "/collectibles-categories?include_unpublished=false",
+                    None,
+                )
+                .await
+            {
+                for (id, effect) in crate::effects::catalog(&value) {
+                    cache.remember(id, effect);
+                }
+            }
+        }
+        cache.by_id.get(id).cloned()
+    }
+
+    async fn profile(&self, id: &str, guild: Option<&str>) -> Result<Profile, String> {
+        let mut path =
+            format!("/users/{id}/profile?with_mutual_guilds=false&with_mutual_friends_count=false");
+        if let Some(guild) = guild {
+            path.push_str(&format!("&guild_id={guild}"));
+        }
+        match self.request::<Profile>(Method::GET, &path, None).await {
+            Ok(profile) if profile.user.id == id => Ok(profile),
+            _ => {
+                let user: User = self
+                    .request(Method::GET, &format!("/users/{id}"), None)
+                    .await?;
+                let guild_member = match guild {
+                    Some(guild) => self
+                        .request::<Member>(
+                            Method::GET,
+                            &format!("/guilds/{guild}/members/{id}"),
+                            None,
+                        )
+                        .await
+                        .ok(),
+                    None => None,
+                };
+                Ok(Profile {
+                    user,
+                    guild_member,
+                    ..Profile::default()
+                })
+            }
+        }
     }
 
     async fn request<T: DeserializeOwned>(
@@ -124,6 +246,9 @@ impl Api {
                 .client
                 .request(method.clone(), format!("https://discord.com/api/v10{path}"))
                 .header("Authorization", self.token.as_str());
+            if path.ends_with("/typing") {
+                request = request.timeout(Duration::from_secs(3));
+            }
             if let Some(body) = &body {
                 request = request.json(body);
             }
@@ -180,6 +305,9 @@ impl Api {
                 }
                 bytes.extend_from_slice(&chunk);
             }
+            if bytes.is_empty() {
+                bytes.extend_from_slice(b"null");
+            }
             return serde_json::from_slice(&bytes)
                 .map_err(|_| "Discord returned an unexpected response.".into());
         }
@@ -215,6 +343,7 @@ impl Backend {
                 let mut auth = JoinSet::new();
                 let mut api = None::<Api>;
                 let mut generation = 0;
+                let (viewed_guild, viewed_rx) = watch::channel::<Option<String>>(None);
                 let saved_events = events.clone();
                 if load_saved_session { tokio::task::spawn_blocking(move || {
                     let token = credential().ok().and_then(|entry| entry.get_password().ok()).map(Zeroizing::new);
@@ -247,10 +376,12 @@ impl Backend {
                                     tasks.abort_all();
                                     requests.abort_all();
                                     generation = new_generation;
+                                    let _ = viewed_guild.send(None);
                                     match Api::new(token) {
                                         Ok(client) => {
                                             api = Some(client.clone());
                                             let events = events.clone();
+                                            let viewed = viewed_rx.clone();
                                             tasks.spawn(async move {
                                                 // validate before saving a mistyped or expired credential.
                                                 if let Err(error) = client.request::<Value>(Method::GET, "/users/@me", None).await {
@@ -267,13 +398,13 @@ impl Backend {
                                                 if !matches!(save, Ok(Ok(()))) {
                                                     emit(&events, generation, Event::Error("Connected, but the credential store could not be updated. This session will remain in memory.".into())).await;
                                                 }
-                                                gateway(client, events, generation).await;
+                                                gateway(client, events, generation, viewed).await;
                                             });
                                         }
                                         Err(error) => emit(&events, generation, Event::Error(error)).await,
                                     }
                                 }
-                                Command::Disconnect => { tasks.abort_all(); requests.abort_all(); auth.abort_all(); api = None; }
+                                Command::Disconnect => { tasks.abort_all(); requests.abort_all(); auth.abort_all(); api = None; let _ = viewed_guild.send(None); }
                                 Command::Forget => {
                                     let events = events.clone();
                                     tokio::task::spawn_blocking(move || {
@@ -284,13 +415,24 @@ impl Backend {
                                         }
                                     });
                                 }
-                                Command::Profile(id) => {
+                                Command::Profile {id, guild, request, roles_needed} => {
                                     let Some(client) = api.clone() else { continue; };
-                                    if !snowflake(&id) { continue; }
+                                    if !snowflake(&id) || guild.as_ref().is_some_and(|id| !snowflake(id)) { continue; }
                                     let events = events.clone();
                                     requests.spawn(async move {
-                                        let result = client.request(Method::GET, &format!("/users/{id}"), None).await;
-                                        emit(&events, generation, Event::Profile {id, result}).await;
+                                        let mut result = client.profile(&id, guild.as_deref()).await;
+                                        if let Ok(profile) = &mut result && roles_needed && let Some(guild) = &guild {
+                                            profile.roles = client.request(Method::GET,&format!("/guilds/{guild}/roles"),None).await.unwrap_or_default();
+                                        }
+                                        let effect_ref = result.as_ref().ok().and_then(|p| p.effect_ref().cloned());
+                                        emit(&events, generation, Event::Profile {id:id.clone(), guild:guild.clone(), request, result:result.map(Box::new)}).await;
+                                        if let Some(reference) = effect_ref {
+                                            let effect = if let Some(url)=reference.sku_id.as_deref().and_then(crate::media::collectible) {
+                                                Some(crate::effects::Effect {static_frame_src:Some(url),..crate::effects::Effect::default()})
+                                            } else {client.effect(&reference.id).await};
+                                            let effect=effect.map(Box::new);
+                                            emit(&events,generation,Event::ProfileEffect{id,guild,request,effect}).await;
+                                        }
                                     });
                                 }
                                 Command::History { channel, started, request, page, cursor } => {
@@ -305,6 +447,25 @@ impl Backend {
                                         let result = client.request(Method::GET, &path, None).await;
                                         emit(&events, generation, Event::History { channel, started, request, page, result }).await;
                                     });
+                                }
+                                Command::Interact {message,channel,guild,application,flags,data,nonce} => {
+                                    let Some(client) = api.clone() else {continue;};
+                                    if ![&message,&channel,&application].into_iter().all(|id| snowflake(id)) || guild.as_ref().is_some_and(|id| !snowflake(id)) {continue;}
+                                    let events=events.clone();
+                                    requests.spawn(async move {
+                                        let session = client.session_id.lock().ok().and_then(|id| id.clone());
+                                        let result = match session {
+                                            Some(session) => client.request::<()>(Method::POST,"/interactions",Some(json!({"type":3,"nonce":nonce,"application_id":application,"guild_id":guild,"channel_id":channel,"message_id":message,"message_flags":flags,"session_id":session,"data":data}))).await,
+                                            None => Err("Wait for the connection before using this control.".into()),
+                                        };
+                                        emit(&events,generation,Event::Interaction {message,result}).await;
+                                    });
+                                }
+                                Command::ViewGuild(guild) => {let _ = viewed_guild.send(guild.filter(|id| snowflake(id)));}
+                                Command::Typing(channel) => {
+                                    let Some(client) = api.clone() else { continue; };
+                                    if !snowflake(&channel) { continue; }
+                                    requests.spawn(async move {let _ = client.request::<()>(Method::POST,&format!("/channels/{channel}/typing"),None).await;});
                                 }
                                 Command::Send { channel, content, nonce } => {
                                     let Some(client) = api.clone() else { continue; };
@@ -345,6 +506,7 @@ fn credential() -> keyring::Result<keyring::Entry> {
 
 #[derive(Default)]
 struct Session {
+    subscribed_guild: Option<String>,
     id: Option<String>,
     sequence: Option<u64>,
     resume_url: Option<String>,
@@ -375,7 +537,12 @@ fn resume_url(url: Option<&str>) -> String {
     format!("{base}?v=10&encoding=json")
 }
 
-async fn gateway(api: Api, events: Sender<Envelope>, generation: u64) {
+async fn gateway(
+    api: Api,
+    events: Sender<Envelope>,
+    generation: u64,
+    mut viewed: watch::Receiver<Option<String>>,
+) {
     let mut session = Session::default();
     let mut attempts = 0u32;
     loop {
@@ -393,7 +560,7 @@ async fn gateway(api: Api, events: Sender<Envelope>, generation: u64) {
         )
         .await;
         let started = Instant::now();
-        let result = connection(&api, &events, generation, &mut session).await;
+        let result = connection(&api, &events, generation, &mut session, &mut viewed).await;
         if started.elapsed() > Duration::from_secs(60) {
             attempts = 0;
         }
@@ -434,6 +601,7 @@ async fn connection(
     events: &Sender<Envelope>,
     generation: u64,
     session: &mut Session,
+    viewed: &mut watch::Receiver<Option<String>>,
 ) -> Result<(), ConnectionError> {
     let config = WebSocketConfig::default()
         .max_message_size(Some(16 * 1024 * 1024))
@@ -449,15 +617,16 @@ async fn connection(
     .await
     .map_err(|_| ConnectionError::Transient)?
     .map_err(|_| ConnectionError::Transient)?;
-    drive_connection(socket, api, events, generation, session).await
+    drive_watched_connection(socket, api, events, generation, session, viewed).await
 }
 
-async fn drive_connection<S>(
+async fn drive_watched_connection<S>(
     mut socket: tokio_tungstenite::WebSocketStream<S>,
     api: &Api,
     events: &Sender<Envelope>,
     generation: u64,
     session: &mut Session,
+    viewed: &mut watch::Receiver<Option<String>>,
 ) -> Result<(), ConnectionError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -485,8 +654,19 @@ where
         .await?;
     let mut deadline = Instant::now() + Duration::from_millis(rand::random_range(0..interval));
     let mut acknowledged = true;
+    let mut ready = false;
+    let mut subscribed = None::<String>;
     loop {
         tokio::select! {
+            changed = viewed.changed(), if ready => {
+                if changed.is_err() {return Err(ConnectionError::Transient);}
+                let current = viewed.borrow_and_update().clone();
+                if let Some(payload) = guild_subscription_change(subscribed.as_deref(),current.as_deref()) {
+                    socket.send(Frame::Text(payload.to_string().into())).await?;
+                }
+                session.subscribed_guild = current.clone();
+                subscribed = current;
+            }
             _ = sleep_until(deadline) => {
                 if !acknowledged { return Err(ConnectionError::Transient); }
                 socket.send(Frame::Text(json!({"op":1,"d":session.sequence}).to_string().into())).await?;
@@ -517,10 +697,19 @@ where
                         if kind == "READY" {
                             session.id = data["session_id"].as_str().map(str::to_string);
                             session.resume_url = data["resume_gateway_url"].as_str().map(str::to_string);
+                            if let Ok(mut id) = api.session_id.lock() {*id = session.id.clone();}
                             emit(events, generation, Event::Status("Connected".into())).await;
                         }
                         if kind == "RESUMED" { emit(events, generation, Event::Status("Connected".into())).await; }
-                        if matches!(kind.as_str(), "READY" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE") {
+                        if kind == "READY" || kind == "RESUMED" {
+                            ready = true;
+                            subscribed = if kind == "RESUMED" {session.subscribed_guild.clone()}else{None};
+                            let current = viewed.borrow_and_update().clone();
+                            if let Some(payload) = guild_subscription_change(subscribed.as_deref(),current.as_deref()) {socket.send(Frame::Text(payload.to_string().into())).await?;}
+                            session.subscribed_guild = current.clone();
+                            subscribed = current;
+                        }
+                        if matches!(kind.as_str(), "READY" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE" | "TYPING_START" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE" | "GUILD_MEMBER_UPDATE") {
                             emit(events, generation, Event::Dispatch(kind, data)).await;
                         }
                     }
@@ -539,15 +728,51 @@ where
     }
 }
 
+fn guild_subscription_change(previous: Option<&str>, current: Option<&str>) -> Option<Value> {
+    if previous == current {
+        return None;
+    }
+    let mut subscriptions = serde_json::Map::new();
+    if let Some(previous) = previous.filter(|id| snowflake(id)) {
+        subscriptions.insert(
+            previous.into(),
+            json!({"typing":false,"activities":false,"threads":false,"channels":{}}),
+        );
+    }
+    if let Some(current) = current.filter(|id| snowflake(id)) {
+        subscriptions.insert(
+            current.into(),
+            json!({"typing":true,"activities":false,"threads":false,"channels":{}}),
+        );
+    }
+    (!subscriptions.is_empty()).then(|| json!({"op":37,"d":{"subscriptions":subscriptions}}))
+}
+
+#[cfg(test)]
+async fn drive_connection<S>(
+    socket: tokio_tungstenite::WebSocketStream<S>,
+    api: &Api,
+    events: &Sender<Envelope>,
+    generation: u64,
+    session: &mut Session,
+) -> Result<(), ConnectionError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (_sender, mut viewed) = watch::channel(None);
+    drive_watched_connection(socket, api, events, generation, session, &mut viewed).await
+}
+
 pub fn guild_from_ready(value: &Value) -> Option<Guild> {
-    Some(Guild {
-        id: value["id"].as_str()?.into(),
-        name: value["name"]
-            .as_str()
-            .or_else(|| value["properties"]["name"].as_str())
-            .unwrap_or("Server")
-            .into(),
-    })
+    let mut properties = value
+        .get("properties")
+        .cloned()
+        .unwrap_or_else(|| value.clone());
+    properties["id"] = value.get("id")?.clone();
+    if let Some(roles) = value.get("roles") {
+        properties["roles"] = roles.clone();
+    }
+    serde_json::from_value(properties).ok()
 }
 
 pub fn guild_channels(value: &Value) -> Vec<Channel> {
@@ -566,6 +791,24 @@ pub fn guild_channels(value: &Value) -> Vec<Channel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn changing_guild_subscriptions_disables_the_previous_guild() {
+        let payload = guild_subscription_change(Some("1"), Some("2")).unwrap();
+        assert_eq!(payload["op"], 37);
+        assert_eq!(payload["d"]["subscriptions"]["1"]["typing"], false);
+        assert_eq!(payload["d"]["subscriptions"]["2"]["typing"], true);
+        assert!(guild_subscription_change(None, None).is_none());
+        assert!(guild_subscription_change(None, Some("not a snowflake")).is_none());
+    }
+
+    #[test]
+    fn ready_guild_properties_keep_artwork_and_roles() {
+        let guild=guild_from_ready(&json!({"id":"123","properties":{"name":"guild","icon":"abc","banner":"def"},"roles":[{"id":"7","name":"mod","position":3,"color":4}]})).unwrap();
+        assert_eq!(guild.icon.as_deref(), Some("abc"));
+        assert_eq!(guild.banner.as_deref(), Some("def"));
+        assert_eq!(guild.roles[0].name, "mod");
+    }
+
     #[test]
     fn resume_endpoint_cannot_redirect_credentials_to_another_host() {
         for url in [
@@ -642,6 +885,76 @@ mod tests {
             );
         }
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn viewed_guild_typing_is_subscribed_after_ready_and_changes_live() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (viewed_tx, mut viewed_rx) = watch::channel(Some("1".to_string()));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Frame::Text(
+                json!({"op":10,"d":{"heartbeat_interval":1000}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            let identify: Value =
+                serde_json::from_slice(&ws.next().await.unwrap().unwrap().into_data()).unwrap();
+            assert_eq!(identify["op"], 2);
+            ws.send(Frame::Text(
+                json!({"op":0,"s":1,"t":"READY","d":{"session_id":"local-test"}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            let mut changes = 0;
+            while let Some(Ok(frame)) = ws.next().await {
+                let value: Value = serde_json::from_slice(&frame.into_data()).unwrap();
+                if value["op"] == 1 {
+                    ws.send(Frame::Text(json!({"op":11}).to_string().into()))
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                if value["op"] != 37 {
+                    continue;
+                }
+                if changes == 0 {
+                    assert_eq!(value["d"]["subscriptions"]["1"]["typing"], true);
+                    viewed_tx.send(Some("2".into())).unwrap();
+                    changes += 1;
+                } else {
+                    assert_eq!(value["d"]["subscriptions"]["1"]["typing"], false);
+                    assert_eq!(value["d"]["subscriptions"]["2"]["typing"], true);
+                    break;
+                }
+            }
+            assert_eq!(changes, 1);
+        });
+        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let api = Api::new(Zeroizing::new("local-test-not-a-credential".into())).unwrap();
+        let (events, _) = async_channel::bounded(8);
+        let mut session = Session::default();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_watched_connection(socket, &api, &events, 1, &mut session, &mut viewed_rx),
+        )
+        .await;
+        assert!(result.is_ok());
+        server.await.unwrap();
+        assert_eq!(session.subscribed_guild.as_deref(), Some("2"));
+        assert_eq!(
+            api.session_id.lock().unwrap().as_deref(),
+            Some("local-test")
+        );
     }
 
     #[tokio::test]

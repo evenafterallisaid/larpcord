@@ -1,6 +1,6 @@
 [package]
 name = "larpcord"
-version = "0.2.0-dev.2"
+version = "0.2.0-dev.3"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -9,6 +9,7 @@ repository = "https://github.com/evenafterallisaid/larpcord"
 
 [dependencies]
 base64 = "0.22"
+pulldown-cmark = { version = "0.13", default-features = false }
 qrcode = { version = "0.14", default-features = false }
 rsa = "0.9"
 sha2 = "0.10"
