@@ -5,3 +5,5 @@ The text input in `src/input.rs` is adapted from the [GPUI 0.2.2 input example](
 Larpcord's implementation is independent of Serein, oxidecord and zcord. Their public repositories were consulted for ecosystem research. Their source is not included in this project.
 
 Third party dependencies retain their respective licenses, recorded in the package metadata and Cargo.lock.
+
+pulldown-cmark 0.13.6 parses markdown. it is copyright 2015 google inc., licensed under mit; the full notice is included in `licenses/PULLDOWN-CMARK-MIT.txt`.

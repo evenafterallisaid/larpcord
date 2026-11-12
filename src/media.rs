@@ -74,6 +74,16 @@ impl Media {
     pub fn new() -> (Self, async_channel::Receiver<Loaded>) {
         let (tx, requests) = async_channel::bounded::<String>(32);
         let (results, rx) = async_channel::bounded(8);
+        // headless checks never download public media.
+        if cfg!(test) {
+            return (
+                Self {
+                    tx,
+                    cache: RefCell::new(Cache::default()),
+                },
+                rx,
+            );
+        }
         std::thread::Builder::new()
             .name("larpcord-media".into())
             .spawn(move || {
@@ -229,6 +239,47 @@ fn decode(bytes: Vec<u8>) -> Option<Arc<RenderImage>> {
         pixel.swap(0, 2);
     }
     Some(Arc::new(RenderImage::new(vec![Frame::new(pixels)])))
+}
+
+fn asset_hash(hash: &str) -> bool {
+    !hash.is_empty()
+        && hash.len() <= 128
+        && hash.bytes().all(|b| b.is_ascii_hexdigit() || b == b'_')
+}
+fn asset_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())
+}
+pub fn guild_icon(id: &str, hash: Option<&str>) -> Option<String> {
+    let hash = hash?;
+    (asset_id(id) && asset_hash(hash))
+        .then(|| format!("https://cdn.discordapp.com/icons/{id}/{hash}.png?size=128"))
+}
+pub fn banner(id: &str, guild: Option<&str>, hash: &str) -> Option<String> {
+    if !asset_id(id) || !asset_hash(hash) {
+        return None;
+    }
+    let path = match guild {
+        Some(guild) if asset_id(guild) => format!("guilds/{guild}/users/{id}/banners"),
+        Some(_) => return None,
+        None => format!("banners/{id}"),
+    };
+    Some(format!(
+        "https://cdn.discordapp.com/{path}/{hash}.png?size=1024"
+    ))
+}
+pub fn collectible(sku: &str) -> Option<String> {
+    asset_id(sku)
+        .then(|| format!("https://cdn.discordapp.com/media/v1/collectibles-shop/{sku}/static"))
+}
+pub fn decoration(asset: &str) -> Option<String> {
+    asset_hash(asset).then(|| format!("https://cdn.discordapp.com/avatar-decoration-presets/{asset}.png?size=256&passthrough=false"))
+}
+pub fn member_avatar(guild: &str, user: &str, hash: &str) -> Option<String> {
+    (asset_id(guild) && asset_id(user) && asset_hash(hash)).then(|| {
+        format!(
+            "https://cdn.discordapp.com/guilds/{guild}/users/{user}/avatars/{hash}.png?size=256"
+        )
+    })
 }
 
 #[cfg(test)]

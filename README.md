@@ -5,7 +5,7 @@
 
 this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the first preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.1.0-preview.2).
 
-**0.2.0-dev.2 is a development preview.** this branch contains the next login and layout milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
+**0.2.0-dev.3 is a development preview.** this branch contains the next login and layout milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
 
 ## what works in this milestone
 
@@ -13,7 +13,10 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 - native discord qr login with mobile confirmation; no manual token required for that flow
 - server and channel navigation, direct messages and conversation filtering
 - automatically paged history in both directions, jump to latest, grouped messages, sending, live edits and deletions
-- image attachments, static custom emoji, bot embed cards and basic on-demand user profiles
+- image attachments, static custom emoji, markdown, bot embeds and components v2 layouts
+- bot buttons and string selectors through discord interactions, plus explicit link controls
+- on-demand profiles with banners, biographies, pronouns, server identity, decorations, reduced-motion effects and role chips
+- server icons and banners, a monochrome home logo and typing indicators
 - floating settings with mouse, scroll and keyboard isolation
 - gateway heartbeats, acknowledgement checks, session resume and reconnection backoff
 - desktop notifications for direct messages, mentions and incoming call signals
@@ -91,6 +94,10 @@ the chosen [glass mascot and wordmark](https://chatgpt.com/s/m_6af5e32be8808191b
 
 ## current rendering limits
 
-custom emoji and avatars are static images. embed titles, descriptions, fields, images and footers render natively; markdown styling, interactive bot components, stickers and video players are not implemented yet. profiles show basic account information, not full guild roles or extended biographies. the selected older history can retain up to 200 additional live messages while you browse; returning to latest merges that tail and keeps the normal bounded window.
+custom emoji, avatars, banners, decorations and profile effects currently use static or reduced-motion artwork. embed titles, descriptions, fields, images and footers render natively. components v2 containers, sections, text displays, thumbnails, galleries, files and separators render natively too. buttons and string selectors can submit interactions; entity selectors, bot modal forms, premium purchase controls, stickers and video players are still pending. extended profiles load only when opened, use the server identity where provided, and are cached for five minutes with at most 32 entries. the selected older history can retain up to 200 additional live messages while you browse; returning to latest merges that tail and keeps the normal bounded window.
 
 message and cdn fields follow discord's [message schema](https://docs.discord.com/developers/resources/message), [user schema](https://docs.discord.com/developers/resources/user) and [image formatting reference](https://docs.discord.com/developers/reference#image-formatting).
+
+typing starts are rate limited to one signal every eight seconds while actively editing. incoming indicators expire after ten seconds, stop when a message arrives, and are scoped to the selected conversation. the gateway subscribes to typing in the viewed server and clears the previous subscription. no typing timer runs while idle. profile and component rendering live in `src/ui/` so the main conversation view can stay focused on navigation and state.
+
+current user-client protocol details and their verification limits are in [protocol notes](docs/protocol-notes.md).

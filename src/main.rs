@@ -1,7 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod auth;
+mod components;
 mod content;
+mod effects;
 mod input;
 mod media;
 mod model;
