@@ -59,7 +59,8 @@ jobs:
           mkdir -p dist/larpcord
           cp target/release/larpcord LICENSE THIRD_PARTY_NOTICES.md README.md dist/larpcord/
           cp -r licenses dist/larpcord/
-          cp packaging/linux/larpcord.desktop assets/icon.svg dist/larpcord/
+          cp packaging/linux/larpcord.desktop dist/larpcord/
+          cp assets/icon.png dist/larpcord/larpcord.png
           tar -C dist -czf dist/${{ matrix.artifact }}.tar.gz larpcord
       - uses: actions/upload-artifact@v4
         with:
