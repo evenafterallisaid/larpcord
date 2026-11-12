@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod auth;
 mod input;
 mod model;
 mod network;
@@ -14,12 +15,12 @@ struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         Ok(match path {
-            "mark.svg" => Some(Cow::Borrowed(include_bytes!("../assets/mark.svg"))),
+            "mascot.png" => Some(Cow::Borrowed(include_bytes!("../assets/mascot.png"))),
             _ => None,
         })
     }
     fn list(&self, _: &str) -> anyhow::Result<Vec<SharedString>> {
-        Ok(vec!["mark.svg".into()])
+        Ok(vec!["mascot.png".into()])
     }
 }
 

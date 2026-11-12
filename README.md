@@ -1,15 +1,16 @@
-<p align="center"><img src="assets/icon.svg" width="104" alt="larpcord's mint cat mark"></p>
+<p align="center"><img src="assets/icon.png" width="104" alt="larpcord's glass half-mask mascot"></p>
 <h1 align="center">larpcord</h1>
 <p align="center">a little room to breathe.</p>
 <p align="center">a native discord client, written in rust with gpui.</p>
 
-this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters.
+this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the first preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.1.0-preview.2).
 
-**0.1.0 is a development preview.** it opens into a clearly labelled sample workspace. connecting an account enables the real rest and gateway implementation. live account behavior still needs testing. existing kawaicord installs and sessions are separate.
+**0.2.0-dev.1 is a development preview.** this branch contains the next login and layout milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account behavior still needs testing. existing kawaicord installs and sessions are separate.
 
 ## what works in this milestone
 
-- native gpui window, custom larpcord branding, macos traffic lights and dark first paint
+- native gpui window, discord-style layout, the chosen glass branding, macos traffic lights and dark first paint
+- native discord qr login with mobile confirmation; no manual token required for that flow
 - server and channel navigation, direct messages and conversation filtering
 - message history, earlier pages, sending, live edits and deletions
 - gateway heartbeats, acknowledgement checks, session resume and reconnection backoff
@@ -17,7 +18,7 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 - optional saved login in keychain, credential manager or secret service
 - per-conversation drafts, compact spacing, notification privacy and background connection settings
 
-voice and video calls, rich media playback, qr login, quest integration and javascript plugin compatibility are future work. incoming call notifications are informational until native voice is implemented. this preview connects using a session token supplied explicitly in account settings. the ui never reads a token from another application.
+voice and video calls, rich media playback, email/password login, quest integration and javascript plugin compatibility are future work. incoming call notifications are informational until native voice is implemented. this milestone adds native qr login through discord mobile, with manual session entry retained under advanced sign-in. the ui never reads a token from another application. the live qr handshake passed on 2026-11-12. complete mobile confirmation still needs a live test.
 
 ## run it
 
@@ -25,7 +26,7 @@ voice and video calls, rich media playback, qr login, quest integration and java
 cargo run --release --locked
 ```
 
-the first launch is an offline sample workspace. open settings using the gear or `cmd+,` on macos and `ctrl+,` elsewhere. account settings contain the connection field. saved sessions reconnect automatically on later launches. disconnect removes the saved credential.
+the login screen generates a qr code through discord's remote authentication service. scan it using the discord mobile app and confirm on your phone. choose explore the preview for the offline sample workspace. manual session entry is available through advanced sign-in. saved sessions reconnect automatically on later launches. disconnect removes the saved credential.
 
 `cmd+k` or `ctrl+k` focuses conversation search. enter sends a message. `cmd+q` or `ctrl+q` quits. closing the window minimizes it by default and keeps the connection alive. change that in preferences.
 
@@ -63,6 +64,7 @@ macos packaging uses `sh packaging/bundle-macos.sh`. it creates `dist/Larpcord.a
 | file | responsibility |
 | --- | --- |
 | `src/ui.rs` | native views, navigation, drafts and settings |
+| `src/auth.rs` | native rsa key exchange, qr generation and login ticket handling |
 | `src/input.rs` | unicode text input and masked session entry |
 | `src/model.rs` | typed data, bounded cache and concurrent history merging |
 | `src/network.rs` | rest requests, gateway lifecycle and credential access |
@@ -73,3 +75,7 @@ macos packaging uses `sh packaging/bundle-macos.sh`. it creates `dist/Larpcord.a
 [gpui](https://gpui.rs/) provides rendering and native window integration. the input control adapts its apache-licensed example. [serein](https://github.com/ViceVerse-cz/Serein), [oxidecord](https://github.com/s1099/oxidecord) and [zcord](https://github.com/torikushiii/zcord) were useful ecosystem references. the larpcord implementation is independent. dependency and source attribution is in [third party notices](THIRD_PARTY_NOTICES.md).
 
 mit, with the adapted text input covered by apache-2.0. see [license](LICENSE) and [third party notices](THIRD_PARTY_NOTICES.md).
+
+## branding
+
+the chosen [glass mascot and wordmark](https://chatgpt.com/s/m_6af5e32be8808191b002af94fa3ea8e0) are preserved in `assets/brand-source.png`. app icons use a derived mascot-only treatment. source and preparation details are in [assets](assets/README.md).

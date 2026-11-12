@@ -8,19 +8,20 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::{
+    auth::{AuthEvent, QrImage},
     input::{Changed, Submit, TextInput},
     model::{Channel, Message, Store},
     network::{Backend, Command, Envelope, Event, guild_channels, guild_from_ready},
     settings::Settings,
 };
 
-const BG: u32 = 0x15191f;
-const PANEL: u32 = 0x101419;
-const SURFACE: u32 = 0x1e242c;
-const LINE: u32 = 0x2a313b;
-const TEXT: u32 = 0xe3e7ee;
-const MUTED: u32 = 0x8f99a8;
-const MINT: u32 = 0xb8ebd0;
+const BG: u32 = 0x313338;
+const PANEL: u32 = 0x1e1f22;
+const SURFACE: u32 = 0x383a40;
+const LINE: u32 = 0x232428;
+const TEXT: u32 = 0xf2f3f5;
+const MUTED: u32 = 0xb5bac1;
+const ACCENT: u32 = 0xc9cdfb;
 const LILAC: u32 = 0xc1b5ed;
 
 actions!(larpcord, [Quit, OpenSettings, ClosePanel, FocusSearch]);
@@ -44,7 +45,18 @@ pub struct Larpcord {
     loading: HashSet<String>,
     drafts: HashMap<String, String>,
     sending: Option<(String, String, String)>,
+    login_open: bool,
+    qr_attempt: u64,
+    qr: QrState,
     _subscriptions: Vec<Subscription>,
+}
+
+enum QrState {
+    Idle,
+    Generating,
+    Ready(std::sync::Arc<QrImage>),
+    Confirm,
+    Failed(String),
 }
 
 fn column() -> Div {
@@ -66,10 +78,10 @@ fn badge(text: &'static str) -> Div {
         .rounded_md()
         .bg(rgb(SURFACE))
         .text_size(px(10.))
-        .text_color(rgb(MINT))
+        .text_color(rgb(ACCENT))
         .child(text)
 }
-fn button(id: &'static str, text: &'static str) -> Stateful<Div> {
+fn button(id: impl Into<ElementId>, text: &'static str) -> Stateful<Div> {
     row()
         .id(id)
         .gap_2()
@@ -140,6 +152,9 @@ impl Larpcord {
             loading: HashSet::new(),
             drafts: HashMap::new(),
             sending: None,
+            login_open: false,
+            qr_attempt: 0,
+            qr: QrState::Idle,
             _subscriptions: subscriptions,
         }
     }
@@ -166,6 +181,25 @@ impl Larpcord {
         }
         self.token.update(cx, |input, cx| input.set("", cx));
         self.connect(token, cx);
+    }
+
+    fn open_login(&mut self, cx: &mut Context<Self>) {
+        self.login_open = true;
+        self.settings_tab = None;
+        self.qr_attempt += 1;
+        self.qr = QrState::Generating;
+        self.command(Command::QrStart {
+            attempt: self.qr_attempt,
+        });
+        cx.notify();
+    }
+
+    fn close_login(&mut self, cx: &mut Context<Self>) {
+        self.login_open = false;
+        self.qr_attempt += 1;
+        self.command(Command::QrCancel);
+        self.qr = QrState::Idle;
+        cx.notify();
     }
 
     fn connect(&mut self, token: Zeroizing<String>, cx: &mut Context<Self>) {
@@ -340,10 +374,12 @@ impl Larpcord {
 
     fn receive(&mut self, envelope: Envelope, window: &mut Window, cx: &mut Context<Self>) {
         if let Event::SavedSession(token) = envelope.event {
-            if self.generation == 0
-                && let Some(token) = token
-            {
-                self.connect(token, cx);
+            if self.generation == 0 {
+                if let Some(token) = token {
+                    self.connect(token, cx);
+                } else {
+                    self.open_login(cx);
+                }
             }
             return;
         }
@@ -351,10 +387,27 @@ impl Larpcord {
             return;
         }
         match envelope.event {
+            Event::Auth { attempt, event } => {
+                if attempt != self.qr_attempt || !self.login_open {
+                    return;
+                }
+                match event {
+                    AuthEvent::Code(code) => self.qr = QrState::Ready(code),
+                    AuthEvent::Confirm => self.qr = QrState::Confirm,
+                    AuthEvent::Failed(error) => self.qr = QrState::Failed(error),
+                    AuthEvent::Token(token) => {
+                        self.qr = QrState::Idle;
+                        self.connect(token, cx);
+                    }
+                }
+            }
             Event::Status(status) => {
                 self.status = status;
             }
             Event::Error(error) => {
+                if self.login_open {
+                    self.qr = QrState::Failed(error.clone());
+                }
                 self.error = Some(error);
                 self.loading.clear();
             }
@@ -398,7 +451,19 @@ impl Larpcord {
                     }
                 }
             }
-            Event::Dispatch(kind, data) => self.dispatch(&kind, data, window, cx),
+            Event::Dispatch(kind, data) => {
+                let selected = data["channel_id"].as_str() == self.selected_channel.as_deref();
+                let already_unread = data["channel_id"]
+                    .as_str()
+                    .is_some_and(|id| self.store.unread.contains(id));
+                let message_event = kind.starts_with("MESSAGE_");
+                let redraw =
+                    !message_event || selected || (kind == "MESSAGE_CREATE" && !already_unread);
+                self.dispatch(&kind, data, window, cx);
+                if !redraw {
+                    return;
+                }
+            }
             Event::SavedSession(_) => {}
         }
         cx.notify();
@@ -407,6 +472,8 @@ impl Larpcord {
     fn dispatch(&mut self, kind: &str, data: Value, window: &mut Window, cx: &mut Context<Self>) {
         match kind {
             "READY" => {
+                self.login_open = false;
+                self.qr = QrState::Idle;
                 if let Ok(user) = serde_json::from_value(data["user"].clone()) {
                     self.store.user = user;
                 }
@@ -495,15 +562,22 @@ impl Larpcord {
                 }
             }
             "MESSAGE_UPDATE" => {
+                let selected = data["channel_id"].as_str() == self.selected_channel.as_deref();
                 self.store.update(&data);
-                self.refresh_messages();
+                if selected {
+                    self.refresh_messages();
+                }
             }
             "MESSAGE_DELETE" => {
                 if let (Some(channel), Some(id)) =
                     (data["channel_id"].as_str(), data["id"].as_str())
                 {
-                    self.store.delete(channel, id);
-                    self.refresh_messages();
+                    if self.store.has_history(channel) {
+                        self.store.delete(channel, id);
+                    }
+                    if self.selected_channel.as_deref() == Some(channel) {
+                        self.refresh_messages();
+                    }
                 }
             }
             "MESSAGE_DELETE_BULK" => {
@@ -514,9 +588,13 @@ impl Larpcord {
                         .flatten()
                         .filter_map(Value::as_str)
                     {
-                        self.store.delete(channel, id);
+                        if self.store.has_history(channel) {
+                            self.store.delete(channel, id);
+                        }
                     }
-                    self.refresh_messages();
+                    if self.selected_channel.as_deref() == Some(channel) {
+                        self.refresh_messages();
+                    }
                 }
             }
             "CALL_CREATE" => {
@@ -548,13 +626,11 @@ impl Larpcord {
 
     fn titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         row()
-            .h(px(42.))
+            .h(px(32.))
             .flex_shrink_0()
-            .px_4()
+            .px_3()
             .gap_2()
             .bg(rgb(PANEL))
-            .border_b_1()
-            .border_color(rgb(LINE))
             .when(cfg!(target_os = "macos"), |s| s.pl(px(86.)))
             .on_mouse_down(MouseButton::Left, |event, window, _| {
                 if event.click_count == 2 {
@@ -563,31 +639,27 @@ impl Larpcord {
                     window.start_window_move();
                 }
             })
-            .child(svg().path("mark.svg").size(px(19.)).text_color(rgb(MINT)))
+            .child(img("mascot.png").size(px(20.)))
             .child(
                 div()
-                    .text_size(px(13.))
+                    .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("larpcord"),
-            )
-            .child(
-                div()
-                    .ml_2()
                     .text_color(rgb(MUTED))
-                    .text_size(px(11.))
-                    .child("a little place to hang out"),
+                    .child("Larpcord"),
             )
             .child(div().flex_1())
-            .child(badge("NATIVE PREVIEW"))
             .when(!cfg!(target_os = "macos"), |s| {
                 s.children([
                     button("minimize", "−")
+                        .py_0()
                         .on_click(|_, window, _| window.minimize_window())
                         .into_any_element(),
                     button("maximize", "□")
+                        .py_0()
                         .on_click(|_, window, _| window.zoom_window())
                         .into_any_element(),
                     button("close-window", "×")
+                        .py_0()
                         .on_click(cx.listener(|this, _, window, cx| {
                             if this.settings.keep_connected {
                                 window.minimize_window();
@@ -615,17 +687,29 @@ impl Larpcord {
                     .id("home")
                     .size(px(44.))
                     .justify_center()
-                    .rounded_xl()
+                    .rounded_full()
                     .bg(rgb(if self.selected_guild.is_none() {
-                        0x354b43
+                        0x5865f2
                     } else {
                         SURFACE
                     }))
                     .cursor_pointer()
-                    .child(svg().path("mark.svg").size(px(25.)).text_color(rgb(MINT)))
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .child(img("mascot.png").size(px(25.)).text_color(rgb(ACCENT)))
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.selected_guild = None;
                         this.search.update(cx, |input, cx| input.set("", cx));
+                        let channel = this
+                            .store
+                            .channels
+                            .values()
+                            .find(|c| c.guild_id.is_none() && c.readable())
+                            .map(|c| c.id.clone());
+                        if let Some(channel) = channel {
+                            this.choose_channel(channel, window, cx);
+                        } else {
+                            this.selected_channel = None;
+                            this.refresh_messages();
+                        }
                         cx.notify();
                     })),
             )
@@ -654,7 +738,7 @@ impl Larpcord {
                             .justify_center()
                             .rounded_xl()
                             .cursor_pointer()
-                            .bg(rgb(if selected { 0x424052 } else { SURFACE }))
+                            .bg(rgb(if selected { 0x5865f2 } else { SURFACE }))
                             .text_color(rgb(if selected { LILAC } else { MUTED }))
                             .font_weight(FontWeight::SEMIBOLD)
                             .hover(|s| s.bg(rgb(LINE)))
@@ -684,7 +768,7 @@ impl Larpcord {
                     .size(px(7.))
                     .rounded_full()
                     .bg(rgb(if self.status == "Connected" {
-                        MINT
+                        ACCENT
                     } else {
                         MUTED
                     })),
@@ -697,7 +781,7 @@ impl Larpcord {
             .selected_guild
             .as_ref()
             .and_then(|id| self.store.guilds.iter().find(|g| &g.id == id))
-            .map_or("Direct messages", |g| g.name.as_str())
+            .map_or("Direct Messages", |g| g.name.as_str())
             .to_string();
         let query = self.search.read(cx).content.to_lowercase();
         let mut channels: Vec<_> = self
@@ -711,34 +795,205 @@ impl Larpcord {
             .cloned()
             .collect();
         channels.sort_by(|a, b| {
-            a.position
-                .cmp(&b.position)
+            let category = |channel: &Channel| {
+                channel
+                    .parent_id
+                    .as_ref()
+                    .and_then(|id| self.store.channels.get(id))
+                    .map_or(-1, |c| c.position)
+            };
+            category(a)
+                .cmp(&category(b))
+                .then_with(|| (a.kind == 2).cmp(&(b.kind == 2)))
+                .then_with(|| a.position.cmp(&b.position))
                 .then_with(|| a.label().cmp(&b.label()))
         });
-        column().w(px(236.)).h_full().flex_shrink_0().bg(rgb(0x191e25)).border_r_1().border_color(rgb(LINE))
-            .child(column().p_4().gap_3().child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(title))
-                .child(row().px_2().rounded_lg().bg(rgb(PANEL)).child(self.search.clone())))
-            .child(row().px_4().pb_2().justify_between().child(label(if self.selected_guild.is_some() { "CONVERSATIONS" } else { "MESSAGES" }).text_size(px(10.)))
-                .child(label(format!("{}", channels.len())).text_size(px(10.))))
-            .child(column().id("channels").flex_1().min_h_0().px_2().gap_1().overflow_y_scroll().children(channels.into_iter().map(|channel| {
-                let id = channel.id.clone();
-                let selected = self.selected_channel.as_ref() == Some(&id);
-                row().id(SharedString::from(format!("channel-{id}"))).px_3().py_2().gap_3().rounded_lg().cursor_pointer()
-                    .bg(rgb(if selected { 0x2a333b } else { 0x191e25 })).hover(|s| s.bg(rgb(SURFACE)))
+        let mut navigation = Vec::new();
+        let mut last_group = None;
+        for channel in channels {
+            let group = (
+                channel.parent_id.clone(),
+                channel.kind == 2 && channel.parent_id.is_none(),
+            );
+            if last_group.as_ref() != Some(&group) && self.selected_guild.is_some() {
+                let title = channel
+                    .parent_id
+                    .as_ref()
+                    .and_then(|id| self.store.channels.get(id))
+                    .map_or_else(
+                        || {
+                            if channel.kind == 2 {
+                                "VOICE CHANNELS".into()
+                            } else {
+                                "TEXT CHANNELS".into()
+                            }
+                        },
+                        Channel::label,
+                    );
+                navigation.push(
+                    label(title.to_uppercase())
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .px_2()
+                        .pt_4()
+                        .pb_1()
+                        .into_any_element(),
+                );
+                last_group = Some(group);
+            }
+            let id = channel.id.clone();
+            let selected = self.selected_channel.as_ref() == Some(&id);
+            navigation.push(
+                row()
+                    .id(SharedString::from(format!("channel-{id}")))
+                    .h(px(34.))
+                    .px_2()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(rgb(if selected { 0x404249 } else { 0x2b2d31 }))
+                    .hover(|s| s.bg(rgb(0x35373c)))
                     .text_color(rgb(if selected { TEXT } else { MUTED }))
-                    .child(div().text_size(px(17.)).text_color(rgb(if selected { MINT } else { MUTED })).child(if channel.kind == 2 { "◖" } else if channel.guild_id.is_none() { "@" } else { "#" }))
-                    .child(div().flex_1().truncate().child(channel.label()))
-                    .when(self.store.unread.contains(&id), |s| s.child(div().size(px(6.)).rounded_full().bg(rgb(MINT))))
-                    .on_click(cx.listener(move |this, _, window, cx| this.choose_channel(id.clone(), window, cx)))
-            })))
-            .when(self.preview, |s| s.child(column().mx_3().my_3().p_3().rounded_lg().border_1().border_color(rgb(0x35473f)).bg(rgb(0x1b2924)).gap_2()
-                .child(div().text_size(px(12.)).text_color(rgb(MINT)).child("Make yourself at home"))
-                .child(label("You're exploring a sample workspace. Connect to see your conversations.").text_size(px(11.)))
-                .child(button("connect-sidebar", "Connect account").bg(rgb(0x35473f)).text_color(rgb(MINT)).on_click(cx.listener(|this, _, _, cx| { this.settings_tab = Some(0); cx.notify(); })))))
-            .child(row().h(px(68.)).px_3().gap_3().border_t_1().border_color(rgb(LINE))
-                .child(row().size(px(34.)).rounded_full().justify_center().bg(rgb(0x3b394d)).text_color(rgb(LILAC)).child(self.store.user.name().chars().next().unwrap_or('l').to_string()))
-                .child(column().flex_1().min_w_0().child(div().truncate().text_size(px(12.)).child(self.store.user.name().to_string())).child(label(if self.preview { "Just looking around" } else { "Connected account" }).text_size(px(10.))))
-                .child(button("settings", "⚙").px_2().text_color(rgb(MUTED)).on_click(cx.listener(|this, _, _, cx| { this.settings_tab = Some(1); cx.notify(); }))))
+                    .child(
+                        div()
+                            .w(px(22.))
+                            .text_size(px(21.))
+                            .text_color(rgb(0x80848e))
+                            .child(if channel.kind == 2 {
+                                "◖"
+                            } else if channel.guild_id.is_none() {
+                                "@"
+                            } else {
+                                "#"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(15.))
+                            .child(channel.label()),
+                    )
+                    .when(self.store.unread.contains(&id), |s| {
+                        s.child(div().size(px(6.)).rounded_full().bg(rgb(TEXT)))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.choose_channel(id.clone(), window, cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
+        column()
+            .w(px(240.))
+            .h_full()
+            .flex_shrink_0()
+            .bg(rgb(0x2b2d31))
+            .child(
+                row()
+                    .h(px(48.))
+                    .px_4()
+                    .border_b_1()
+                    .border_color(rgb(LINE))
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(label("⌄")),
+            )
+            .child(
+                row()
+                    .mx_2()
+                    .mt_2()
+                    .px_2()
+                    .rounded_md()
+                    .bg(rgb(PANEL))
+                    .child(self.search.clone()),
+            )
+            .child(
+                column()
+                    .id("channels")
+                    .flex_1()
+                    .min_h_0()
+                    .px_2()
+                    .gap_1()
+                    .overflow_y_scroll()
+                    .children(navigation),
+            )
+            .when(self.preview, |s| {
+                s.child(
+                    row()
+                        .px_3()
+                        .py_2()
+                        .gap_2()
+                        .bg(rgb(0x292b30))
+                        .child(label("Preview workspace").flex_1().text_size(px(11.)))
+                        .child(
+                            button("connect-sidebar", "Log in")
+                                .py_1()
+                                .px_2()
+                                .text_size(px(11.))
+                                .bg(rgb(0x5865f2))
+                                .on_click(cx.listener(|this, _, _, cx| this.open_login(cx))),
+                        ),
+                )
+            })
+            .child(
+                row()
+                    .h(px(54.))
+                    .px_2()
+                    .gap_2()
+                    .bg(rgb(0x232428))
+                    .child(
+                        row()
+                            .size(px(32.))
+                            .rounded_full()
+                            .justify_center()
+                            .bg(rgb(0x5865f2))
+                            .text_color(rgb(TEXT))
+                            .child(
+                                self.store
+                                    .user
+                                    .name()
+                                    .chars()
+                                    .next()
+                                    .unwrap_or('l')
+                                    .to_string(),
+                            ),
+                    )
+                    .child(
+                        column()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(self.store.user.name().to_string()),
+                            )
+                            .child(
+                                label(if self.preview {
+                                    "Preview".to_string()
+                                } else {
+                                    self.status.clone()
+                                })
+                                .text_size(px(10.)),
+                            ),
+                    )
+                    .child(
+                        button("settings", "⚙")
+                            .px_2()
+                            .bg(rgb(0x232428))
+                            .text_color(rgb(MUTED))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_tab = Some(1);
+                                cx.notify();
+                            })),
+                    ),
+            )
     }
 
     fn message(&self, message: &Message, cx: &mut Context<Self>) -> AnyElement {
@@ -772,19 +1027,19 @@ impl Larpcord {
             .w_full()
             .child(
                 row()
-                    .size(px(34.))
+                    .size(px(40.))
                     .flex_shrink_0()
                     .justify_center()
-                    .rounded_xl()
+                    .rounded_full()
                     .bg(rgb(if message.author.id == self.store.user.id {
-                        0x343347
+                        0x5865f2
                     } else {
-                        0x293d35
+                        0x4e5058
                     }))
                     .text_color(rgb(if message.author.id == self.store.user.id {
                         LILAC
                     } else {
-                        MINT
+                        ACCENT
                     }))
                     .child(initial),
             )
@@ -808,18 +1063,23 @@ impl Larpcord {
                             }),
                     )
                     .child(div().text_size(px(14.)).line_height(px(22.)).child(content))
-                    .children(attachments.into_iter().map(|attachment| {
-                        let url = attachment.url;
-                        button("attachment", "↗")
-                            .child(attachment.filename)
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                if let Ok(url) = reqwest::Url::parse(&url)
-                                    && url.scheme() == "https"
-                                {
-                                    cx.open_url(url.as_str());
-                                }
-                            }))
-                    })),
+                    .children(
+                        attachments
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, attachment)| {
+                                let url = attachment.url;
+                                button(("attachment", index), "↗")
+                                    .child(attachment.filename)
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        if let Ok(url) = reqwest::Url::parse(&url)
+                                            && url.scheme() == "https"
+                                        {
+                                            cx.open_url(url.as_str());
+                                        }
+                                    }))
+                            }),
+                    ),
             )
             .into_any_element()
     }
@@ -839,13 +1099,13 @@ impl Larpcord {
             .h_full()
             .child(
                 row()
-                    .h(px(65.))
+                    .h(px(48.))
                     .flex_shrink_0()
                     .px_6()
                     .gap_3()
                     .border_b_1()
                     .border_color(rgb(LINE))
-                    .child(div().text_size(px(24.)).text_color(rgb(MINT)).child("#"))
+                    .child(div().text_size(px(24.)).text_color(rgb(ACCENT)).child("#"))
                     .child(
                         column()
                             .flex_1()
@@ -854,11 +1114,7 @@ impl Larpcord {
                             .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                             .child(label(topic).truncate().text_size(px(11.))),
                     )
-                    .child(badge(if self.preview {
-                        "SAMPLE WORKSPACE"
-                    } else {
-                        "TEXT CHANNEL"
-                    })),
+                    .when(self.preview, |s| s.child(badge("PREVIEW"))),
             )
             .when(channel.is_none(), |s| {
                 s.child(
@@ -867,7 +1123,7 @@ impl Larpcord {
                         .items_center()
                         .justify_center()
                         .gap_4()
-                        .child(svg().path("mark.svg").size(px(70.)).text_color(rgb(MINT)))
+                        .child(img("mascot.png").size(px(70.)).text_color(rgb(ACCENT)))
                         .child(div().text_size(px(24.)).child("A little room to breathe."))
                         .child(label("Choose a conversation from the sidebar.")),
                 )
@@ -981,7 +1237,7 @@ impl Larpcord {
                                         },
                                     )
                                     .bg(rgb(0x33483e))
-                                    .text_color(rgb(MINT))
+                                    .text_color(rgb(ACCENT))
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.send(window, cx)),
                                     ),
@@ -1009,6 +1265,156 @@ impl Larpcord {
                         ),
                 )
             })
+            .into_any_element()
+    }
+
+    fn login_screen(&self, cx: &mut Context<Self>) -> AnyElement {
+        let qr_area = match &self.qr {
+            QrState::Ready(code) => {
+                let code = code.clone();
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        window.paint_quad(fill(bounds, rgb(0xffffff)));
+                        let module =
+                            px((f32::from(bounds.size.width) / (code.side + 8) as f32).floor());
+                        let extent = module * (code.side + 8) as f32;
+                        let origin = point(
+                            bounds.origin.x + (bounds.size.width - extent) / 2.,
+                            bounds.origin.y + (bounds.size.height - extent) / 2.,
+                        );
+                        for y in 0..code.side {
+                            for x in 0..code.side {
+                                if code.dark[y * code.side + x] {
+                                    window.paint_quad(fill(
+                                        Bounds::new(
+                                            point(
+                                                origin.x + module * (x + 4) as f32,
+                                                origin.y + module * (y + 4) as f32,
+                                            ),
+                                            size(module, module),
+                                        ),
+                                        rgb(0x000000),
+                                    ));
+                                }
+                            }
+                        }
+                    },
+                )
+                .size(px(200.))
+                .into_any_element()
+            }
+            _ => column()
+                .size(px(200.))
+                .p_4()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .rounded_lg()
+                .bg(rgb(SURFACE))
+                .child(img("mascot.png").size(px(52.)))
+                .child(
+                    label(match &self.qr {
+                        QrState::Confirm => "Confirm on your phone",
+                        QrState::Failed(_) => "Code unavailable",
+                        QrState::Generating => "Generating a secure code…",
+                        _ => "Ready to connect",
+                    })
+                    .text_center(),
+                )
+                .into_any_element(),
+        };
+        let mut instructions = column()
+            .flex_1()
+            .gap_4()
+            .child(div().font_weight(FontWeight::BOLD).text_size(px(26.)).child("Welcome back!"))
+            .child(
+                div().text_size(px(15.)).text_color(rgb(MUTED)).line_height(px(24.))
+                    .child("Sign in with the Discord mobile app. Open your settings, choose Scan QR Code, and confirm the login on your phone."),
+            )
+            .child(
+                label("The code creates a session for this client. It expires automatically and is cleared when you leave this screen.")
+                    .line_height(px(20.)),
+            );
+        if let Some(error) = &self.error {
+            instructions = instructions.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(0xf0b7c3))
+                    .child(error.clone()),
+            );
+        }
+        if matches!(self.qr, QrState::Failed(_)) {
+            instructions = instructions.child(
+                button("retry-qr", "Generate a new code")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_login(cx))),
+            );
+        }
+        instructions = instructions
+            .child(
+                button("explore-preview", "Explore the preview")
+                    .on_click(cx.listener(|this, _, _, cx| this.close_login(cx))),
+            )
+            .child(
+                div()
+                    .id("advanced-login")
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .cursor_pointer()
+                    .child("Advanced sign-in")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.close_login(cx);
+                        this.settings_tab = Some(0);
+                        cx.notify();
+                    })),
+            );
+        let mut qr_panel = column()
+            .w(px(220.))
+            .items_center()
+            .gap_3()
+            .child(qr_area)
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(17.))
+                    .child("Log in with QR Code"),
+            )
+            .child(
+                label(match &self.qr {
+                    QrState::Confirm => "Scanned. Finish signing in on your phone.",
+                    _ => "Scan with the Discord mobile app.",
+                })
+                .text_center(),
+            );
+        if let QrState::Failed(error) = &self.qr {
+            qr_panel = qr_panel.child(label(error.clone()).text_center().text_color(rgb(0xf0b7c3)));
+        }
+        column()
+            .absolute()
+            .inset_0()
+            .bg(rgb(PANEL))
+            .items_center()
+            .justify_center()
+            .gap_6()
+            .child(
+                row().gap_3().child(img("mascot.png").size(px(42.))).child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(22.))
+                        .child("larpcord"),
+                ),
+            )
+            .child(
+                row()
+                    .w(px(700.))
+                    .p_8()
+                    .gap_8()
+                    .rounded_lg()
+                    .bg(rgb(BG))
+                    .shadow_lg()
+                    .child(instructions)
+                    .child(qr_panel),
+            )
             .into_any_element()
     }
 
@@ -1040,10 +1446,10 @@ impl Larpcord {
                     .flex_shrink_0()
                     .rounded_full()
                     .px(px(3.))
-                    .bg(rgb(if enabled { 0x4b7361 } else { LINE }))
+                    .bg(rgb(if enabled { 0x5865f2 } else { LINE }))
                     .when(enabled, |s| s.justify_end())
                     .child(div().size(px(16.)).rounded_full().bg(rgb(if enabled {
-                        MINT
+                        ACCENT
                     } else {
                         MUTED
                     }))),
@@ -1063,7 +1469,7 @@ impl Larpcord {
                         .child(div().text_size(px(13.)).child("Discord session token"))
                         .child(row().px_2().rounded_lg().bg(rgb(PANEL)).child(self.token.clone()))
                         .child(label("Your token is a password. It is sent only to Discord. Larpcord stores remembered sessions in your OS credential store.").line_height(px(19.)))
-                        .child(button("login", "Connect account").bg(rgb(0x33483e)).text_color(rgb(MINT)).on_click(cx.listener(|this, _, window, cx| this.login(window, cx)))))
+                        .child(button("login", "Connect account").bg(rgb(0x33483e)).text_color(rgb(ACCENT)).on_click(cx.listener(|this, _, window, cx| this.login(window, cx)))))
                         .child(label("This is an early, independent Discord client. Voice, video, quests and existing JavaScript mods are still pending."));
                 } else {
                     body = body.child(
@@ -1152,9 +1558,9 @@ impl Larpcord {
                     );
             }
             _ => {
-                body = body.child(svg().path("mark.svg").size(px(58.)).text_color(rgb(MINT)))
+                body = body.child(img("mascot.png").size(px(58.)).text_color(rgb(ACCENT)))
                     .child(div().text_size(px(30.)).child("larpcord"))
-                    .child(label("0.1.0 • native preview"))
+                    .child(label(format!("{} • development preview", env!("CARGO_PKG_VERSION"))))
                     .child(div().text_size(px(16.)).child("A little room to breathe."))
                     .child(label("Built in Rust with GPUI. Inspired by Kawaicord's small-footprint approach."))
                     .child(column().mt_4().p_4().rounded_xl().bg(rgb(SURFACE)).gap_3()
@@ -1168,22 +1574,18 @@ impl Larpcord {
         column()
             .absolute()
             .inset_0()
-            .bg(rgba(0x090c10dd))
+            .top(px(32.))
+            .bg(rgb(BG))
             .items_center()
             .justify_center()
             .child(
                 row()
-                    .w(px(720.))
-                    .h(px(530.))
-                    .rounded_2xl()
+                    .size_full()
                     .overflow_hidden()
-                    .border_1()
-                    .border_color(rgb(LINE))
                     .bg(rgb(BG))
-                    .shadow_lg()
                     .child(
                         column()
-                            .w(px(176.))
+                            .w(px(240.))
                             .h_full()
                             .p_4()
                             .gap_2()
@@ -1202,7 +1604,7 @@ impl Larpcord {
                                             .cursor_pointer()
                                             .bg(rgb(if tab == index { SURFACE } else { PANEL }))
                                             .text_color(rgb(if tab == index {
-                                                MINT
+                                                ACCENT
                                             } else {
                                                 MUTED
                                             }))
@@ -1275,6 +1677,9 @@ impl Render for Larpcord {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ClosePanel, _, cx| {
+                if this.login_open {
+                    this.close_login(cx);
+                }
                 this.settings_tab = None;
                 cx.notify();
             }))
@@ -1292,5 +1697,6 @@ impl Render for Larpcord {
                     .child(self.conversation(cx)),
             )
             .when(self.settings_tab.is_some(), |s| s.child(self.settings(cx)))
+            .when(self.login_open, |s| s.child(self.login_screen(cx)))
     }
 }

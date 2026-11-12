@@ -35,6 +35,7 @@ pub struct Channel {
     pub kind: u8,
     #[serde(default)]
     pub position: i32,
+    pub parent_id: Option<String>,
     #[serde(default)]
     pub recipients: Vec<User>,
     pub topic: Option<String>,
@@ -109,6 +110,10 @@ impl Store {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    pub fn has_history(&self, channel: &str) -> bool {
+        self.histories.contains_key(channel)
     }
 
     pub fn pin(&mut self, channel: &str) {

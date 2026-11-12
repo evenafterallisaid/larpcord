@@ -19,6 +19,10 @@ use zeroize::Zeroizing;
 use crate::model::{Channel, Guild, Message};
 
 pub enum Event {
+    Auth {
+        attempt: u64,
+        event: crate::auth::AuthEvent,
+    },
     Status(String),
     Dispatch(String, Value),
     History {
@@ -41,6 +45,10 @@ pub struct Envelope {
 }
 
 pub enum Command {
+    QrStart {
+        attempt: u64,
+    },
+    QrCancel,
     Connect {
         generation: u64,
         token: Zeroizing<String>,
@@ -80,7 +88,11 @@ impl Api {
         let client = Client::builder()
             .timeout(Duration::from_secs(25))
             .connect_timeout(Duration::from_secs(10))
-            .user_agent("Larpcord/0.1.0 (https://github.com/evenafterallisaid/larpcord)")
+            .user_agent(concat!(
+                "Larpcord/",
+                env!("CARGO_PKG_VERSION"),
+                " (https://github.com/evenafterallisaid/larpcord)"
+            ))
             .build()
             .map_err(|_| "Could not initialize the network client.".to_string())?;
         Ok(Self {
@@ -192,6 +204,7 @@ impl Backend {
             runtime.block_on(async move {
                 let mut tasks = JoinSet::new();
                 let mut requests = JoinSet::new();
+                let mut auth = JoinSet::new();
                 let mut api = None::<Api>;
                 let mut generation = 0;
                 let saved_events = events.clone();
@@ -203,10 +216,26 @@ impl Backend {
                     tokio::select! {
                         Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
                         Some(_) = requests.join_next(), if !requests.is_empty() => {}
+                        Some(_) = auth.join_next(), if !auth.is_empty() => {}
                         command = commands.recv() => {
                             let Some(command) = command else { break; };
                             match command {
+                                Command::QrStart { attempt } => {
+                                    auth.abort_all();
+                                    let events = events.clone();
+                                    auth.spawn(async move {
+                                        let (tx, rx) = async_channel::bounded(8);
+                                        let forward = async {
+                                            while let Ok(event) = rx.recv().await {
+                                                emit(&events, generation, Event::Auth { attempt, event }).await;
+                                            }
+                                        };
+                                        tokio::join!(crate::auth::remote_login(tx), forward);
+                                    });
+                                }
+                                Command::QrCancel => auth.abort_all(),
                                 Command::Connect { generation: new_generation, token, remember } => {
+                                    auth.abort_all();
                                     tasks.abort_all();
                                     requests.abort_all();
                                     generation = new_generation;
@@ -236,7 +265,7 @@ impl Backend {
                                         Err(error) => emit(&events, generation, Event::Error(error)).await,
                                     }
                                 }
-                                Command::Disconnect => { tasks.abort_all(); requests.abort_all(); api = None; }
+                                Command::Disconnect => { tasks.abort_all(); requests.abort_all(); auth.abort_all(); api = None; }
                                 Command::Forget => {
                                     let events = events.clone();
                                     tokio::task::spawn_blocking(move || {
@@ -282,6 +311,7 @@ impl Backend {
                 }
                 tasks.abort_all();
                 requests.abort_all();
+                auth.abort_all();
             });
         }).expect("network thread");
         (Self { tx }, receiver)

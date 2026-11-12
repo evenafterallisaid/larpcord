@@ -1,6 +1,6 @@
 [package]
 name = "larpcord"
-version = "0.1.0"
+version = "0.2.0-dev.1"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -8,6 +8,10 @@ description = "A small, native Discord client in Rust and GPUI"
 repository = "https://github.com/evenafterallisaid/larpcord"
 
 [dependencies]
+base64 = "0.22"
+qrcode = { version = "0.14", default-features = false }
+rsa = "0.9"
+sha2 = "0.10"
 anyhow = "1"
 async-channel = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

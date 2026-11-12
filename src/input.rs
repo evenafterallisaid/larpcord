@@ -500,7 +500,7 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), gpui::rgb(0x737b8b).into())
+            (input.placeholder.clone(), gpui::rgb(0x878b92).into())
         } else {
             (
                 if input.secret {
@@ -561,7 +561,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
-                    gpui::rgb(0xb8ebd0),
+                    gpui::rgb(0xf2f3f5),
                 )),
             )
         } else {
@@ -654,7 +654,7 @@ impl Render for TextInput {
             .overflow_hidden()
             .line_height(px(24.))
             .text_size(px(14.))
-            .text_color(rgb(0xe3e7ee))
+            .text_color(rgb(0xdbdee1))
             .child(
                 div()
                     .h(px(32.))
