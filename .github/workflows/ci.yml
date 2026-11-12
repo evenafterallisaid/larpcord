@@ -1,0 +1,70 @@
+name: native builds
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            artifact: larpcord-macos-arm64
+          - os: windows-latest
+            artifact: larpcord-windows-x64
+          - os: ubuntu-24.04
+            artifact: larpcord-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libclang-dev libfontconfig1-dev libxkbcommon-x11-dev libx11-xcb-dev libvulkan-dev libwayland-dev libegl1-mesa-dev libssl-dev libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: macos bundle
+        if: runner.os == 'macOS'
+        run: |
+          sh packaging/bundle-macos.sh
+          ditto -c -k --sequesterRsrc --keepParent dist/Larpcord.app dist/${{ matrix.artifact }}.zip
+      - name: windows portable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/larpcord
+          Copy-Item target/release/larpcord.exe dist/larpcord/
+          Copy-Item LICENSE,THIRD_PARTY_NOTICES.md,README.md dist/larpcord/
+          Copy-Item -Recurse licenses dist/larpcord/
+          Compress-Archive -Path dist/larpcord -DestinationPath dist/${{ matrix.artifact }}.zip
+      - name: linux portable
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/larpcord
+          cp target/release/larpcord LICENSE THIRD_PARTY_NOTICES.md README.md dist/larpcord/
+          cp -r licenses dist/larpcord/
+          cp packaging/linux/larpcord.desktop assets/icon.svg dist/larpcord/
+          tar -C dist -czf dist/${{ matrix.artifact }}.tar.gz larpcord
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error

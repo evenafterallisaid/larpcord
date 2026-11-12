@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Larpcord
+Comment=A little room to breathe
+Exec=larpcord
+Icon=larpcord
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupWMClass=app.larpcord.client
