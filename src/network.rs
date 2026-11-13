@@ -52,6 +52,11 @@ pub enum Event {
         message: String,
         result: Result<(), String>,
     },
+    GuildDetails {
+        id: String,
+        started: std::time::Instant,
+        result: Result<Guild, String>,
+    },
     Error(String),
     SavedSession(Option<Zeroizing<String>>),
 }
@@ -105,6 +110,7 @@ pub enum Command {
         data: Value,
         nonce: String,
     },
+    GuildDetails(String, std::time::Instant),
     Forget,
 }
 
@@ -503,6 +509,15 @@ impl Backend {
                                         }
                                     });
                                 }
+                                Command::GuildDetails(id,started) => {
+                                    let Some(client)=api.clone() else {continue};
+                                    if !snowflake(&id) {continue;}
+                                    let events=events.clone();
+                                    requests.spawn(async move {
+                                        let result=client.request::<Guild>(Method::GET,&format!("/guilds/{id}"),None).await.and_then(|guild|if guild.id==id {Ok(guild)} else {Err("Discord returned another server.".into())});
+                                        emit(&events,generation,Event::GuildDetails {id,started,result}).await;
+                                    });
+                                }
                                 Command::Profile {id, guild, request, roles_needed} => {
                                     let Some(client) = api.clone() else { continue; };
                                     if !snowflake(&id) || guild.as_ref().is_some_and(|id| !snowflake(id)) { continue; }
@@ -857,8 +872,17 @@ pub fn guild_from_ready(value: &Value) -> Option<Guild> {
         .cloned()
         .unwrap_or_else(|| value.clone());
     properties["id"] = value.get("id")?.clone();
-    if let Some(roles) = value.get("roles") {
-        properties["roles"] = roles.clone();
+    for field in [
+        "name",
+        "icon",
+        "banner",
+        "premium_subscription_count",
+        "premium_tier",
+        "roles",
+    ] {
+        if let Some(outer) = value.get(field) {
+            properties[field] = outer.clone();
+        }
     }
     serde_json::from_value(properties).ok()
 }
@@ -943,10 +967,12 @@ mod tests {
 
     #[test]
     fn ready_guild_properties_keep_artwork_and_roles() {
-        let guild=guild_from_ready(&json!({"id":"123","properties":{"name":"guild","icon":"abc","banner":"def"},"roles":[{"id":"7","name":"mod","position":3,"color":4}]})).unwrap();
+        let guild=guild_from_ready(&json!({"id":"123","properties":{"name":"guild","icon":"abc","banner":"def"},"premium_subscription_count":8,"premium_tier":2,"roles":[{"id":"7","name":"mod","position":3,"color":4}]})).unwrap();
         assert_eq!(guild.icon.as_deref(), Some("abc"));
         assert_eq!(guild.banner.as_deref(), Some("def"));
         assert_eq!(guild.roles[0].name, "mod");
+        assert_eq!(guild.premium_subscription_count, Some(8));
+        assert_eq!(guild.premium_tier, Some(2));
     }
 
     #[test]
