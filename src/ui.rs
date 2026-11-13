@@ -2959,6 +2959,25 @@ mod tests {
     use gpui::{Context, Focusable, TestAppContext, Window};
 
     #[gpui::test]
+    fn clicking_a_video_tile_opens_the_native_player(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, point, px, size};
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        let bounds = cx
+            .debug_bounds("video-tile")
+            .expect("sample tile was painted");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.update(|_, cx| {
+            assert!(
+                view.read(cx).video.is_some(),
+                "clicking the media tile must open playback"
+            )
+        });
+    }
+
+    #[gpui::test]
     fn server_metadata_cannot_overwrite_a_newer_gateway_update(cx: &mut TestAppContext) {
         let window = cx.add_window(|window, cx| Larpcord::with_preview(window, cx, true));
         window.update(cx,|view,window,cx| {

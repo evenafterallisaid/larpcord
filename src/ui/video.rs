@@ -22,6 +22,7 @@ impl Larpcord {
         let title = title.to_string();
         div()
             .id(SharedString::from(format!("video-{url}")))
+            .debug_selector(|| "video-tile".into())
             .relative()
             .w(px(width))
             .h(px(height))
