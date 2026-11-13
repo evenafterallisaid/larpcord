@@ -29,7 +29,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libclang-dev libfontconfig1-dev libxkbcommon-x11-dev libx11-xcb-dev libvulkan-dev libwayland-dev libegl1-mesa-dev libssl-dev libdbus-1-dev pkg-config
+          sudo apt-get install -y libasound2-dev libclang-dev libfontconfig1-dev libxkbcommon-x11-dev libx11-xcb-dev libvulkan-dev libwayland-dev libegl1-mesa-dev libssl-dev libdbus-1-dev pkg-config nasm
+      - name: windows decoder assembler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm -y --no-progress
+          "$env:ProgramFiles\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
@@ -59,7 +65,8 @@ jobs:
           mkdir -p dist/larpcord
           cp target/release/larpcord LICENSE THIRD_PARTY_NOTICES.md README.md dist/larpcord/
           cp -r licenses dist/larpcord/
-          cp packaging/linux/larpcord.desktop assets/icon.svg dist/larpcord/
+          cp packaging/linux/larpcord.desktop dist/larpcord/
+          cp assets/icon.png dist/larpcord/larpcord.png
           tar -C dist -czf dist/${{ matrix.artifact }}.tar.gz larpcord
       - uses: actions/upload-artifact@v4
         with:

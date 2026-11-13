@@ -1,10 +1,16 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod auth;
+mod components;
+mod content;
+mod effects;
 mod input;
+mod media;
 mod model;
 mod network;
 mod settings;
 mod ui;
+mod video;
 
 use gpui::{prelude::*, *};
 use std::borrow::Cow;
@@ -14,16 +20,19 @@ struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         Ok(match path {
-            "mark.svg" => Some(Cow::Borrowed(include_bytes!("../assets/mark.svg"))),
+            "mascot.png" => Some(Cow::Borrowed(include_bytes!("../assets/mascot.png"))),
+            "home.svg" => Some(Cow::Borrowed(include_bytes!("../assets/home.svg"))),
             _ => None,
         })
     }
     fn list(&self, _: &str) -> anyhow::Result<Vec<SharedString>> {
-        Ok(vec!["mark.svg".into()])
+        Ok(vec!["mascot.png".into(), "home.svg".into()])
     }
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    let _ = notify_rust::set_application("app.larpcord.client");
     let app = Application::new().with_assets(Assets);
     app.on_reopen(|cx| {
         for window in cx.windows() {
@@ -32,6 +41,15 @@ fn main() {
         cx.activate(true);
     });
     app.run(|cx: &mut App| {
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.set_menus(vec![Menu {
+            name: "Larpcord".into(),
+            items: vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit Larpcord", Quit),
+            ],
+        }]);
         input::bind_keys(cx);
         let modifier = if cfg!(target_os = "macos") {
             "cmd"

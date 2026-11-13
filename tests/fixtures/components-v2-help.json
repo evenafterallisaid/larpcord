@@ -1,0 +1,18 @@
+{
+  "id": "8",
+  "channel_id": "campfire",
+  "author": {"id": "helper", "username": "little helper", "bot": true},
+  "timestamp": "2026-11-12T18:37:00Z",
+  "flags": 32768,
+  "components": [{
+    "type": 17,
+    "accent_color": 5793266,
+    "components": [
+      {"type": 10, "content": "## help without the blank space\nPick a category below. **Commands** and links render natively."},
+      {"type": 14, "divider": true, "spacing": 1},
+      {"type": 9, "components": [{"type": 10, "content": "**Getting started**\nThe text can sit beside an image or a button."}], "accessory": {"type": 11, "media": {"url": "https://cdn.discordapp.com/embed/avatars/0.png", "width": 256, "height": 256}}},
+      {"type": 1, "components": [{"type": 2, "style": 5, "label": "Project", "url": "https://github.com/evenafterallisaid/larpcord"}, {"type": 2, "style": 2, "label": "More", "custom_id": "help:next"}]},
+      {"type": 1, "components": [{"type": 3, "custom_id": "help:category", "placeholder": "Choose a category", "options": [{"label": "General", "value": "general", "description": "Everyday commands"}, {"label": "Music", "value": "music", "description": "Music and playback"}]}]}
+    ]
+  }]
+}
