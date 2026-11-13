@@ -861,7 +861,7 @@ where
                             session.subscribed_guild = current.clone();
                             subscribed = current;
                         }
-                        if matches!(kind.as_str(), "READY" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE" | "TYPING_START" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE" | "GUILD_MEMBER_UPDATE" | "MESSAGE_ACK" | "CHANNEL_UNREAD_UPDATE" | "USER_SETTINGS_UPDATE" | "USER_SETTINGS_PROTO_UPDATE" | "USER_GUILD_SETTINGS_UPDATE" | "USER_UPDATE") {
+                        if matches!(kind.as_str(), "READY" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE" | "TYPING_START" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE" | "GUILD_MEMBER_UPDATE" | "MESSAGE_ACK" | "USER_SETTINGS_UPDATE" | "USER_SETTINGS_PROTO_UPDATE" | "USER_GUILD_SETTINGS_UPDATE" | "USER_UPDATE") {
                             emit(events, generation, Event::Dispatch(kind, data)).await;
                         }
                     }

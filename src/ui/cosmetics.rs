@@ -92,7 +92,12 @@ impl Larpcord {
                     .overflow_hidden()
                     .bg(rgb(0x4e5058))
                     .map(|s| match avatar {
-                        Some(image) => s.child(img(image).size_full().object_fit(ObjectFit::Cover)),
+                        Some(image) => s.child(
+                            img(image)
+                                .size_full()
+                                .object_fit(ObjectFit::Cover)
+                                .rounded_full(),
+                        ),
                         None => s.child(user.name().chars().next().unwrap_or('?').to_string()),
                     }),
             )

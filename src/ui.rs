@@ -253,6 +253,19 @@ impl Larpcord {
             while let Ok(image) = images.recv().await {
                 if view
                     .update_in(cx, |view, window, cx| {
+                        if image.image.is_some()
+                            && view
+                                .profile
+                                .as_ref()
+                                .and_then(|p| p.effect_asset.as_ref())
+                                .is_some_and(|e| {
+                                    e.effects.iter().any(|layer| {
+                                        layer.src == image.url.trim_end_matches("#motion")
+                                    })
+                                })
+                        {
+                            view.profile_started = std::time::Instant::now();
+                        }
                         crate::media::retire(view.media.receive(image), window, 3);
                         cx.notify();
                     })
@@ -1056,6 +1069,7 @@ impl Larpcord {
                     && self.profile_guild == guild
                     && let Some(profile) = self.profile.as_mut().filter(|p| p.user.id == id)
                 {
+                    self.profile_started = std::time::Instant::now();
                     profile.effect_asset = effect.clone();
                     profile.frame_asset = frame.clone();
                 }
@@ -1277,13 +1291,32 @@ impl Larpcord {
                 }
             }
             "USER_UPDATE" => {
-                if let Ok(user) = serde_json::from_value::<User>(data) {
+                let Some(id) = data["id"].as_str() else {
+                    return;
+                };
+                let existing = if self.store.user.id == id {
+                    Some(&self.store.user)
+                } else {
+                    self.store.users.get(id)
+                };
+                let mut merged = existing
+                    .and_then(|u| serde_json::to_value(u).ok())
+                    .unwrap_or_else(|| serde_json::json!({"id":id}));
+                if let Some(fields) = data.as_object() {
+                    for (key, value) in fields {
+                        merged[key] = value.clone();
+                    }
+                }
+                if let Ok(user) = serde_json::from_value::<User>(merged) {
                     self.profiles.retain(|(id, _), _| id != &user.id);
                     if self.store.user.id == user.id {
                         self.store.user = user.clone();
                     }
                     if let Some(profile) = self.profile.as_mut().filter(|p| p.user.id == user.id) {
-                        profile.user = user;
+                        profile.user = user.clone();
+                    }
+                    if self.store.users.contains_key(&user.id) {
+                        self.store.users.insert(user.id.clone(), user);
                     }
                 }
             }
@@ -1300,7 +1333,7 @@ impl Larpcord {
                     self.store.apply_layout(layout);
                 }
             }
-            "MESSAGE_ACK" | "CHANNEL_UNREAD_UPDATE" => self.store.read_state(&data),
+            "MESSAGE_ACK" => self.store.read_state(&data),
             "USER_GUILD_SETTINGS_UPDATE" => self.store.guild_preferences(&data),
             "GUILD_CREATE" | "GUILD_UPDATE" => self.add_guild(&data),
             "GUILD_DELETE" => {
@@ -2001,7 +2034,8 @@ impl Larpcord {
         let selected = self.selected_channel.as_ref() == Some(&id);
         let unread = self.store.unread.contains(&id);
         let pings = self.store.mentions.get(&id).copied().unwrap_or(0);
-        row()
+        let content = row()
+            .w_full()
             .id(SharedString::from(format!("dm-{id}")))
             .relative()
             .h(px(44.))
@@ -2021,7 +2055,6 @@ impl Larpcord {
                     )
                 },
             )
-            .mx_2()
             .px_2()
             .gap_3()
             .rounded_md()
@@ -2064,7 +2097,8 @@ impl Larpcord {
             .on_click(
                 cx.listener(move |this, _, window, cx| this.choose_channel(id.clone(), window, cx)),
             )
-            .into_any_element()
+            .into_any_element();
+        div().w_full().px_2().child(content).into_any_element()
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3441,6 +3475,18 @@ mod tests {
     use super::{Larpcord, Message, Page};
     use crate::network::{Envelope, Event};
     use gpui::{Context, Focusable, TestAppContext, Window};
+
+    #[gpui::test]
+    fn partial_user_update_preserves_the_avatar_and_other_cosmetics(cx: &mut TestAppContext) {
+        let window = cx.add_window(|window, cx| Larpcord::with_preview(window, cx, true));
+        window.update(cx,|view,window,cx| {
+            view.store.user.avatar=Some("abc".into());
+            let id=view.store.user.id.clone();let name=view.store.user.username.clone();
+            view.dispatch("USER_UPDATE",serde_json::json!({"id":id,"display_name_styles":{"font_id":3,"colors":[16711680]}}),window,cx);
+            assert_eq!(view.store.user.avatar.as_deref(),Some("abc"));assert_eq!(view.store.user.username,name);
+            assert_eq!(view.store.user.display_name_styles.as_ref().unwrap().font(),"Cherry Bomb One");
+        }).unwrap();
+    }
 
     #[gpui::test]
     fn profile_avatar_overlaps_the_banner_without_collapsing_the_card(cx: &mut TestAppContext) {
