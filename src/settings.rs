@@ -9,6 +9,7 @@ pub struct Settings {
     pub keep_connected: bool,
     pub remember_session: bool,
     pub compact: bool,
+    pub animations: bool,
 }
 
 impl Default for Settings {
@@ -19,6 +20,7 @@ impl Default for Settings {
             keep_connected: true,
             remember_session: true,
             compact: false,
+            animations: true,
         }
     }
 }
