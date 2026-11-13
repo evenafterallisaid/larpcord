@@ -1,13 +1,13 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Cursor,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use gpui::RenderImage;
-use image::{Frame, ImageReader};
+use image::{AnimationDecoder, Frame, ImageDecoder, ImageReader};
 
 const BUDGET: usize = 12 * 1024 * 1024;
 const IDENTITY_BUDGET: usize = 4 * 1024 * 1024;
@@ -63,7 +63,15 @@ fn identity_asset(url: &str) -> bool {
 }
 
 fn decode_bounds(url: &str) -> (u32, u32) {
-    if identity_asset(url) {
+    if url.contains("#motion") {
+        (128, 192)
+    } else if url.contains("/media/v1/collectibles-shop/")
+        || url.contains("/assets/profile_effects/")
+    {
+        (480, 640)
+    } else if url.contains("/icons/") || url.contains("/emojis/") {
+        (128, 128)
+    } else if identity_asset(url) {
         (256, 256)
     } else if url.contains("/banners/") {
         (640, 256)
@@ -82,6 +90,7 @@ pub fn retire(images: Vec<Arc<RenderImage>>, window: &mut gpui::Window, frames: 
             for image in images {
                 cx.drop_image(image, Some(window));
             }
+            window.refresh();
         } else {
             retire(images, window, frames - 1);
         }
@@ -102,6 +111,7 @@ struct Cache {
     entries: HashMap<String, Entry>,
     clock: u64,
     bytes: usize,
+    visible: HashSet<String>,
 }
 
 pub struct Loaded {
@@ -157,17 +167,26 @@ impl Media {
                             let image = match data {
                                 Some(data) => {
                                     let bounds = decode_bounds(&url);
-                                    tokio::task::spawn_blocking(move || decode(data, bounds))
-                                        .await
-                                        .ok()
-                                        .flatten()
+                                    let motion = url.ends_with("#motion");
+                                    tokio::task::spawn_blocking(move || {
+                                        if motion {
+                                            decode_motion(data, bounds)
+                                        } else {
+                                            decode(data, bounds)
+                                        }
+                                    })
+                                    .await
+                                    .ok()
+                                    .flatten()
                                 }
                                 None => None,
                             };
-                            let bytes = image
-                                .as_ref()
-                                .and_then(|i| i.as_bytes(0))
-                                .map_or(0, |b| b.len());
+                            let bytes = image.as_ref().map_or(0, |i| {
+                                (0..i.frame_count())
+                                    .filter_map(|n| i.as_bytes(n))
+                                    .map(|b| b.len())
+                                    .sum()
+                            });
                             let _ = results.send(Loaded { url, image, bytes }).await;
                             drop(permit);
                         });
@@ -184,6 +203,10 @@ impl Media {
         )
     }
 
+    pub fn begin_frame(&self) {
+        self.cache.borrow_mut().visible.clear();
+    }
+
     // requests happen only for rendered rows. failed images retry on a later render, without a timer.
     pub fn get(&self, url: &str) -> Option<Arc<RenderImage>> {
         if !cdn_url(url) {
@@ -192,6 +215,9 @@ impl Media {
         let mut cache = self.cache.borrow_mut();
         cache.clock += 1;
         let clock = cache.clock;
+        if cache.visible.len() < 256 {
+            cache.visible.insert(url.to_string());
+        }
         if let Some(entry) = cache.entries.get_mut(url) {
             entry.used = clock;
             if entry.pending
@@ -256,10 +282,31 @@ impl Media {
                 let key = cache
                     .entries
                     .iter()
-                    .filter(|(_, e)| !e.pending && e.identity == identity)
+                    .filter(|(url, e)| {
+                        !e.pending && e.identity == identity && !cache.visible.contains(*url)
+                    })
                     .min_by_key(|(_, e)| e.used)
                     .map(|(key, _)| key.clone());
                 let Some(key) = key else {
+                    // a visible working set may exceed the soft allowance. never cycle its images
+                    // through placeholders on every repaint; retain a bounded working set instead.
+                    let hard_budget = budget * 3;
+                    if bytes > hard_budget || count > ENTRIES * 2 {
+                        let key = cache
+                            .entries
+                            .iter()
+                            .filter(|(_, e)| e.identity == identity && !e.pending)
+                            .max_by_key(|(_, e)| e.used)
+                            .map(|(key, _)| key.clone());
+                        if let Some(key) = key
+                            && let Some(entry) = cache.entries.get_mut(&key)
+                        {
+                            let removed = entry.bytes;
+                            entry.bytes = 0;
+                            retired.extend(entry.image.take());
+                            cache.bytes -= removed;
+                        }
+                    }
                     break;
                 };
                 if let Some(entry) = cache.entries.remove(&key) {
@@ -308,6 +355,74 @@ fn decode(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
         pixel.swap(0, 2);
     }
     Some(Arc::new(RenderImage::new(vec![Frame::new(pixels)])))
+}
+
+pub fn motion_url(url: String, enabled: bool) -> String {
+    if !enabled {
+        return url;
+    }
+    let mut url = url.replace("/static", "/animated");
+    if url.contains("/avatar-decoration-presets/") {
+        url = url.replace("passthrough=false", "passthrough=true");
+    }
+    if url.contains("/assets/profile_effects/")
+        || url.contains("/animated")
+        || url.contains("passthrough=true")
+    {
+        url.push_str("#motion");
+    }
+    url
+}
+fn decode_motion(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
+    let fallback = || decode(bytes.clone(), bounds);
+    let format = image::guess_format(&bytes).ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(2048);
+    limits.max_image_height = Some(2048);
+    limits.max_alloc = Some(32 * 1024 * 1024);
+    let frames = match format {
+        image::ImageFormat::Png => {
+            let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(&bytes)).ok()?;
+            decoder.set_limits(limits).ok()?;
+            if !decoder.is_apng().ok()? {
+                return fallback();
+            }
+            decoder.apng().ok()?.into_frames()
+        }
+        image::ImageFormat::WebP => {
+            let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(&bytes)).ok()?;
+            decoder.set_limits(limits).ok()?;
+            if !decoder.has_animation() {
+                return fallback();
+            }
+            decoder.into_frames()
+        }
+        image::ImageFormat::Gif => {
+            let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(&bytes)).ok()?;
+            decoder.set_limits(limits).ok()?;
+            decoder.into_frames()
+        }
+        _ => return fallback(),
+    };
+    let mut decoded = Vec::new();
+    let mut total = 0;
+    for frame in frames {
+        let frame = frame.ok()?;
+        let delay = frame.delay();
+        let pixels = image::DynamicImage::ImageRgba8(frame.into_buffer())
+            .thumbnail(bounds.0, bounds.1)
+            .into_rgba8();
+        total += pixels.len();
+        if decoded.len() >= 120 || total > 4 * 1024 * 1024 {
+            return fallback();
+        }
+        let mut pixels = pixels;
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
+        }
+        decoded.push(Frame::from_parts(pixels, 0, 0, delay));
+    }
+    (!decoded.is_empty()).then(|| Arc::new(RenderImage::new(decoded)))
 }
 
 fn asset_hash(hash: &str) -> bool {
@@ -459,7 +574,76 @@ mod tests {
         assert!(media.cache.borrow().bytes <= BUDGET + IDENTITY_BUDGET);
         assert_eq!(
             decode_bounds("https://cdn.discordapp.com/icons/1/abcdef.png"),
-            (256, 256)
+            (128, 128)
+        );
+    }
+
+    #[test]
+    fn idle_repaints_do_not_evict_the_visible_working_set() {
+        let (tx, _rx) = async_channel::bounded(1);
+        let media = Media {
+            tx,
+            cache: RefCell::new(Cache::default()),
+        };
+        let mut ids = Vec::new();
+        for index in 0..32 {
+            let url = format!("https://cdn.discordapp.com/avatars/{index}/abc.png");
+            media.get(&url);
+            let image = Arc::new(RenderImage::new(vec![Frame::new(image::RgbaImage::new(
+                256, 256,
+            ))]));
+            ids.push((url.clone(), image.id));
+            assert!(
+                media
+                    .receive(Loaded {
+                        url,
+                        image: Some(image),
+                        bytes: 256 * 256 * 4
+                    })
+                    .is_empty()
+            );
+        }
+        assert!(media.cache.borrow().bytes > IDENTITY_BUDGET);
+        for _ in 0..40 {
+            media.begin_frame();
+            for (url, id) in &ids {
+                assert_eq!(media.get(url).unwrap().id, *id);
+            }
+        }
+        media.begin_frame();
+        media.receive(Loaded {
+            url: "https://cdn.discordapp.com/avatars/999/abc.png".into(),
+            image: None,
+            bytes: 0,
+        });
+        assert!(media.cache.borrow().bytes <= IDENTITY_BUDGET);
+    }
+
+    #[test]
+    fn animated_decoding_preserves_alpha_delay_and_accounts_for_every_frame() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            for _ in 0..3 {
+                encoder
+                    .encode_frame(Frame::from_parts(
+                        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255])),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(100, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        let decoded = decode_motion(bytes, (8, 8)).unwrap();
+        assert_eq!(decoded.frame_count(), 3);
+        assert_eq!(decoded.delay(1).numer_denom_ms(), (100, 1));
+        assert_eq!(&decoded.as_bytes(1).unwrap()[..4], &[0, 0, 255, 255]);
+        assert_eq!(
+            (0..decoded.frame_count())
+                .map(|n| decoded.as_bytes(n).unwrap().len())
+                .sum::<usize>(),
+            3 * 8 * 8 * 4
         );
     }
 

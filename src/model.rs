@@ -2,6 +2,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+fn nullable_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 pub const CHANNEL_LIMIT: usize = 12;
 pub const MESSAGE_LIMIT: usize = 200;
 
@@ -16,7 +24,10 @@ pub struct User {
     pub accent_color: Option<u32>,
     #[serde(default)]
     pub bot: bool,
+    pub typing_indicator_style: Option<crate::cosmetics::TypingStyle>,
     pub avatar_decoration_data: Option<AvatarDecoration>,
+    pub display_name_styles: Option<crate::cosmetics::NameStyle>,
+    pub collectibles: Option<crate::cosmetics::Collectibles>,
 }
 
 impl User {
@@ -68,6 +79,8 @@ pub struct ProfileDetails {
     pub banner: Option<String>,
     pub accent_color: Option<u32>,
     pub profile_effect: Option<ProfileEffectRef>,
+    #[serde(default, deserialize_with = "nullable_vec")]
+    pub collectibles: Vec<crate::cosmetics::Reference>,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -80,6 +93,8 @@ pub struct Profile {
     pub effect_asset: Option<crate::effects::Effect>,
     #[serde(skip)]
     pub roles: Vec<Role>,
+    #[serde(skip)]
+    pub frame_asset: Option<crate::effects::ProfileFrame>,
 }
 
 impl Profile {
@@ -122,15 +137,36 @@ impl Profile {
             .unwrap_or(0x5865f2)
             & 0xffffff
     }
-    pub fn effect_ref(&self) -> Option<&ProfileEffectRef> {
+    pub fn collectible_ref(&self, kind: u8) -> Option<&str> {
         self.guild_member_profile
             .as_ref()
-            .and_then(|p| p.profile_effect.as_ref())
+            .and_then(|p| p.collectibles.iter().find(|c| c.kind == kind))
             .or_else(|| {
                 self.user_profile
                     .as_ref()
-                    .and_then(|p| p.profile_effect.as_ref())
+                    .and_then(|p| p.collectibles.iter().find(|c| c.kind == kind))
             })
+            .map(|c| c.sku_id.as_str())
+    }
+    pub fn effect_ref(&self) -> Option<ProfileEffectRef> {
+        for details in [
+            self.guild_member_profile.as_ref(),
+            self.user_profile.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(c) = details.collectibles.iter().find(|c| c.kind == 1) {
+                return Some(ProfileEffectRef {
+                    id: c.sku_id.clone(),
+                    sku_id: Some(c.sku_id.clone()),
+                });
+            }
+            if let Some(e) = &details.profile_effect {
+                return Some(e.clone());
+            }
+        }
+        None
     }
 }
 
@@ -244,6 +280,8 @@ pub struct Member {
     pub avatar: Option<String>,
     pub banner: Option<String>,
     pub avatar_decoration_data: Option<AvatarDecoration>,
+    pub display_name_styles: Option<crate::cosmetics::NameStyle>,
+    pub collectibles: Option<crate::cosmetics::Collectibles>,
     #[serde(default)]
     pub roles: Vec<String>,
     pub joined_at: Option<String>,
@@ -271,6 +309,10 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub mentions: Vec<User>,
+    #[serde(default)]
+    pub mention_everyone: bool,
+    #[serde(default)]
+    pub mention_roles: Vec<String>,
     #[serde(default)]
     pub embeds: Vec<Embed>,
     #[serde(rename = "type", default)]
@@ -330,9 +372,15 @@ struct History {
 #[derive(Default)]
 pub struct Store {
     pub user: User,
+    pub users: HashMap<String, User>,
     pub guilds: Vec<Guild>,
     pub channels: HashMap<String, Channel>,
     pub unread: HashSet<String>,
+    pub mentions: HashMap<String, u32>,
+    pub read: HashMap<String, String>,
+    pub layout: crate::navigation::Layout,
+    pub own_roles: HashMap<String, Vec<String>>,
+    pub mention_suppression: HashMap<String, (bool, bool)>,
     histories: HashMap<String, History>,
     recent: VecDeque<String>,
     revision: u64,
@@ -340,6 +388,125 @@ pub struct Store {
 }
 
 impl Store {
+    pub fn mentioned(&self, message: &Message) -> bool {
+        if message.mentions.iter().any(|u| u.id == self.user.id) {
+            return true;
+        }
+        let Some(guild) = self
+            .channels
+            .get(&message.channel_id)
+            .and_then(|c| c.guild_id.as_ref())
+        else {
+            return false;
+        };
+        let (everyone, roles) = self
+            .mention_suppression
+            .get(guild)
+            .copied()
+            .unwrap_or_default();
+        (message.mention_everyone && !everyone)
+            || (!roles
+                && self
+                    .own_roles
+                    .get(guild)
+                    .is_some_and(|roles| message.mention_roles.iter().any(|id| roles.contains(id))))
+    }
+    pub fn guild_preferences(&mut self, entry: &serde_json::Value) {
+        if let Some(id) = entry["guild_id"].as_str() {
+            let previous = self
+                .mention_suppression
+                .get(id)
+                .copied()
+                .unwrap_or_default();
+            self.mention_suppression.insert(
+                id.into(),
+                (
+                    entry["suppress_everyone"].as_bool().unwrap_or(previous.0),
+                    entry["suppress_roles"].as_bool().unwrap_or(previous.1),
+                ),
+            );
+        }
+    }
+    pub fn server_mentions(&self, guild: &str) -> u32 {
+        self.channels
+            .values()
+            .filter(|c| c.guild_id.as_deref() == Some(guild))
+            .map(|c| self.mentions.get(&c.id).copied().unwrap_or(0))
+            .fold(0, u32::saturating_add)
+    }
+    pub fn server_unread(&self, guild: &str) -> bool {
+        self.channels
+            .values()
+            .any(|c| c.guild_id.as_deref() == Some(guild) && self.unread.contains(&c.id))
+    }
+    pub fn mark_read(&mut self, id: &str) {
+        self.unread.remove(id);
+        self.mentions.remove(id);
+        if let Some(last) = self
+            .channels
+            .get(id)
+            .and_then(|c| c.last_message_id.clone())
+        {
+            self.read.insert(id.into(), last);
+        }
+    }
+    pub fn read_states(&mut self, value: &serde_json::Value) {
+        let entries = value.get("entries").unwrap_or(value);
+        for entry in entries.as_array().into_iter().flatten().take(20000) {
+            self.read_state(entry);
+        }
+    }
+    pub fn read_state(&mut self, entry: &serde_json::Value) {
+        let Some(id) = entry["channel_id"].as_str().or(entry["id"].as_str()) else {
+            return;
+        };
+        let last = entry["message_id"]
+            .as_str()
+            .or(entry["last_message_id"].as_str());
+        if let Some(last) = last {
+            let n = last.parse::<u64>().unwrap_or(0);
+            if entry["manual"].as_bool() != Some(true)
+                && self
+                    .read
+                    .get(id)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .is_some_and(|old| old > n)
+            {
+                return;
+            }
+            self.read.insert(id.into(), last.into());
+        }
+        let count = entry["mention_count"]
+            .as_u64()
+            .unwrap_or(0)
+            .min(u32::MAX as u64) as u32;
+        if count > 0 {
+            self.mentions.insert(id.into(), count);
+        } else {
+            self.mentions.remove(id);
+        }
+        let unread = count > 0
+            || self.channels.get(id).is_some_and(|c| {
+                last.is_some_and(|last| c.activity() > last.parse::<u64>().unwrap_or(0))
+            });
+        if unread {
+            self.unread.insert(id.into());
+        } else {
+            self.unread.remove(id);
+        }
+    }
+    pub fn apply_layout(&mut self, layout: crate::navigation::Layout) {
+        let order = layout.order();
+        let positions: HashMap<_, _> = order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        self.guilds
+            .sort_by_key(|g| positions.get(g.id.as_str()).copied().unwrap_or(usize::MAX));
+        self.layout = layout;
+    }
+
     pub fn channel_messages(&self, id: &str) -> &[Message] {
         self.histories
             .get(id)
@@ -668,6 +835,42 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn profile_collectibles_prefer_server_identity_without_losing_global_fallbacks() {
+        let profile:Profile=serde_json::from_value(serde_json::json!({"user":{"id":"1","display_name_styles":{"font_id":1,"effect_id":2,"colors":[16711680,255]},"collectibles":{"nameplate":{"sku_id":"40"}},"typing_indicator_style":{"typing_suggestion":7,"animation":3,"emojis":[{"unicode_emoji":"🐈"}]}},"user_profile":{"collectibles":[{"type":1,"sku_id":"10"},{"type":3,"sku_id":"30"}]},"guild_member_profile":{"collectibles":[{"type":1,"sku_id":"20"}]}})).unwrap();
+        assert_eq!(profile.effect_ref().unwrap().id, "20");
+        assert_eq!(profile.collectible_ref(3), Some("30"));
+        assert_eq!(profile.user.display_name_styles.unwrap().font(), "Bangers");
+        assert_eq!(
+            profile.user.typing_indicator_style.unwrap().verb(),
+            "meowing"
+        );
+    }
+    #[test]
+    fn unread_counts_follow_remote_acks_and_never_regress_on_an_old_ack() {
+        let mut store = Store::default();
+        store.channels.insert(
+            "2".into(),
+            Channel {
+                id: "2".into(),
+                guild_id: Some("1".into()),
+                last_message_id: Some("100".into()),
+                ..Default::default()
+            },
+        );
+        store.read_states(
+            &serde_json::json!({"entries":[{"id":"2","last_message_id":"90","mention_count":3}]}),
+        );
+        assert_eq!(store.server_mentions("1"), 3);
+        assert!(store.server_unread("1"));
+        store.mark_read("2");
+        assert_eq!(store.server_mentions("1"), 0);
+        store
+            .read_state(&serde_json::json!({"channel_id":"2","message_id":"90","mention_count":3}));
+        assert!(!store.server_unread("1"));
+        store.read_state(&serde_json::json!({"channel_id":"2","message_id":"80","mention_count":1,"manual":true}));
+        assert_eq!(store.server_mentions("1"), 1);
+    }
     #[test]
     fn recent_activity_advances_without_old_messages_reordering_it() {
         let mut store = super::Store::default();
