@@ -1,6 +1,6 @@
 [package]
 name = "larpcord"
-version = "0.1.0"
+version = "0.2.0-dev.4"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -8,11 +8,18 @@ description = "A small, native Discord client in Rust and GPUI"
 repository = "https://github.com/evenafterallisaid/larpcord"
 
 [dependencies]
+alhazen-gpui = { version = "=0.7.2", default-features = false, features = ["native", "http", "audio-output", "videotoolbox", "media-foundation", "nvdec", "vaapi", "native-aac"] }
+base64 = "0.22"
+pulldown-cmark = { version = "0.13", default-features = false }
+qrcode = { version = "0.14", default-features = false }
+rsa = "0.9"
+sha2 = "0.10"
 anyhow = "1"
 async-channel = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 directories = "6"
 futures-util = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
 keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 notify-rust = "4"
@@ -25,6 +32,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 unicode-segmentation = "1"
 zeroize = "1"
+
+[dev-dependencies]
+gpui = { version = "=0.2.2", features = ["test-support"] }
 
 [profile.dev]
 debug = 0
@@ -39,6 +49,6 @@ panic = "abort"
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
 
-# gpui 0.2.2 pulls xattr 0.2.3, which uses the linux enoattr alias removed in newer libc.
-[target.'cfg(target_os = "linux")'.dependencies]
-libc = "=0.2.177"
+# gpui's old xattr needs the linux enodata name with current libc.
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
