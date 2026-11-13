@@ -4,6 +4,7 @@ pub fn icon(name: &str, size: f32) -> Svg {
     svg()
         .path(format!("icons/{name}.svg"))
         .size(px(size))
+        .text_color(rgb(0xdcddde))
         .flex_shrink_0()
 }
 
