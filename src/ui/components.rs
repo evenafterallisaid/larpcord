@@ -96,6 +96,8 @@ impl Larpcord {
             self.video_card(
                 source,
                 attachment.map_or("Video", |a| a.filename.as_str()),
+                None,
+                media.width.zip(media.height),
                 cx,
             )
         } else if thumbnail {
@@ -214,7 +216,7 @@ impl Larpcord {
                     .w_full()
                     .justify_between()
                     .child(label)
-                    .child("⌄")
+                    .child(icon("chevron-down", 16.))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_component_menu(message.clone(), component.clone(), window, cx)
                     }))

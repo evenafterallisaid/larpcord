@@ -141,6 +141,8 @@ pub struct Guild {
     pub name: String,
     pub icon: Option<String>,
     pub banner: Option<String>,
+    pub premium_subscription_count: Option<u32>,
+    pub premium_tier: Option<u8>,
     #[serde(default)]
     pub roles: Vec<Role>,
 }
@@ -572,6 +574,8 @@ impl Store {
         store.guilds.push(Guild {
             id: "larp".into(),
             name: "The little guild".into(),
+            premium_subscription_count: Some(8),
+            premium_tier: Some(2),
             ..Guild::default()
         });
         for (id, name, topic, kind) in [
@@ -653,6 +657,10 @@ impl Store {
             serde_json::from_str(include_str!("../tests/fixtures/components-v2-help.json"))
                 .expect("component help fixture"),
         );
+        store.insert(serde_json::from_value(serde_json::json!({
+            "id":"9", "channel_id":"campfire", "author":{"id":"helper","username":"little helper","bot":true},"timestamp":"2026-11-12T18:38:00Z",
+            "embeds":[{"type":"video","title":"native video preview","video":{"url":"https://cdn.discordapp.com/larpcord-preview/sample.mp4","width":320,"height":180}}]
+        })).expect("sample video card"));
         store.insert(Message { id: "20".into(), channel_id: "build-log".into(), author: store.user.clone(), content: "Native Rust + GPUI. This preview uses sample messages. Connect your account when you're ready.".into(), ..Message::default() });
         store
     }

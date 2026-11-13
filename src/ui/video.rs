@@ -1,21 +1,80 @@
 use super::*;
 
 impl Larpcord {
-    pub(super) fn video_card(&self, url: &str, title: &str, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn video_card(
+        &self,
+        url: &str,
+        title: &str,
+        poster: Option<&crate::model::EmbedMedia>,
+        dimensions: Option<(u32, u32)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (width, height) = media_size(
+            dimensions.or_else(|| poster.and_then(|p| p.width.zip(p.height))),
+            400.,
+            300.,
+        );
+        let image = poster
+            .and_then(|poster| poster.proxy_url.as_deref().or(poster.url.as_deref()))
+            .filter(|url| crate::media::cdn_url(url))
+            .and_then(|url| self.media.get(url));
         let url = url.to_string();
         let title = title.to_string();
-        column()
+        div()
             .id(SharedString::from(format!("video-{url}")))
-            .w(px(400.))
+            .debug_selector(|| "video-tile".into())
+            .relative()
+            .w(px(width))
+            .h(px(height))
             .max_w_full()
-            .p_4()
-            .gap_3()
             .rounded_lg()
-            .bg(rgb(PANEL))
-            .child(label(title.clone()).truncate())
-            .child(button("play-video", "▶ Play video").on_click(
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgb(LINE))
+            .bg(rgb(0x09090b))
+            .cursor_pointer()
+            .when_some(image, |s, image| {
+                s.child(
+                    img(image)
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .rounded_lg(),
+                )
+            })
+            .child(
+                column()
+                    .absolute()
+                    .inset_0()
+                    .justify_center()
+                    .items_center()
+                    .child(
+                        row()
+                            .size(px(48.))
+                            .justify_center()
+                            .rounded_full()
+                            .bg(rgba(0x000000b8))
+                            .border_1()
+                            .border_color(rgba(0xffffff30))
+                            .child(icon("play", 22.).text_color(rgb(TEXT)))
+                            .hover(|s| s.bg(rgb(0x5865f2))),
+                    ),
+            )
+            .when(!title.is_empty(), |s| {
+                s.child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .bg(rgba(0x0000008c))
+                        .child(label(title.clone()).text_color(rgb(TEXT)).truncate()),
+                )
+            })
+            .tooltip(|_, cx| cx.new(|_| Hint("Play video".into())).into())
+            .on_click(
                 cx.listener(move |this, _, window, cx| this.open_video(&url, &title, window, cx)),
-            ))
+            )
             .into_any_element()
     }
 
@@ -26,6 +85,10 @@ impl Larpcord {
             || self.component_menu.is_some()
             || self.video.is_some()
         {
+            return;
+        }
+        if self.preview_only && url == "https://cdn.discordapp.com/larpcord-preview/sample.mp4" {
+            self.sample_video(window, cx);
             return;
         }
         let Some(source) = crate::video::source(url) else {
@@ -122,6 +185,6 @@ impl Larpcord {
                     )
                     .when_some(self.video.clone(), |s, video| s.child(video)),
             )
-            .into_any_element()
+            .map(|element| fade_in(element, "video-enter", self.settings.animations))
     }
 }

@@ -1,0 +1,2 @@
+# upstream shader whitespace is preserved in the vendored source.
+vendor/gpui/** -whitespace

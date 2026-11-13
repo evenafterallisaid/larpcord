@@ -9,7 +9,8 @@ use std::{
 use gpui::RenderImage;
 use image::{Frame, ImageReader};
 
-const BUDGET: usize = 24 * 1024 * 1024;
+const BUDGET: usize = 12 * 1024 * 1024;
+const IDENTITY_BUDGET: usize = 4 * 1024 * 1024;
 const ENTRIES: usize = 128;
 
 pub fn cdn_url(value: &str) -> bool {
@@ -45,7 +46,51 @@ pub fn avatar(id: &str, hash: Option<&str>) -> Option<String> {
     ))
 }
 
+fn identity_asset(url: &str) -> bool {
+    reqwest::Url::parse(url).ok().is_some_and(|url| {
+        let path = url.path();
+        [
+            "/avatars/",
+            "/icons/",
+            "/emojis/",
+            "/avatar-decoration-presets/",
+            "/media/v1/collectibles-shop/",
+        ]
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+            || path.contains("/avatars/")
+    })
+}
+
+fn decode_bounds(url: &str) -> (u32, u32) {
+    if identity_asset(url) {
+        (256, 256)
+    } else if url.contains("/banners/") {
+        (640, 256)
+    } else {
+        (640, 480)
+    }
+}
+
+// release old tiles after frames already submitted to the gpu have finished using them.
+pub fn retire(images: Vec<Arc<RenderImage>>, window: &mut gpui::Window, frames: u8) {
+    if images.is_empty() {
+        return;
+    }
+    window.on_next_frame(move |window, cx| {
+        if frames == 0 {
+            for image in images {
+                cx.drop_image(image, Some(window));
+            }
+        } else {
+            retire(images, window, frames - 1);
+        }
+    });
+    window.refresh();
+}
+
 struct Entry {
+    identity: bool,
     image: Option<Arc<RenderImage>>,
     bytes: usize,
     used: u64,
@@ -100,7 +145,7 @@ impl Media {
                     else {
                         return;
                     };
-                    let gate = Arc::new(tokio::sync::Semaphore::new(3));
+                    let gate = Arc::new(tokio::sync::Semaphore::new(2));
                     while let Ok(url) = requests.recv().await {
                         let Ok(permit) = gate.clone().acquire_owned().await else {
                             break;
@@ -110,10 +155,13 @@ impl Media {
                         tokio::spawn(async move {
                             let data = download(&client, &url).await;
                             let image = match data {
-                                Some(data) => tokio::task::spawn_blocking(move || decode(data))
-                                    .await
-                                    .ok()
-                                    .flatten(),
+                                Some(data) => {
+                                    let bounds = decode_bounds(&url);
+                                    tokio::task::spawn_blocking(move || decode(data, bounds))
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                }
                                 None => None,
                             };
                             let bytes = image
@@ -157,6 +205,7 @@ impl Media {
             cache.entries.insert(
                 url.to_string(),
                 Entry {
+                    identity: identity_asset(url),
                     image: None,
                     bytes: 0,
                     used: clock,
@@ -168,17 +217,21 @@ impl Media {
         None
     }
 
-    pub fn receive(&self, loaded: Loaded) {
+    pub fn receive(&self, loaded: Loaded) -> Vec<Arc<RenderImage>> {
+        let mut retired = Vec::new();
         let mut cache = self.cache.borrow_mut();
         cache.clock += 1;
         let clock = cache.clock;
         if let Some(old) = cache.entries.remove(&loaded.url) {
             cache.bytes -= old.bytes;
+            retired.extend(old.image);
         }
         cache.bytes += loaded.bytes;
+        let identity = identity_asset(&loaded.url);
         cache.entries.insert(
             loaded.url,
             Entry {
+                identity,
                 image: loaded.image,
                 bytes: loaded.bytes,
                 used: clock,
@@ -186,20 +239,36 @@ impl Media {
                 attempted: Instant::now(),
             },
         );
-        while cache.bytes > BUDGET || cache.entries.len() > ENTRIES {
-            let Some(key) = cache
-                .entries
-                .iter()
-                .filter(|(_, e)| !e.pending)
-                .min_by_key(|(_, e)| e.used)
-                .map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            if let Some(entry) = cache.entries.remove(&key) {
-                cache.bytes -= entry.bytes;
+        // portraits and icons have their own allowance, so a large attachment cannot evict them.
+        for identity in [true, false] {
+            let budget = if identity { IDENTITY_BUDGET } else { BUDGET };
+            loop {
+                let (bytes, count) = cache
+                    .entries
+                    .iter()
+                    .filter(|(_, entry)| entry.identity == identity)
+                    .fold((0, 0), |(bytes, count), (_, entry)| {
+                        (bytes + entry.bytes, count + 1)
+                    });
+                if bytes <= budget && count <= ENTRIES {
+                    break;
+                }
+                let key = cache
+                    .entries
+                    .iter()
+                    .filter(|(_, e)| !e.pending && e.identity == identity)
+                    .min_by_key(|(_, e)| e.used)
+                    .map(|(key, _)| key.clone());
+                let Some(key) = key else {
+                    break;
+                };
+                if let Some(entry) = cache.entries.remove(&key) {
+                    cache.bytes -= entry.bytes;
+                    retired.extend(entry.image);
+                }
             }
         }
+        retired
     }
 }
 
@@ -224,7 +293,7 @@ async fn download(client: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn decode(bytes: Vec<u8>) -> Option<Arc<RenderImage>> {
+fn decode(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
     let mut reader = ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
         .ok()?;
@@ -233,7 +302,7 @@ fn decode(bytes: Vec<u8>) -> Option<Arc<RenderImage>> {
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
-    let image = reader.decode().ok()?.thumbnail(1024, 768);
+    let image = reader.decode().ok()?.thumbnail(bounds.0, bounds.1);
     let mut pixels = image.into_rgba8();
     for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
@@ -347,7 +416,51 @@ mod tests {
                 bytes: 1024 * 768 * 4,
             });
         }
-        assert!(media.cache.borrow().bytes <= BUDGET);
+        assert!(media.cache.borrow().bytes <= BUDGET + IDENTITY_BUDGET);
+    }
+
+    #[test]
+    fn attachment_churn_keeps_portraits_stable_and_returns_every_retired_texture() {
+        let (tx, _rx) = async_channel::bounded(1);
+        let media = Media {
+            tx,
+            cache: RefCell::new(Cache::default()),
+        };
+        let portrait = "https://cdn.discordapp.com/avatars/1/abcdef.png?size=128";
+        let image = Arc::new(RenderImage::new(vec![Frame::new(image::RgbaImage::new(
+            64, 64,
+        ))]));
+        let portrait_id = image.id;
+        assert!(
+            media
+                .receive(Loaded {
+                    url: portrait.into(),
+                    image: Some(image),
+                    bytes: 16384
+                })
+                .is_empty()
+        );
+        let mut retired = 0;
+        for index in 0..600 {
+            let image = Arc::new(RenderImage::new(vec![Frame::new(image::RgbaImage::new(
+                64, 64,
+            ))]));
+            retired += media
+                .receive(Loaded {
+                    url: format!("https://cdn.discordapp.com/attachments/{index}.png"),
+                    image: Some(image),
+                    bytes: 16384,
+                })
+                .len();
+            assert_eq!(media.get(portrait).unwrap().id, portrait_id);
+        }
+        assert_eq!(retired, 600 - ENTRIES);
+        assert_eq!(media.cache.borrow().entries.len(), ENTRIES + 1);
+        assert!(media.cache.borrow().bytes <= BUDGET + IDENTITY_BUDGET);
+        assert_eq!(
+            decode_bounds("https://cdn.discordapp.com/icons/1/abcdef.png"),
+            (256, 256)
+        );
     }
 
     #[test]
@@ -355,9 +468,9 @@ mod tests {
         let image = image::RgbaImage::from_pixel(2000, 1000, image::Rgba([200, 80, 30, 255]));
         let mut bytes = Cursor::new(Vec::new());
         image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
-        let decoded = decode(bytes.into_inner()).unwrap();
+        let decoded = decode(bytes.into_inner(), (640, 480)).unwrap();
         assert_eq!(&decoded.as_bytes(0).unwrap()[..4], &[30, 80, 200, 255]);
-        assert!(decoded.as_bytes(0).unwrap().len() <= 1024 * 768 * 4);
-        assert!(decode(b"not an image".to_vec()).is_none());
+        assert!(decoded.as_bytes(0).unwrap().len() <= 640 * 480 * 4);
+        assert!(decode(b"not an image".to_vec(), (640, 480)).is_none());
     }
 }

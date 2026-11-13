@@ -4,6 +4,7 @@ mod auth;
 mod components;
 mod content;
 mod effects;
+mod icons;
 mod input;
 mod media;
 mod model;
@@ -22,11 +23,18 @@ impl AssetSource for Assets {
         Ok(match path {
             "mascot.png" => Some(Cow::Borrowed(include_bytes!("../assets/mascot.png"))),
             "home.svg" => Some(Cow::Borrowed(include_bytes!("../assets/home.svg"))),
-            _ => None,
+            _ => icons::ASSETS
+                .iter()
+                .find(|(name, _)| *name == path)
+                .map(|(_, bytes)| Cow::Borrowed(*bytes)),
         })
     }
     fn list(&self, _: &str) -> anyhow::Result<Vec<SharedString>> {
-        Ok(vec!["mascot.png".into(), "home.svg".into()])
+        Ok(["mascot.png", "home.svg"]
+            .into_iter()
+            .chain(icons::ASSETS.iter().map(|(name, _)| *name))
+            .map(SharedString::from)
+            .collect())
     }
 }
 

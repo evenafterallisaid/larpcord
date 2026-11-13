@@ -1,11 +1,20 @@
 [package]
 name = "larpcord"
-version = "0.2.0-dev.4"
+default-run = "larpcord"
+version = "0.2.0-dev.5"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
 description = "A small, native Discord client in Rust and GPUI"
 repository = "https://github.com/evenafterallisaid/larpcord"
+
+[features]
+media-stress = []
+
+[[bin]]
+name = "media-stress"
+path = "tools/media-stress.rs"
+required-features = ["media-stress"]
 
 [dependencies]
 alhazen-gpui = { version = "=0.7.2", default-features = false, features = ["native", "http", "audio-output", "videotoolbox", "media-foundation", "nvdec", "vaapi", "native-aac"] }
@@ -52,3 +61,4 @@ embed-resource = "3"
 # gpui's old xattr needs the linux enodata name with current libc.
 [patch.crates-io]
 xattr = { path = "vendor/xattr" }
+gpui = { path = "vendor/gpui" }
