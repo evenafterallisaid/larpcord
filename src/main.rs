@@ -10,6 +10,7 @@ mod model;
 mod network;
 mod settings;
 mod ui;
+mod video;
 
 use gpui::{prelude::*, *};
 use std::borrow::Cow;
@@ -20,11 +21,12 @@ impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         Ok(match path {
             "mascot.png" => Some(Cow::Borrowed(include_bytes!("../assets/mascot.png"))),
+            "home.svg" => Some(Cow::Borrowed(include_bytes!("../assets/home.svg"))),
             _ => None,
         })
     }
     fn list(&self, _: &str) -> anyhow::Result<Vec<SharedString>> {
-        Ok(vec!["mascot.png".into()])
+        Ok(vec!["mascot.png".into(), "home.svg".into()])
     }
 }
 

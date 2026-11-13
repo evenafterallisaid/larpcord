@@ -162,6 +162,14 @@ pub struct Channel {
 }
 
 impl Channel {
+    pub fn activity(&self) -> u64 {
+        self.last_message_id
+            .as_deref()
+            .unwrap_or(&self.id)
+            .parse()
+            .unwrap_or(0)
+    }
+
     pub fn label(&self) -> String {
         self.name.clone().unwrap_or_else(|| {
             let names = self.recipients.iter().map(User::name).collect::<Vec<_>>();
@@ -214,6 +222,7 @@ pub struct EmbedFooter {
 
 #[derive(Clone, Default, Deserialize)]
 pub struct Embed {
+    pub video: Option<EmbedMedia>,
     pub title: Option<String>,
     pub description: Option<String>,
     pub url: Option<String>,
@@ -373,7 +382,16 @@ impl Store {
         self.histories.entry(channel.into()).or_default()
     }
 
+    pub fn note_message(&mut self, channel: &str, message: &str) {
+        if let Some(channel) = self.channels.get_mut(channel)
+            && message.parse::<u64>().unwrap_or(0) > channel.activity()
+        {
+            channel.last_message_id = Some(message.to_string());
+        }
+    }
+
     pub fn insert(&mut self, message: Message) {
+        self.note_message(&message.channel_id, &message.id);
         self.revision += 1;
         let revision = self.revision;
         let history = self.history(&message.channel_id);
@@ -642,6 +660,23 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recent_activity_advances_without_old_messages_reordering_it() {
+        let mut store = super::Store::default();
+        store.channels.insert(
+            "1".into(),
+            super::Channel {
+                id: "1".into(),
+                last_message_id: Some("99".into()),
+                ..Default::default()
+            },
+        );
+        store.note_message("1", "55");
+        assert_eq!(store.channels["1"].activity(), 99);
+        store.note_message("1", "100");
+        assert_eq!(store.channels["1"].activity(), 100);
+    }
+
     use super::*;
 
     fn message(id: usize, channel: &str) -> Message {
