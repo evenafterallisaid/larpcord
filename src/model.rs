@@ -836,6 +836,40 @@ impl Store {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn live_role_and_everyone_mentions_respect_suppression() {
+        let mut store = Store {
+            user: User {
+                id: "7".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        store.channels.insert(
+            "2".into(),
+            Channel {
+                id: "2".into(),
+                guild_id: Some("1".into()),
+                ..Default::default()
+            },
+        );
+        store.own_roles.insert("1".into(), vec!["9".into()]);
+        let mut message = Message {
+            channel_id: "2".into(),
+            mention_roles: vec!["9".into()],
+            ..Default::default()
+        };
+        assert!(store.mentioned(&message));
+        store.guild_preferences(
+            &serde_json::json!({"guild_id":"1","suppress_roles":true,"suppress_everyone":true}),
+        );
+        assert!(!store.mentioned(&message));
+        message.mention_everyone = true;
+        assert!(!store.mentioned(&message));
+        message.mentions.push(store.user.clone());
+        assert!(store.mentioned(&message));
+    }
+
+    #[test]
     fn profile_collectibles_prefer_server_identity_without_losing_global_fallbacks() {
         let profile:Profile=serde_json::from_value(serde_json::json!({"user":{"id":"1","display_name_styles":{"font_id":1,"effect_id":2,"colors":[16711680,255]},"collectibles":{"nameplate":{"sku_id":"40"}},"typing_indicator_style":{"typing_suggestion":7,"animation":3,"emojis":[{"unicode_emoji":"🐈"}]}},"user_profile":{"collectibles":[{"type":1,"sku_id":"10"},{"type":3,"sku_id":"30"}]},"guild_member_profile":{"collectibles":[{"type":1,"sku_id":"20"}]}})).unwrap();
         assert_eq!(profile.effect_ref().unwrap().id, "20");

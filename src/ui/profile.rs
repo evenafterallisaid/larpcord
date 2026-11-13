@@ -88,12 +88,13 @@ impl Larpcord {
                                         .collect::<Vec<_>>();
                                     let duration = delays.iter().sum::<f32>();
                                     let elapsed = started.elapsed().as_secs_f32() * 1000.;
-                                    let phase = if animated {
+                                    let phase = if animated && image.frame_count() > 1 {
                                         layer.phase(elapsed, duration)
                                     } else {
                                         Some(0.)
                                     };
                                     if animated
+                                        && image.frame_count() > 1
                                         && window.is_window_active()
                                         && (layer.looping
                                             || elapsed < layer.start + layer.duration.max(duration))
@@ -145,6 +146,7 @@ impl Larpcord {
                 column()
                     .relative()
                     .w(px(440.))
+                    .h(px(600.))
                     .max_h(relative(0.9))
                     .children(back)
                     .child(
@@ -152,8 +154,8 @@ impl Larpcord {
                             .relative()
                             .w_full()
                             .debug_selector(|| "profile-card".into())
-                            .h(px(600.))
-                            .max_h(relative(0.9))
+                            .h_full()
+                            .min_h_0()
                             .rounded_xl()
                             .overflow_hidden()
                             .bg(rgb(0x232428))
@@ -184,6 +186,8 @@ impl Larpcord {
                             .child(
                                 column()
                                     .id("profile-content")
+                                    .flex_1()
+                                    .min_h_0()
                                     .overflow_y_scroll()
                                     .p_5()
                                     .pt(px(64.))
