@@ -3,11 +3,13 @@
 mod auth;
 mod components;
 mod content;
+mod cosmetics;
 mod effects;
 mod icons;
 mod input;
 mod media;
 mod model;
+mod navigation;
 mod network;
 mod settings;
 mod ui;
@@ -49,6 +51,7 @@ fn main() {
         cx.activate(true);
     });
     app.run(|cx: &mut App| {
+        cosmetics::register_fonts(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(vec![Menu {
             name: "Larpcord".into(),

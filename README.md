@@ -5,7 +5,7 @@
 
 this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the first preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.1.0-preview.2).
 
-**0.2.0-dev.4 is a development preview.** this branch contains the next login and layout milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
+**0.2.0-dev.6 is a development preview.** this branch contains the next login and layout milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
 
 ## what works in this milestone
 
@@ -15,8 +15,8 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 - automatically paged history in both directions, jump to latest, grouped messages, sending, live edits and deletions
 - image attachments, static custom emoji, markdown, bot embeds and components v2 layouts
 - bot buttons and string selectors through discord interactions, plus explicit link controls
-- on-demand profiles with banners, biographies, pronouns, server identity, decorations, reduced-motion effects and role chips
-- server icons and banners, a flat single-color home mark and typing indicators
+- on-demand profiles with overlapping avatars, banners, biographies, pronouns, server identity, decorations, layered frames, bounded effects and role chips
+- server icons and banners, saved server order and folders, unread/mention badges, a flat single-color home mark and custom typing indicators
 - click-to-play video attachments, cdn video embeds and components v2 video galleries, with a native viewer, seeking, volume and mute
 - floating settings with mouse, scroll and keyboard isolation
 - gateway heartbeats, acknowledgement checks, session resume, reconnection backoff and automatic retry after a transient startup failure
@@ -46,7 +46,7 @@ an account session token is a password. keep it private. larpcord is an independ
 - video decoders start only after a click, one viewer at a time, and are released when it closes; queues are bounded and software decoders use two threads
 - at most 12 conversation histories, with 200 messages each, live in memory
 - switching conversations evicts the least recently used history while retaining the active one
-- visible images decode off the ui thread; the media cache holds at most 128 entries or 24 mib of decoded pixels
+- visible images decode off the ui thread; portraits and content have separate soft allowances of 4 mib and 12 mib, each with 128 entries; a visible working set can use up to three times its allowance to avoid repeated eviction, with a 256-entry hard limit per pool
 - media uses public discord cdn requests without account credentials; external links open only after a click
 - animated emoji use a still frame for now
 - the network service runs on a two-worker rust runtime, independently of window rendering
@@ -97,7 +97,7 @@ the chosen [glass mascot and wordmark](https://chatgpt.com/s/m_6af5e32be8808191b
 
 ## current rendering limits
 
-custom emoji, avatars, banners, decorations and profile effects currently use static or reduced-motion artwork. embed titles, descriptions, fields, images and footers render natively. components v2 containers, sections, text displays, thumbnails, galleries, files and separators render natively too. buttons and string selectors can submit interactions; entity selectors, bot modal forms, premium purchase controls, stickers are still pending. extended profiles load only when opened, use the server identity where provided, and are cached for five minutes with at most 32 entries. the selected older history can retain up to 200 additional live messages while you browse; returning to latest merges that tail and keeps the normal bounded window.
+avatars, banners and message emoji use still artwork. decorations and supported effect layers animate only on hover or in the open profile, subject to reduced-motion settings and strict decoding limits. nameplates use still artwork in dm and account rows. frames render their own staple, rail and repeated border layers. bundled display-name fonts and color gradients render natively; unavailable font families fall back to inter, and discord’s exact neon/glow/prism/gummy shader treatments remain approximations. custom typing emojis, verbs and pulse/ring/wave treatments use the received user style; multiple typists use the normal combined indicator. embed titles, descriptions, fields, images and footers render natively. components v2 containers, sections, text displays, thumbnails, galleries, files and separators render natively too. buttons and string selectors can submit interactions; entity selectors, bot modal forms, premium purchase controls, stickers are still pending. extended profiles load only when opened, use the server identity where provided, and are cached for five minutes with at most 32 entries. the selected older history can retain up to 200 additional live messages while you browse; returning to latest merges that tail and keeps the normal bounded window.
 
 message and cdn fields follow discord's [message schema](https://docs.discord.com/developers/resources/message), [user schema](https://docs.discord.com/developers/resources/user) and [image formatting reference](https://docs.discord.com/developers/reference#image-formatting).
 
