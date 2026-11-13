@@ -172,12 +172,14 @@ impl Larpcord {
                                 div()
                                     .relative()
                                     .size(px(106.))
+                                    .flex_shrink_0()
                                     .child(
                                         div()
                                             .absolute()
                                             .left(px(9.))
                                             .top(px(9.))
                                             .size(px(88.))
+                                            .flex_shrink_0()
                                             .rounded_full()
                                             .overflow_hidden()
                                             .map(|s| match avatar {
@@ -191,7 +193,13 @@ impl Larpcord {
                                             }),
                                     )
                                     .when_some(decoration, |s, image| {
-                                        s.child(img(image).absolute().inset_0().size_full())
+                                        s.child(
+                                            img(image)
+                                                .absolute()
+                                                .inset_0()
+                                                .size_full()
+                                                .object_fit(ObjectFit::Contain),
+                                        )
                                     }),
                             )
                             .child(
@@ -303,6 +311,6 @@ impl Larpcord {
                             ),
                     ),
             )
-            .into_any_element()
+            .map(|element| fade_in(element, "profile-enter", self.settings.animations))
     }
 }

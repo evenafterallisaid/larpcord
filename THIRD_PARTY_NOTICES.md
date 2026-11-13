@@ -11,3 +11,5 @@ pulldown-cmark 0.13.6 parses markdown. it is copyright 2015 google inc., license
 xattr 0.2.3 by steven allen is vendored under mit/apache-2.0 with a small linux compatibility patch documented in `vendor/xattr/LARPCORD-PATCH.md`. original source licenses are retained there.
 
 alhazen-gpui and alhazen-core 0.7.2 by mohamed a. provide native video playback under apache-2.0. their complete license and notice files are included in `licenses/ALHAZEN-*-LICENSE.txt` and `licenses/ALHAZEN-*-NOTICE.txt`, including the vp9-mt attribution.
+
+gpui 0.2.2 is vendored under apache-2.0 with graphics atlas reclamation fixes described in `vendor/gpui/LARPCORD-PATCH.md`. its original license is retained.
