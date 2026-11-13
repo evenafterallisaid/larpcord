@@ -133,13 +133,78 @@ impl EffectCache {
 #[derive(Clone)]
 struct Api {
     client: Client,
+    #[cfg(test)]
+    endpoint: Option<String>,
     token: Arc<Zeroizing<String>>,
     gate: Arc<Mutex<Instant>>,
     effects: Arc<Mutex<EffectCache>>,
     session_id: Arc<std::sync::Mutex<Option<String>>>,
 }
 
+struct RequestFailure {
+    message: String,
+    retryable: bool,
+}
+
+impl RequestFailure {
+    fn retry(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+}
+impl From<String> for RequestFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            retryable: false,
+        }
+    }
+}
+impl From<&str> for RequestFailure {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+fn retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(2u64.saturating_pow(attempt.min(5)).min(30))
+}
+
 impl Api {
+    async fn validate(&self, events: &Sender<Envelope>, generation: u64) -> bool {
+        let mut attempt = 0;
+        loop {
+            match self
+                .request_checked::<Value>(Method::GET, "/users/@me", None)
+                .await
+            {
+                Ok(_) => return true,
+                Err(error) if error.retryable => {
+                    emit(events, generation, Event::Status("Reconnecting".into())).await;
+                    emit(
+                        events,
+                        generation,
+                        Event::Error("Cannot reach Discord. Retrying automatically…".into()),
+                    )
+                    .await;
+                    sleep(retry_delay(attempt)).await;
+                    attempt = attempt.saturating_add(1);
+                }
+                Err(error) => {
+                    emit(
+                        events,
+                        generation,
+                        Event::Status("Connection failed".into()),
+                    )
+                    .await;
+                    emit(events, generation, Event::Error(error.message)).await;
+                    return false;
+                }
+            }
+        }
+    }
     fn new(token: Zeroizing<String>) -> Result<Self, String> {
         let client = Client::builder()
             .timeout(Duration::from_secs(25))
@@ -153,6 +218,8 @@ impl Api {
             .map_err(|_| "Could not initialize the network client.".to_string())?;
         Ok(Self {
             client,
+            #[cfg(test)]
+            endpoint: None,
             token: Arc::new(token),
             gate: Arc::new(Mutex::new(Instant::now())),
             effects: Arc::new(Mutex::new(EffectCache::default())),
@@ -238,13 +305,32 @@ impl Api {
         path: &str,
         body: Option<Value>,
     ) -> Result<T, String> {
+        self.request_checked(method, path, body)
+            .await
+            .map_err(|error| error.message)
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        #[cfg(test)]
+        if let Some(endpoint) = &self.endpoint {
+            return format!("{endpoint}{path}");
+        }
+        format!("https://discord.com/api/v10{path}")
+    }
+
+    async fn request_checked<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<T, RequestFailure> {
         // one request lane observes retry-after and avoids a burst when switching channels.
         let mut next = self.gate.lock().await;
         for _ in 0..3 {
             sleep_until(*next).await;
             let mut request = self
                 .client
-                .request(method.clone(), format!("https://discord.com/api/v10{path}"))
+                .request(method.clone(), self.endpoint(path))
                 .header("Authorization", self.token.as_str());
             if path.ends_with("/typing") {
                 request = request.timeout(Duration::from_secs(3));
@@ -253,7 +339,7 @@ impl Api {
                 request = request.json(body);
             }
             let response = request.send().await.map_err(|_| {
-                "The request could not be completed. Check your connection.".to_string()
+                RequestFailure::retry("The request could not be completed. Check your connection.")
             })?;
             let status = response.status();
             let exhausted = response
@@ -280,25 +366,28 @@ impl Api {
                 continue;
             }
             if status.as_u16() == 401 {
-                return Err(
-                    "Your session has expired. Connect again with a valid session token.".into(),
-                );
+                return Err("Your session has expired. Sign in again.".into());
             }
             if status.as_u16() == 403 {
                 return Err("Discord did not allow access to this channel or action.".into());
             }
             if !status.is_success() {
-                return Err(format!(
+                let message = format!(
                     "Discord returned HTTP {}. Try again shortly.",
                     status.as_u16()
-                ));
+                );
+                return Err(if status.is_server_error() || status.as_u16() == 408 {
+                    RequestFailure::retry(message)
+                } else {
+                    message.into()
+                });
             }
             let mut response = response;
             let mut bytes = Vec::new();
             while let Some(chunk) = response
                 .chunk()
                 .await
-                .map_err(|_| "The response was interrupted.".to_string())?
+                .map_err(|_| RequestFailure::retry("The response was interrupted."))?
             {
                 if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
                     return Err("The response exceeded the client memory limit.".into());
@@ -311,7 +400,9 @@ impl Api {
             return serde_json::from_slice(&bytes)
                 .map_err(|_| "Discord returned an unexpected response.".into());
         }
-        Err("Discord is rate limiting this session. Wait a moment and try again.".into())
+        Err(RequestFailure::retry(
+            "Discord is rate limiting this session. Wait a moment and try again.",
+        ))
     }
 }
 
@@ -384,10 +475,7 @@ impl Backend {
                                             let viewed = viewed_rx.clone();
                                             tasks.spawn(async move {
                                                 // validate before saving a mistyped or expired credential.
-                                                if let Err(error) = client.request::<Value>(Method::GET, "/users/@me", None).await {
-                                                    emit(&events, generation, Event::Error(error)).await;
-                                                    return;
-                                                }
+                                                if !client.validate(&events, generation).await { return; }
                                                 let token = client.token.clone();
                                                 let save = tokio::task::spawn_blocking(move || {
                                                     let entry = credential().map_err(|_| ())?;
@@ -791,6 +879,58 @@ pub fn guild_channels(value: &Value) -> Vec<Channel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn validation_server(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            for status in statuses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let _ = socket.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 {status} status\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (endpoint, task)
+    }
+
+    #[tokio::test]
+    async fn startup_retries_transient_failure_and_recovers_without_another_login() {
+        let (endpoint, server) = validation_server(vec![503, 200]).await;
+        let mut api = Api::new(Zeroizing::new("test-only".into())).unwrap();
+        api.endpoint = Some(endpoint);
+        let (events, receiver) = async_channel::bounded(8);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), api.validate(&events, 7))
+                .await
+                .unwrap()
+        );
+        assert!(
+            matches!(receiver.recv().await.unwrap().event, Event::Status(status) if status == "Reconnecting")
+        );
+        server.await.unwrap();
+        assert_eq!(retry_delay(100), Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn expired_credentials_stop_retrying_and_get_a_useful_status() {
+        let (endpoint, server) = validation_server(vec![401]).await;
+        let mut api = Api::new(Zeroizing::new("test-only".into())).unwrap();
+        api.endpoint = Some(endpoint);
+        let (events, receiver) = async_channel::bounded(8);
+        assert!(!api.validate(&events, 7).await);
+        assert!(
+            matches!(receiver.recv().await.unwrap().event, Event::Status(status) if status == "Connection failed")
+        );
+        assert!(
+            matches!(receiver.recv().await.unwrap().event, Event::Error(error) if error.contains("expired"))
+        );
+        server.await.unwrap();
+    }
+
     #[test]
     fn changing_guild_subscriptions_disables_the_previous_guild() {
         let payload = guild_subscription_change(Some("1"), Some("2")).unwrap();

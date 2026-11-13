@@ -5,6 +5,7 @@ impl Larpcord {
         if self.settings_tab.is_some()
             || self.login_open
             || self.profile.is_some()
+            || self.video.is_some()
             || self.interaction.is_some()
         {
             return;
@@ -70,6 +71,7 @@ impl Larpcord {
         media: &crate::components::Media,
         spoiler: bool,
         thumbnail: bool,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let attachment = media
             .url
@@ -87,6 +89,15 @@ impl Larpcord {
             .unwrap_or(&url);
         let visual = if spoiler {
             label("Spoiler image").into_any_element()
+        } else if !thumbnail
+            && crate::video::video_type(attachment.and_then(|a| a.content_type.as_deref()), &url)
+            && crate::video::source(source).is_some()
+        {
+            self.video_card(
+                source,
+                attachment.map_or("Video", |a| a.filename.as_str()),
+                cx,
+            )
         } else if thumbnail {
             div()
                 .size(px(80.))
@@ -239,7 +250,7 @@ impl Larpcord {
                 .into_any_element(),
             11 => component.media.as_ref().map_or_else(
                 || div().into_any_element(),
-                |media| self.component_media(message, media, component.spoiler, true),
+                |media| self.component_media(message, media, component.spoiler, true, cx),
             ),
             12 => column()
                 .id(id)
@@ -259,6 +270,7 @@ impl Larpcord {
                                     &item.media,
                                     item.spoiler,
                                     false,
+                                    cx,
                                 ))
                                 .when_some(item.description.clone(), |s, text| s.child(label(text)))
                         }),
