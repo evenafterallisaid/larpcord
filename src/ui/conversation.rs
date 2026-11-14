@@ -97,7 +97,7 @@ impl Larpcord {
             .into_any_element()
     }
 
-    pub(super) fn reaction_bar(&self, message: &Message) -> AnyElement {
+    pub(super) fn reaction_bar(&self, message: &Message, cx: &mut Context<Self>) -> AnyElement {
         let mut chips = Vec::new();
         for reaction in message.reactions.iter().take(128) {
             let counts = reaction.counts();
@@ -142,8 +142,26 @@ impl Larpcord {
                     .url()
                     .as_deref()
                     .and_then(|url| self.media.get(url));
+                let replay_key = format!(
+                    "{}:{}:{}",
+                    message.id,
+                    reaction
+                        .emoji
+                        .id
+                        .as_deref()
+                        .or(reaction.emoji.name.as_deref())
+                        .unwrap_or("emoji"),
+                    burst
+                );
+                let hover_key = replay_key.clone();
+                let replay = self.reaction_replays.get(&replay_key).copied().unwrap_or(0);
+                let animation_key =
+                    SharedString::from(format!("burst-{replay_key}-{count}-{replay}"));
+                let animate = burst && self.settings.animations;
+                let emoji_key = SharedString::from(format!("emoji-{animation_key}"));
                 chips.push(
                     row()
+                        .relative()
                         .id(("reaction", chips.len()))
                         .gap_1()
                         .px_2()
@@ -178,12 +196,54 @@ impl Larpcord {
                                     } else {
                                         "◌".into()
                                     }),
+                                })
+                                .map(|s| {
+                                    if animate {
+                                        s.with_animation(
+                                            emoji_key,
+                                            Animation::new(std::time::Duration::from_millis(1100)),
+                                            |s, delta| {
+                                                let bounce = (delta * std::f32::consts::TAU * 2.)
+                                                    .sin()
+                                                    * (1. - delta).powi(2)
+                                                    * 2.;
+                                                s.relative().top(px(-bounce))
+                                            },
+                                        )
+                                        .into_any_element()
+                                    } else {
+                                        s.into_any_element()
+                                    }
                                 }),
                         )
-                        .when(burst, |s| s.child(icon("sparkles", 12.)))
                         .child(count.to_string())
                         .tooltip(move |_, cx| cx.new(|_| Hint(tooltip.clone())).into())
-                        .into_any_element(),
+                        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                            if *hovered && burst && this.settings.animations {
+                                if this.reaction_replays.len() >= 128
+                                    && !this.reaction_replays.contains_key(&hover_key)
+                                    && let Some(old) = this.reaction_replays.keys().next().cloned()
+                                {
+                                    this.reaction_replays.remove(&old);
+                                }
+                                let replay =
+                                    this.reaction_replays.entry(hover_key.clone()).or_default();
+                                *replay = replay.wrapping_add(1);
+                                cx.notify();
+                            }
+                        }))
+                        .map(|s| {
+                            if animate {
+                                s.with_animation(
+                                    animation_key,
+                                    Animation::new(std::time::Duration::from_millis(1100)),
+                                    move |s, delta| s.child(super::burst::overlay(tint, delta)),
+                                )
+                                .into_any_element()
+                            } else {
+                                s.into_any_element()
+                            }
+                        }),
                 );
             }
         }

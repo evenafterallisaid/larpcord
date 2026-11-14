@@ -149,9 +149,49 @@ pub fn markdown(text: &str) -> Vec<Block> {
     blocks
 }
 
+pub fn emoji_only(text: &str) -> bool {
+    use unicode_segmentation::UnicodeSegmentation;
+    let parts = parts(text);
+    let mut count = 0;
+    for part in parts {
+        match part {
+            Part::Emoji { .. } => count += 1,
+            Part::Text(text) => {
+                for grapheme in text.graphemes(true).filter(|g| !g.trim().is_empty()) {
+                    if !grapheme
+                        .chars()
+                        .any(|c| matches!(c as u32,0x1f000..=0x1faff|0x2600..=0x27bf))
+                        || !grapheme.chars().all(
+                            |c| matches!(c as u32,0x1f000..=0x1faff|0x2600..=0x27bf|0xfe0f|0x200d),
+                        )
+                    {
+                        return false;
+                    }
+                    count += 1;
+                }
+            }
+        }
+        if count > 3 {
+            return false;
+        }
+    }
+    (1..=3).contains(&count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_emoji_get_room_without_enlarging_ordinary_messages() {
+        assert!(emoji_only("😭"));
+        assert!(emoji_only("❤️ 🫶"));
+        assert!(emoji_only("<:hello:123>"));
+        assert!(!emoji_only("hello 😭"));
+        assert!(!emoji_only("😀 😀 😀 😀"));
+        assert!(!emoji_only(""));
+        assert!(!emoji_only("123"));
+    }
     #[test]
     fn emoji_tokens_preserve_text_and_leave_invalid_markup_alone() {
         assert_eq!(

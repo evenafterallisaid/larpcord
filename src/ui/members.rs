@@ -38,14 +38,14 @@ impl Larpcord {
             .when(count == 0, |s| {
                 s.child(
                     column()
-                        .p_4()
+                        .p_3()
                         .gap_2()
-                        .child(label(if self.members.received {
-                            "No members to show"
-                        } else {
-                            "Loading members…"
-                        }))
-                        .child(label("Profiles and server roles appear here.").text_size(px(11.))),
+                        .when(self.members.received, |s| {
+                            s.child(label("No members to show"))
+                        })
+                        .when(!self.members.received, |s| {
+                            s.children((0..8).map(|_| member_placeholder()))
+                        }),
                 )
             })
             .child(
@@ -71,7 +71,7 @@ impl Larpcord {
     fn member_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         use crate::members::Row;
         let Some(item) = self.members.rows.get(&index) else {
-            return div().h(px(40.)).w_full().into_any_element();
+            return member_placeholder();
         };
         match item {
             Row::Group { id, count } => {
@@ -195,4 +195,19 @@ impl Larpcord {
             }
         }
     }
+}
+
+fn member_placeholder() -> AnyElement {
+    row()
+        .h(px(40.))
+        .px_2()
+        .gap_3()
+        .child(div().size(px(32.)).rounded_full().bg(rgb(0x222329)))
+        .child(
+            column()
+                .gap_1()
+                .child(div().w(px(92.)).h(px(9.)).rounded_sm().bg(rgb(0x25262c)))
+                .child(div().w(px(60.)).h(px(7.)).rounded_sm().bg(rgb(0x1c1d22))),
+        )
+        .into_any_element()
 }
