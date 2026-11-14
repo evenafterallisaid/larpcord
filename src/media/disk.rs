@@ -45,7 +45,7 @@ impl Disk {
         }
         let bytes = fs::read(&path).ok()?;
         // touching a hit makes eviction follow use across restarts, without a separate metadata file.
-        if let Ok(file) = fs::File::open(path) {
+        if let Ok(file) = fs::OpenOptions::new().write(true).open(path) {
             let _ = file.set_modified(SystemTime::now());
         }
         Some(bytes)
@@ -158,5 +158,28 @@ mod tests {
             .map(|f| f.metadata().unwrap().len())
             .sum();
         assert!(total <= BUDGET);
+    }
+
+    #[test]
+    fn a_cache_hit_refreshes_file_age_on_every_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = Disk {
+            root: Some(dir.path().into()),
+            writer: Mutex::new(()),
+        };
+        let url = "https://cdn.discordapp.com/icons/1/abc.webp";
+        disk.write(url, b"image");
+        let path = disk.path(url).unwrap();
+        let before = SystemTime::now() - Duration::from_secs(2 * 86400);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(before)
+            .unwrap();
+        assert!(disk.read(url).is_some());
+        assert!(
+            fs::metadata(path).unwrap().modified().unwrap() > before + Duration::from_secs(86400)
+        );
     }
 }
