@@ -196,7 +196,12 @@ impl Larpcord {
     }
 
     pub(super) fn latest_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        button("jump-latest", "↓ Jump to latest")
+        row()
+            .id("jump-latest")
+            .cursor_pointer()
+            .gap_2()
+            .child(icon("arrow-down", 18.))
+            .child("Jump to latest")
             .debug_selector(|| "jump-latest".into())
             .absolute()
             .bottom(px(6.))
