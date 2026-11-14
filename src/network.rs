@@ -47,6 +47,7 @@ pub enum Event {
         guild: Option<String>,
         request: u64,
         effect: Option<Box<crate::effects::Effect>>,
+        frame: Option<Box<crate::effects::ProfileFrame>>,
     },
     Interaction {
         message: String,
@@ -58,6 +59,7 @@ pub enum Event {
         result: Result<Guild, String>,
     },
     Error(String),
+    Layout(Result<Value, String>),
     SavedSession(Option<Zeroizing<String>>),
 }
 
@@ -100,6 +102,10 @@ pub enum Command {
         roles_needed: bool,
     },
     Typing(String),
+    Ack {
+        channel: String,
+        message: String,
+    },
     ViewGuild(Option<String>),
     Interact {
         message: String,
@@ -111,6 +117,7 @@ pub enum Command {
         nonce: String,
     },
     GuildDetails(String, std::time::Instant),
+    Layout,
     Forget,
 }
 
@@ -145,8 +152,14 @@ struct Api {
     gate: Arc<Mutex<Instant>>,
     effects: Arc<Mutex<EffectCache>>,
     session_id: Arc<std::sync::Mutex<Option<String>>>,
+    reads: Arc<Mutex<ReadSync>>,
 }
 
+#[derive(Default)]
+struct ReadSync {
+    token: Option<String>,
+    channels: HashMap<String, String>,
+}
 struct RequestFailure {
     message: String,
     retryable: bool,
@@ -230,6 +243,7 @@ impl Api {
             gate: Arc::new(Mutex::new(Instant::now())),
             effects: Arc::new(Mutex::new(EffectCache::default())),
             session_id: Arc::new(std::sync::Mutex::new(None)),
+            reads: Arc::new(Mutex::new(ReadSync::default())),
         })
     }
 
@@ -271,6 +285,28 @@ impl Api {
             }
         }
         cache.by_id.get(id).cloned()
+    }
+
+    async fn ack(&self, channel: &str, message: &str) -> Result<(), String> {
+        let mut reads = self.reads.lock().await;
+        if reads.channels.get(channel).is_some_and(|old| {
+            old.parse::<u64>().unwrap_or(0) >= message.parse::<u64>().unwrap_or(0)
+        }) {
+            return Ok(());
+        }
+        let result: Value = self
+            .request(
+                Method::POST,
+                &format!("/channels/{channel}/messages/{message}/ack"),
+                Some(json!({"token":reads.token})),
+            )
+            .await?;
+        reads.token = result["token"].as_str().map(str::to_string);
+        if reads.channels.len() >= 512 {
+            reads.channels.clear();
+        }
+        reads.channels.insert(channel.into(), message.into());
+        Ok(())
     }
 
     async fn profile(&self, id: &str, guild: Option<&str>) -> Result<Profile, String> {
@@ -509,6 +545,16 @@ impl Backend {
                                         }
                                     });
                                 }
+                                Command::Ack{channel,message}=>{
+                                    let Some(client)=api.clone() else {continue;};
+                                    if !snowflake(&channel)||!snowflake(&message) {continue;}
+                                    let events=events.clone();
+                                    requests.spawn(async move {if client.ack(&channel,&message).await.is_err() {emit(&events,generation,Event::Error("Could not sync this conversation's read state with Discord.".into())).await;}});
+                                }
+                                Command::Layout => {
+                                    let Some(client)=api.clone() else {continue;};let events=events.clone();
+                                    requests.spawn(async move {let result=client.request(Method::GET,"/users/@me/settings-proto/1",None).await;emit(&events,generation,Event::Layout(result)).await;});
+                                }
                                 Command::GuildDetails(id,started) => {
                                     let Some(client)=api.clone() else {continue};
                                     if !snowflake(&id) {continue;}
@@ -527,15 +573,18 @@ impl Backend {
                                         if let Ok(profile) = &mut result && roles_needed && let Some(guild) = &guild {
                                             profile.roles = client.request(Method::GET,&format!("/guilds/{guild}/roles"),None).await.unwrap_or_default();
                                         }
-                                        let effect_ref = result.as_ref().ok().and_then(|p| p.effect_ref().cloned());
+                                        let effect_ref = result.as_ref().ok().and_then(|p| p.effect_ref());
+                                        let frame_ref=result.as_ref().ok().and_then(|p|p.collectible_ref(3)).map(str::to_string);
                                         emit(&events, generation, Event::Profile {id:id.clone(), guild:guild.clone(), request, result:result.map(Box::new)}).await;
-                                        if let Some(reference) = effect_ref {
-                                            let effect = if let Some(url)=reference.sku_id.as_deref().and_then(crate::media::collectible) {
-                                                Some(crate::effects::Effect {static_frame_src:Some(url),..crate::effects::Effect::default()})
-                                            } else {client.effect(&reference.id).await};
-                                            let effect=effect.map(Box::new);
-                                            emit(&events,generation,Event::ProfileEffect{id,guild,request,effect}).await;
+                                        let mut effect=None;
+                                        if let Some(reference)=effect_ref {
+                                            effect=client.effect(reference.sku_id.as_deref().unwrap_or(&reference.id)).await;
+                                            if effect.is_none() && let Some(url)=reference.sku_id.as_deref().and_then(crate::media::collectible) {
+                                                effect=Some(crate::effects::Effect{static_frame_src:Some(url),..Default::default()});
+                                            }
                                         }
+                                        let frame=match frame_ref {Some(sku)=>client.effect(&sku).await.and_then(|e|e.frame),None=>None};
+                                        emit(&events,generation,Event::ProfileEffect{id,guild,request,effect:effect.map(Box::new),frame:frame.map(Box::new)}).await;
                                     });
                                 }
                                 Command::History { channel, started, request, page, cursor } => {
@@ -812,7 +861,7 @@ where
                             session.subscribed_guild = current.clone();
                             subscribed = current;
                         }
-                        if matches!(kind.as_str(), "READY" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE" | "TYPING_START" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE" | "GUILD_MEMBER_UPDATE") {
+                        if matches!(kind.as_str(), "READY" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE" | "TYPING_START" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE" | "GUILD_MEMBER_UPDATE" | "MESSAGE_ACK" | "USER_SETTINGS_UPDATE" | "USER_SETTINGS_PROTO_UPDATE" | "USER_GUILD_SETTINGS_UPDATE" | "USER_UPDATE") {
                             emit(events, generation, Event::Dispatch(kind, data)).await;
                         }
                     }
@@ -919,6 +968,58 @@ mod tests {
             }
         });
         (endpoint, task)
+    }
+
+    #[tokio::test]
+    async fn read_sync_sends_latest_only_and_reuses_the_ack_token() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for (message, token) in [("100", Value::Null), ("101", json!("ack-test"))] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut data = Vec::new();
+                loop {
+                    let mut buffer = [0; 2048];
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    data.extend_from_slice(&buffer[..n]);
+                    if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&data[..end]);
+                        let len = header
+                            .lines()
+                            .find_map(|line| {
+                                line.to_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|s| s.trim().parse::<usize>().ok())
+                            })
+                            .unwrap();
+                        if data.len() >= end + 4 + len {
+                            assert!(
+                                header.starts_with(&format!(
+                                    "POST /channels/1/messages/{message}/ack "
+                                ))
+                            );
+                            let body: Value = serde_json::from_slice(&data[end + 4..]).unwrap();
+                            assert_eq!(body["token"], token);
+                            break;
+                        }
+                    }
+                }
+                let body = r#"{"token":"ack-test"}"#;
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let mut api = Api::new(Zeroizing::new("test-only".into())).unwrap();
+        api.endpoint = Some(endpoint);
+        api.ack("1", "100").await.unwrap();
+        api.ack("1", "99").await.unwrap();
+        api.ack("1", "100").await.unwrap();
+        api.ack("1", "101").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

@@ -13,3 +13,5 @@ xattr 0.2.3 by steven allen is vendored under mit/apache-2.0 with a small linux 
 alhazen-gpui and alhazen-core 0.7.2 by mohamed a. provide native video playback under apache-2.0. their complete license and notice files are included in `licenses/ALHAZEN-*-LICENSE.txt` and `licenses/ALHAZEN-*-NOTICE.txt`, including the vp9-mt attribution.
 
 gpui 0.2.2 is vendored under apache-2.0 with graphics atlas reclamation fixes described in `vendor/gpui/LARPCORD-PATCH.md`. its original license is retained.
+
+Inter and the bundled display-name fonts are distributed under the SIL Open Font License 1.1. Source: https://github.com/google/fonts (ofl/inter, bangers, biorhyme, cherrybombone, chicle, museomoderno, pixelifysans, zillaslab, playpensans, orbitron, newrocker, kalam). Copyright notices and the full license for each family are in `licenses/fonts/`. Unavailable display-name families fall back to Inter.
