@@ -46,6 +46,26 @@ pub fn avatar(id: &str, hash: Option<&str>) -> Option<String> {
     ))
 }
 
+pub fn sticker(id: &str, format: u8, motion: bool) -> Option<String> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let suffix = if motion && matches!(format, 2 | 4) {
+        "#motion"
+    } else {
+        ""
+    };
+    match format {
+        1 | 2 => Some(format!(
+            "https://cdn.discordapp.com/stickers/{id}.png{suffix}"
+        )),
+        4 => Some(format!(
+            "https://media.discordapp.net/stickers/{id}.gif{suffix}"
+        )),
+        _ => None,
+    }
+}
+
 fn identity_asset(url: &str) -> bool {
     reqwest::Url::parse(url).ok().is_some_and(|url| {
         let path = url.path();
@@ -69,6 +89,8 @@ fn decode_bounds(url: &str) -> (u32, u32) {
         || url.contains("/assets/profile_effects/")
     {
         (480, 640)
+    } else if url.contains("/stickers/") {
+        (192, 192)
     } else if url.contains("/icons/") || url.contains("/emojis/") {
         (128, 128)
     } else if identity_asset(url) {

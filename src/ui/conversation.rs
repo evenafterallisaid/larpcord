@@ -1,0 +1,220 @@
+use super::*;
+
+impl Larpcord {
+    pub(super) fn reply_preview(&self, message: &Message) -> AnyElement {
+        let cached = message
+            .message_reference
+            .as_ref()
+            .and_then(|r| r["message_id"].as_str())
+            .and_then(|id| {
+                self.store
+                    .channel_messages(&message.channel_id)
+                    .iter()
+                    .find(|m| m.id == id)
+            });
+        let original = cached
+            .map(crate::model::ReferencedMessage::from)
+            .or_else(|| message.referenced_message.as_deref().cloned());
+        row()
+            .relative()
+            .h(px(20.))
+            .gap_1()
+            .min_w_0()
+            .text_size(px(12.))
+            .text_color(rgb(MUTED))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(-32.))
+                    .top(px(10.))
+                    .w(px(27.))
+                    .h(px(14.))
+                    .border_l_2()
+                    .border_t_2()
+                    .border_color(rgb(0x4e5058))
+                    .rounded_tl(px(6.)),
+            )
+            .map(|s| match original {
+                Some(original) => s
+                    .child(self.avatar(&original.author, 16.))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("@{}", original.name())),
+                    )
+                    .child(label(original.excerpt()).truncate().flex_1().min_w_0()),
+                None => s.child(label("Original message unavailable").italic()),
+            })
+            .into_any_element()
+    }
+
+    pub(super) fn stickers(&self, message: &Message) -> AnyElement {
+        row()
+            .gap_2()
+            .flex_wrap()
+            .children(
+                message
+                    .sticker_items
+                    .iter()
+                    .take(3)
+                    .enumerate()
+                    .map(|(index, sticker)| {
+                        let url = crate::media::sticker(
+                            &sticker.id,
+                            sticker.format_type,
+                            self.settings.animations,
+                        );
+                        let image = url.as_deref().and_then(|url| self.media.get(url));
+                        let name = sticker.name.clone();
+                        div()
+                            .id(("sticker", index))
+                            .size(px(160.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .tooltip(move |_, cx| cx.new(|_| Hint(name.clone())).into())
+                            .map(|s| match image {
+                                Some(image) => s.child(
+                                    img(image.clone())
+                                        .id(("sticker-image", image.id.0))
+                                        .size_full()
+                                        .object_fit(ObjectFit::Contain),
+                                ),
+                                None => s.child(
+                                    column()
+                                        .gap_2()
+                                        .items_center()
+                                        .text_color(rgb(MUTED))
+                                        .text_size(px(12.))
+                                        .child(sticker.name.clone())
+                                        .when(sticker.format_type == 3, |s| {
+                                            s.child(label("Lottie sticker").text_size(px(10.)))
+                                        }),
+                                ),
+                            })
+                    }),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn reaction_bar(&self, message: &Message) -> AnyElement {
+        let mut chips = Vec::new();
+        for reaction in message.reactions.iter().take(128) {
+            let counts = reaction.counts();
+            for (burst, count, own) in [
+                (false, counts.normal, reaction.me),
+                (true, counts.burst, reaction.me_burst),
+            ] {
+                if count == 0 {
+                    continue;
+                }
+                let tint = if burst {
+                    reaction
+                        .burst_colors
+                        .iter()
+                        .find_map(|color| {
+                            u32::from_str_radix(color.trim_start_matches('#'), 16)
+                                .ok()
+                                .filter(|v| *v <= 0xffffff)
+                        })
+                        .unwrap_or(0xb59bff)
+                } else {
+                    0x5865f2
+                };
+                let name = reaction
+                    .emoji
+                    .name
+                    .as_deref()
+                    .unwrap_or("emoji")
+                    .to_string();
+                let tooltip = format!(
+                    "{} {name} {}{}",
+                    count,
+                    if burst {
+                        "super reactions"
+                    } else {
+                        "reactions"
+                    },
+                    if own { " · includes yours" } else { "" }
+                );
+                let image = reaction
+                    .emoji
+                    .url()
+                    .as_deref()
+                    .and_then(|url| self.media.get(url));
+                chips.push(
+                    row()
+                        .id(("reaction", chips.len()))
+                        .gap_1()
+                        .px_2()
+                        .h(px(28.))
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(if own || burst {
+                            rgb(tint)
+                        } else {
+                            rgba(0xffffff00)
+                        })
+                        .bg(if own || burst {
+                            rgba((tint << 8) | 0x25)
+                        } else {
+                            rgb(SURFACE)
+                        })
+                        .text_color(rgb(if own || burst { 0xd8d3ff } else { MUTED }))
+                        .text_size(px(12.))
+                        .child(
+                            div()
+                                .size(px(18.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(16.))
+                                .map(|s| match image {
+                                    Some(image) => s.child(
+                                        img(image).size_full().object_fit(ObjectFit::Contain),
+                                    ),
+                                    None => s.child(if reaction.emoji.id.is_none() {
+                                        name
+                                    } else {
+                                        "◌".into()
+                                    }),
+                                }),
+                        )
+                        .when(burst, |s| s.child(icon("sparkles", 12.)))
+                        .child(count.to_string())
+                        .tooltip(move |_, cx| cx.new(|_| Hint(tooltip.clone())).into())
+                        .into_any_element(),
+                );
+            }
+        }
+        row()
+            .flex_wrap()
+            .gap_1()
+            .mt_1()
+            .children(chips)
+            .into_any_element()
+    }
+
+    pub(super) fn latest_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        button("jump-latest", "↓ Jump to latest")
+            .debug_selector(|| "jump-latest".into())
+            .absolute()
+            .bottom(px(6.))
+            .right(px(16.))
+            .rounded_full()
+            .px_4()
+            .py_2()
+            .border_1()
+            .border_color(rgba(0xffffff45))
+            .bg(linear_gradient(
+                180.,
+                linear_color_stop(rgba(0x7275c6c8), 0.),
+                linear_color_stop(rgba(0x33354eb8), 1.),
+            ))
+            .text_color(rgb(0xffffff))
+            .shadow_lg()
+            .hover(|s| s.bg(rgba(0x666ad9e8)))
+            .on_click(cx.listener(|this, _, _, cx| this.jump_latest(cx)))
+            .into_any_element()
+    }
+}
