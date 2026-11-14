@@ -5,15 +5,17 @@
 
 this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the first preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.1.0-preview.2).
 
-**0.2.0-dev.6 is a development preview.** this branch contains the next login and layout milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
+**0.2.0-dev.7 is a development preview.** this branch contains the next login and layout milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
 
 ## what works in this milestone
 
 - native gpui window, discord-style layout, the chosen glass branding, macos traffic lights and dark first paint
 - native discord qr login with mobile confirmation; no manual token required for that flow
 - darker discord-style surfaces, compact navigation, virtualized server and dm lists, recent dm ordering and conversation filtering
-- automatically paged history in both directions, jump to latest, grouped messages, sending, live edits and deletions
-- image attachments, static custom emoji, markdown, bot embeds and components v2 layouts
+- automatically paged history in both directions, jump to latest, grouped messages, reply previews and composing replies, sending, live edits and deletions
+- image attachments, png/apng/gif stickers, static custom emoji, searchable unicode emoji picker, markdown, bot embeds and components v2 layouts
+- ordinary and super reaction displays, separate counts, your-reaction highlighting and live add/remove updates
+- a collapsible channel list, bounded on-demand member sidebar with roles and presence, and a floating translucent jump-to-latest control
 - bot buttons and string selectors through discord interactions, plus explicit link controls
 - on-demand profiles with overlapping avatars, banners, biographies, pronouns, server identity, decorations, layered frames, bounded effects and role chips
 - server icons and banners, saved server order and folders, unread/mention badges, a flat single-color home mark and custom typing indicators
@@ -24,7 +26,7 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 - optional saved login in keychain, credential manager or secret service
 - per-conversation drafts, compact spacing, notification privacy and background connection settings
 
-voice and video calls, email/password login, quest integration and javascript plugin compatibility are future work. incoming call notifications are informational until native voice is implemented. this milestone adds native qr login through discord mobile, with manual session entry retained under advanced sign-in. the ui never reads a token from another application. the live qr handshake passed on 2026-11-12. the user has also confirmed account access and real message delivery; the exact sign-in route was not separately recorded.
+voice and video calls, email/password login, quest integration and javascript plugin compatibility are future work. reaction chips currently display existing reactions; adding reactions, nitro burst animations and lottie sticker playback are not implemented yet. incoming call notifications are informational until native voice is implemented. this milestone adds native qr login through discord mobile, with manual session entry retained under advanced sign-in. the ui never reads a token from another application. the live qr handshake passed on 2026-11-12. the user has also confirmed account access and real message delivery; the exact sign-in route was not separately recorded.
 
 ## run it
 
@@ -51,7 +53,7 @@ an account session token is a password. keep it private. larpcord is an independ
 - animated emoji use a still frame for now
 - the network service runs on a two-worker rust runtime, independently of window rendering
 - the ui waits for pushed events. it has no refresh loop or background game scanner
-- history merges preserve concurrent message edits, new messages and deletions
+- history merges preserve concurrent message edits, reaction changes, new messages and deletions
 - api requests share a rate limit lane, honor retry delays and bound response bodies
 - sending clears the submitted draft immediately; later typing survives acknowledgements
 - no automatic retry after an ambiguous send failure. the unsent text stays available to copy and check before resending

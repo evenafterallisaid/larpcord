@@ -295,6 +295,73 @@ pub enum Page {
 }
 
 #[derive(Clone, Default, Deserialize)]
+pub struct Sticker {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub format_type: u8,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct ReferencedMessage {
+    #[serde(default)]
+    pub author: User,
+    #[serde(default)]
+    pub content: String,
+    pub member: Option<Member>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub embeds: Vec<Embed>,
+    #[serde(default)]
+    pub sticker_items: Vec<Sticker>,
+    #[serde(default)]
+    pub components: Vec<crate::components::Component>,
+}
+
+impl ReferencedMessage {
+    pub fn name(&self) -> &str {
+        self.member
+            .as_ref()
+            .and_then(|m| m.nick.as_deref())
+            .unwrap_or_else(|| self.author.name())
+    }
+    pub fn excerpt(&self) -> String {
+        if !self.content.is_empty() {
+            self.content
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(120)
+                .collect()
+        } else if let Some(sticker) = self.sticker_items.first() {
+            format!("Sticker: {}", sticker.name)
+        } else if !self.attachments.is_empty() {
+            "Attachment".into()
+        } else if !self.embeds.is_empty() || !self.components.is_empty() {
+            "Embed".into()
+        } else {
+            "Message".into()
+        }
+    }
+}
+
+impl From<&Message> for ReferencedMessage {
+    fn from(message: &Message) -> Self {
+        Self {
+            author: message.author.clone(),
+            content: message.content.clone(),
+            member: message.member.clone(),
+            attachments: message.attachments.clone(),
+            embeds: message.embeds.clone(),
+            sticker_items: message.sticker_items.clone(),
+            components: message.components.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Default, Deserialize)]
 pub struct Message {
     pub id: String,
     pub channel_id: String,
@@ -320,6 +387,11 @@ pub struct Message {
     pub member: Option<Member>,
     pub webhook_id: Option<String>,
     pub message_reference: Option<serde_json::Value>,
+    pub referenced_message: Option<Box<ReferencedMessage>>,
+    #[serde(default)]
+    pub sticker_items: Vec<Sticker>,
+    #[serde(default)]
+    pub reactions: Vec<crate::reactions::Reaction>,
     #[serde(default)]
     pub components: Vec<crate::components::Component>,
     #[serde(default)]
@@ -341,10 +413,10 @@ impl Message {
             || self.author.avatar != previous.author.avatar
             || self.channel_id != previous.channel_id
             || self.webhook_id != previous.webhook_id
-            || self.kind != 0
-            || previous.kind != 0
+            || !matches!(self.kind, 0 | 19)
+            || !matches!(previous.kind, 0 | 19)
+            || self.kind == 19
             || self.message_reference.is_some()
-            || previous.message_reference.is_some()
         {
             return false;
         }
@@ -596,9 +668,25 @@ impl Store {
                 "embeds",
                 "components",
                 "flags",
+                "sticker_items",
+                "reactions",
+                "referenced_message",
             ] {
                 if let Some(value) = patch.get(key) {
                     fields[key] = value.clone();
+                }
+            }
+            if let Some(events) = patch["_reaction_events"].as_array() {
+                let pending = fields
+                    .as_object_mut()
+                    .unwrap()
+                    .entry("_reaction_events")
+                    .or_insert_with(|| serde_json::json!([]));
+                if let Some(pending) = pending.as_array_mut() {
+                    pending.extend(events.iter().cloned());
+                    if pending.len() > 256 {
+                        pending.drain(..pending.len() - 256);
+                    }
                 }
             }
             if history.patches.len() > MESSAGE_LIMIT * 2
@@ -644,6 +732,39 @@ impl Store {
         if let Some(flags) = patch["flags"].as_u64() {
             message.flags = flags;
         }
+        if let Some(value) = patch
+            .get("sticker_items")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        {
+            message.sticker_items = value;
+        }
+        if let Some(value) = patch
+            .get("reactions")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        {
+            message.reactions = value;
+        }
+        if let Some(value) = patch
+            .get("referenced_message")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+        {
+            message.referenced_message = value;
+        }
+        for event in patch["_reaction_events"].as_array().into_iter().flatten() {
+            crate::reactions::apply(&mut message.reactions, event);
+        }
+    }
+
+    pub fn reaction(&mut self, kind: &str, data: &serde_json::Value) {
+        let (Some(channel), Some(id)) = (data["channel_id"].as_str(), data["message_id"].as_str())
+        else {
+            return;
+        };
+        if !self.has_history(channel) {
+            return;
+        }
+        let event = crate::reactions::event(kind, data, &self.user.id);
+        self.update(&serde_json::json!({"channel_id":channel,"id":id,"_reaction_events":[event]}));
     }
 
     pub fn delete(&mut self, channel: &str, id: &str) {
@@ -828,6 +949,13 @@ impl Store {
             "id":"9", "channel_id":"campfire", "author":{"id":"helper","username":"little helper","bot":true},"timestamp":"2026-11-12T18:38:00Z",
             "embeds":[{"type":"video","title":"native video preview","video":{"url":"https://cdn.discordapp.com/larpcord-preview/sample.mp4","width":320,"height":180}}]
         })).expect("sample video card"));
+        store.insert(serde_json::from_value(serde_json::json!({
+            "id":"10","channel_id":"campfire","author":{"id":"clover","username":"clover"},"timestamp":"2026-11-12T18:39:00Z","type":19,
+            "message_reference":{"message_id":"2"},"referenced_message":{"author":{"id":"clover","username":"clover"},"content":"this feels nice. what are we building?"},
+            "content":"reply previews and reactions, without losing the conversation.",
+            "reactions":[{"count":4,"count_details":{"normal":3,"burst":1},"me":true,"me_burst":false,"emoji":{"id":null,"name":"❤️"},"burst_colors":["#b59bff"]},{"count":2,"emoji":{"id":null,"name":"✨"}}]
+        })).expect("sample reply"));
+        store.insert(serde_json::from_value(serde_json::json!({"id":"11","channel_id":"campfire","author":{"id":"clover","username":"clover"},"timestamp":"2026-11-12T18:39:10Z","content":"and this line should share the same header."})).expect("sample follow-up"));
         store.insert(Message { id: "20".into(), channel_id: "build-log".into(), author: store.user.clone(), content: "Native Rust + GPUI. This preview uses sample messages. Connect your account when you're ready.".into(), ..Message::default() });
         store
     }
@@ -1071,6 +1199,55 @@ mod tests {
         b.author = a.author.clone();
         b.message_reference = Some(serde_json::json!({"message_id":"5"}));
         assert!(!b.continues(&a));
+        b.kind = 19;
+        assert!(
+            a.continues(&b),
+            "a normal message can follow the same author's reply"
+        );
+        b.message_reference = None;
+        assert!(
+            !b.continues(&a),
+            "reply type always starts a block, even without a reference payload"
+        );
+        b.kind = 7;
+        assert!(!a.continues(&b), "system messages keep their own boundary");
+    }
+
+    #[test]
+    fn reaction_events_survive_concurrent_history_and_do_not_lose_super_counts() {
+        let mut store = Store::default();
+        store.user.id = "1".into();
+        store.merge_history("2", vec![], 0, Page::Latest);
+        let started = store.revision();
+        let data = serde_json::json!({"channel_id":"2","message_id":"3","user_id":"1","emoji":{"id":null,"name":"🔥"}});
+        store.reaction("MESSAGE_REACTION_ADD", &data);
+        let message:Message=serde_json::from_value(serde_json::json!({"channel_id":"2","id":"3","reactions":[{"count":2,"count_details":{"normal":1,"burst":1},"emoji":data["emoji"]}]})).unwrap();
+        store.merge_history("2", vec![message], started, Page::Latest);
+        let r = &store.channel_messages("2")[0].reactions[0];
+        assert_eq!(r.count, 3);
+        assert_eq!(r.counts().burst, 1);
+        assert!(r.me);
+        store.reaction("MESSAGE_REACTION_REMOVE_ALL", &data);
+        assert!(store.channel_messages("2")[0].reactions.is_empty());
+    }
+
+    #[test]
+    fn sticker_only_and_uncached_replies_keep_their_content() {
+        let message:Message=serde_json::from_value(serde_json::json!({"id":"1","channel_id":"2","type":19,"message_reference":{"message_id":"3"},"referenced_message":{"author":{"id":"4","username":"friend"},"content":"original text"},"sticker_items":[{"id":"5","name":"hello","format_type":2}]})).unwrap();
+        assert_eq!(
+            message.referenced_message.unwrap().excerpt(),
+            "original text"
+        );
+        assert_eq!(
+            crate::media::sticker(&message.sticker_items[0].id, 2, true).as_deref(),
+            Some("https://cdn.discordapp.com/stickers/5.png#motion")
+        );
+        assert_eq!(
+            crate::media::sticker("5", 4, false).as_deref(),
+            Some("https://media.discordapp.net/stickers/5.gif")
+        );
+        assert!(crate::media::sticker("../5", 1, true).is_none());
+        assert!(crate::media::sticker("5", 3, true).is_none());
     }
 
     #[test]
