@@ -90,6 +90,7 @@ pub enum Command {
         channel: String,
         content: String,
         nonce: String,
+        reply: Option<String>,
     },
     Notify {
         title: String,
@@ -107,6 +108,12 @@ pub enum Command {
         message: String,
     },
     ViewGuild(Option<String>),
+    ViewMembers {
+        guild: String,
+        channel: String,
+        bucket: usize,
+        enabled: bool,
+    },
     Interact {
         message: String,
         channel: String,
@@ -456,6 +463,13 @@ fn safe_delay(seconds: f64) -> Duration {
     })
 }
 
+fn send_body(content: &str, nonce: &str, reply: Option<&str>) -> Value {
+    let mut body = json!({"content":content,"nonce":nonce,"enforce_nonce":true,"allowed_mentions":{"parse":[],"replied_user":false}});
+    if let Some(id) = reply.filter(|id| snowflake(id)) {
+        body["message_reference"] = json!({"message_id":id,"fail_if_not_exists":false});
+    }
+    body
+}
 fn snowflake(id: &str) -> bool {
     !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())
 }
@@ -476,7 +490,7 @@ impl Backend {
                 let mut auth = JoinSet::new();
                 let mut api = None::<Api>;
                 let mut generation = 0;
-                let (viewed_guild, viewed_rx) = watch::channel::<Option<String>>(None);
+                let (viewed_guild, viewed_rx) = watch::channel::<Viewed>(Viewed::default());
                 let saved_events = events.clone();
                 if load_saved_session { tokio::task::spawn_blocking(move || {
                     let token = credential().ok().and_then(|entry| entry.get_password().ok()).map(Zeroizing::new);
@@ -509,7 +523,7 @@ impl Backend {
                                     tasks.abort_all();
                                     requests.abort_all();
                                     generation = new_generation;
-                                    let _ = viewed_guild.send(None);
+                                    let _ = viewed_guild.send(Viewed::default());
                                     match Api::new(token) {
                                         Ok(client) => {
                                             api = Some(client.clone());
@@ -534,7 +548,7 @@ impl Backend {
                                         Err(error) => emit(&events, generation, Event::Error(error)).await,
                                     }
                                 }
-                                Command::Disconnect => { tasks.abort_all(); requests.abort_all(); auth.abort_all(); api = None; let _ = viewed_guild.send(None); }
+                                Command::Disconnect => { tasks.abort_all(); requests.abort_all(); auth.abort_all(); api = None; let _ = viewed_guild.send(Viewed::default()); }
                                 Command::Forget => {
                                     let events = events.clone();
                                     tokio::task::spawn_blocking(move || {
@@ -613,18 +627,19 @@ impl Backend {
                                         emit(&events,generation,Event::Interaction {message,result}).await;
                                     });
                                 }
-                                Command::ViewGuild(guild) => {let _ = viewed_guild.send(guild.filter(|id| snowflake(id)));}
+                                Command::ViewGuild(guild) => {viewed_guild.send_modify(|view|{let guild=guild.filter(|id|snowflake(id));if view.guild!=guild {*view=Viewed{guild,..Default::default()};}});}
+                                Command::ViewMembers{guild,channel,bucket,enabled}=>{if snowflake(&guild)&&snowflake(&channel){let _=viewed_guild.send(Viewed{guild:Some(guild),channel:Some(channel),bucket:bucket.min(1_999_900)/100*100,members:enabled});}}
                                 Command::Typing(channel) => {
                                     let Some(client) = api.clone() else { continue; };
                                     if !snowflake(&channel) { continue; }
                                     requests.spawn(async move {let _ = client.request::<()>(Method::POST,&format!("/channels/{channel}/typing"),None).await;});
                                 }
-                                Command::Send { channel, content, nonce } => {
+                                Command::Send { channel, content, nonce,reply } => {
                                     let Some(client) = api.clone() else { continue; };
                                     if !snowflake(&channel) || content.is_empty() || content.chars().count() > 2000 { continue; }
                                     let events = events.clone();
                                     requests.spawn(async move {
-                                        let result = client.request::<Message>(Method::POST, &format!("/channels/{channel}/messages"), Some(json!({"content":content, "nonce":nonce, "enforce_nonce":true, "allowed_mentions":{"parse":[]}}))).await;
+                                        let result = client.request::<Message>(Method::POST, &format!("/channels/{channel}/messages"), Some(send_body(&content,&nonce,reply.as_deref()))).await;
                                         emit(&events, generation, Event::Sent { nonce, result: result.map(Box::new) }).await;
                                     });
                                 }
@@ -656,9 +671,16 @@ fn credential() -> keyring::Result<keyring::Entry> {
     keyring::Entry::new("app.larpcord.client", "discord-session")
 }
 
+#[derive(Clone, Default, PartialEq)]
+struct Viewed {
+    guild: Option<String>,
+    channel: Option<String>,
+    bucket: usize,
+    members: bool,
+}
 #[derive(Default)]
 struct Session {
-    subscribed_guild: Option<String>,
+    subscribed_guild: Option<Viewed>,
     id: Option<String>,
     sequence: Option<u64>,
     resume_url: Option<String>,
@@ -693,7 +715,7 @@ async fn gateway(
     api: Api,
     events: Sender<Envelope>,
     generation: u64,
-    mut viewed: watch::Receiver<Option<String>>,
+    mut viewed: watch::Receiver<Viewed>,
 ) {
     let mut session = Session::default();
     let mut attempts = 0u32;
@@ -753,7 +775,7 @@ async fn connection(
     events: &Sender<Envelope>,
     generation: u64,
     session: &mut Session,
-    viewed: &mut watch::Receiver<Option<String>>,
+    viewed: &mut watch::Receiver<Viewed>,
 ) -> Result<(), ConnectionError> {
     let config = WebSocketConfig::default()
         .max_message_size(Some(16 * 1024 * 1024))
@@ -778,7 +800,7 @@ async fn drive_watched_connection<S>(
     events: &Sender<Envelope>,
     generation: u64,
     session: &mut Session,
-    viewed: &mut watch::Receiver<Option<String>>,
+    viewed: &mut watch::Receiver<Viewed>,
 ) -> Result<(), ConnectionError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -807,16 +829,16 @@ where
     let mut deadline = Instant::now() + Duration::from_millis(rand::random_range(0..interval));
     let mut acknowledged = true;
     let mut ready = false;
-    let mut subscribed = None::<String>;
+    let mut subscribed = Viewed::default();
     loop {
         tokio::select! {
             changed = viewed.changed(), if ready => {
                 if changed.is_err() {return Err(ConnectionError::Transient);}
                 let current = viewed.borrow_and_update().clone();
-                if let Some(payload) = guild_subscription_change(subscribed.as_deref(),current.as_deref()) {
+                if let Some(payload) = view_subscription_change(&subscribed,&current) {
                     socket.send(Frame::Text(payload.to_string().into())).await?;
                 }
-                session.subscribed_guild = current.clone();
+                session.subscribed_guild = Some(current.clone());
                 subscribed = current;
             }
             _ = sleep_until(deadline) => {
@@ -855,13 +877,13 @@ where
                         if kind == "RESUMED" { emit(events, generation, Event::Status("Connected".into())).await; }
                         if kind == "READY" || kind == "RESUMED" {
                             ready = true;
-                            subscribed = if kind == "RESUMED" {session.subscribed_guild.clone()}else{None};
+                            subscribed = if kind == "RESUMED" {session.subscribed_guild.clone().unwrap_or_default()}else{Viewed::default()};
                             let current = viewed.borrow_and_update().clone();
-                            if let Some(payload) = guild_subscription_change(subscribed.as_deref(),current.as_deref()) {socket.send(Frame::Text(payload.to_string().into())).await?;}
-                            session.subscribed_guild = current.clone();
+                            if let Some(payload) = view_subscription_change(&subscribed,&current) {socket.send(Frame::Text(payload.to_string().into())).await?;}
+                            session.subscribed_guild = Some(current.clone());
                             subscribed = current;
                         }
-                        if matches!(kind.as_str(), "READY" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE" | "TYPING_START" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE" | "GUILD_MEMBER_UPDATE" | "MESSAGE_ACK" | "USER_SETTINGS_UPDATE" | "USER_SETTINGS_PROTO_UPDATE" | "USER_GUILD_SETTINGS_UPDATE" | "USER_UPDATE") {
+                        if matches!(kind.as_str(), "READY" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" | "MESSAGE_REACTION_REMOVE_ALL" | "MESSAGE_REACTION_REMOVE_EMOJI" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE" | "TYPING_START" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE" | "GUILD_MEMBER_UPDATE" | "MESSAGE_ACK" | "USER_SETTINGS_UPDATE" | "USER_SETTINGS_PROTO_UPDATE" | "USER_GUILD_SETTINGS_UPDATE" | "USER_UPDATE" | "GUILD_MEMBER_LIST_UPDATE" | "PRESENCE_UPDATE") {
                             emit(events, generation, Event::Dispatch(kind, data)).await;
                         }
                     }
@@ -880,6 +902,38 @@ where
     }
 }
 
+fn view_subscription_change(previous: &Viewed, current: &Viewed) -> Option<Value> {
+    if previous == current {
+        return None;
+    }
+    let mut subscriptions = serde_json::Map::new();
+    if previous.guild != current.guild
+        && let Some(id) = &previous.guild
+    {
+        subscriptions.insert(
+            id.clone(),
+            json!({"typing":false,"activities":false,"threads":false,"channels":{}}),
+        );
+    }
+    if let Some(id) = &current.guild {
+        let mut channels = serde_json::Map::new();
+        if current.members
+            && let Some(channel) = &current.channel
+        {
+            let mut ranges = vec![json!([0, 99])];
+            if current.bucket > 0 {
+                ranges.push(json!([current.bucket, current.bucket + 99]));
+            }
+            channels.insert(channel.clone(), json!(ranges));
+        }
+        subscriptions.insert(
+            id.clone(),
+            json!({"typing":true,"activities":current.members,"threads":false,"channels":channels}),
+        );
+    }
+    (!subscriptions.is_empty()).then(|| json!({"op":37,"d":{"subscriptions":subscriptions}}))
+}
+#[cfg(test)]
 fn guild_subscription_change(previous: Option<&str>, current: Option<&str>) -> Option<Value> {
     if previous == current {
         return None;
@@ -911,7 +965,7 @@ async fn drive_connection<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let (_sender, mut viewed) = watch::channel(None);
+    let (_sender, mut viewed) = watch::channel(Viewed::default());
     drive_watched_connection(socket, api, events, generation, session, &mut viewed).await
 }
 
@@ -968,6 +1022,36 @@ mod tests {
             }
         });
         (endpoint, task)
+    }
+
+    #[test]
+    fn member_ranges_follow_the_viewport_and_close_without_an_activity_stream() {
+        let before = Viewed {
+            guild: Some("1".into()),
+            channel: Some("2".into()),
+            bucket: 0,
+            members: true,
+        };
+        let next = Viewed {
+            bucket: 300,
+            ..before.clone()
+        };
+        let payload = view_subscription_change(&before, &next).unwrap();
+        assert_eq!(
+            payload["d"]["subscriptions"]["1"]["channels"]["2"],
+            json!([[0, 99], [300, 399]])
+        );
+        let closed = Viewed {
+            members: false,
+            ..next.clone()
+        };
+        let payload = view_subscription_change(&next, &closed).unwrap();
+        assert_eq!(payload["d"]["subscriptions"]["1"]["channels"], json!({}));
+        assert_eq!(payload["d"]["subscriptions"]["1"]["activities"], false);
+        assert!(view_subscription_change(&closed, &closed).is_none());
+        let body = send_body("hi", "123", Some("456"));
+        assert_eq!(body["message_reference"]["message_id"], "456");
+        assert_eq!(body["allowed_mentions"]["replied_user"], false);
     }
 
     #[tokio::test]
@@ -1159,7 +1243,10 @@ mod tests {
         use tokio::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (viewed_tx, mut viewed_rx) = watch::channel(Some("1".to_string()));
+        let (viewed_tx, mut viewed_rx) = watch::channel(Viewed {
+            guild: Some("1".to_string()),
+            ..Default::default()
+        });
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -1194,7 +1281,12 @@ mod tests {
                 }
                 if changes == 0 {
                     assert_eq!(value["d"]["subscriptions"]["1"]["typing"], true);
-                    viewed_tx.send(Some("2".into())).unwrap();
+                    viewed_tx
+                        .send(Viewed {
+                            guild: Some("2".into()),
+                            ..Default::default()
+                        })
+                        .unwrap();
                     changes += 1;
                 } else {
                     assert_eq!(value["d"]["subscriptions"]["1"]["typing"], false);
@@ -1217,7 +1309,13 @@ mod tests {
         .await;
         assert!(result.is_ok());
         server.await.unwrap();
-        assert_eq!(session.subscribed_guild.as_deref(), Some("2"));
+        assert_eq!(
+            session
+                .subscribed_guild
+                .as_ref()
+                .and_then(|view| view.guild.as_deref()),
+            Some("2")
+        );
         assert_eq!(
             api.session_id.lock().unwrap().as_deref(),
             Some("local-test")

@@ -9,6 +9,27 @@ pub fn icon(name: &str, size: f32) -> Svg {
 }
 
 pub static ASSETS: &[(&str, &[u8])] = &[
+    (
+        "icons/sparkles.svg",
+        include_bytes!("../assets/icons/sparkles.svg"),
+    ),
+    (
+        "icons/chevron-right.svg",
+        include_bytes!("../assets/icons/chevron-right.svg"),
+    ),
+    ("icons/copy.svg", include_bytes!("../assets/icons/copy.svg")),
+    (
+        "icons/reply.svg",
+        include_bytes!("../assets/icons/reply.svg"),
+    ),
+    (
+        "icons/smile.svg",
+        include_bytes!("../assets/icons/smile.svg"),
+    ),
+    (
+        "icons/users.svg",
+        include_bytes!("../assets/icons/users.svg"),
+    ),
     ("icons/user.svg", include_bytes!("../assets/icons/user.svg")),
     (
         "icons/close.svg",

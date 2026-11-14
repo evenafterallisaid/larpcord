@@ -8,9 +8,11 @@ mod effects;
 mod icons;
 mod input;
 mod media;
+mod members;
 mod model;
 mod navigation;
 mod network;
+mod reactions;
 mod settings;
 mod ui;
 mod video;
@@ -85,7 +87,7 @@ fn main() {
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(13.), px(13.))),
                 }),
-                window_min_size: Some(size(px(800.), px(580.))),
+                window_min_size: Some(size(px(960.), px(580.))),
                 app_id: Some("app.larpcord.client".into()),
                 ..Default::default()
             },
