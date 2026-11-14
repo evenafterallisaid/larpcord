@@ -9,12 +9,12 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 
 ## what works in this milestone
 
-- native gpui window, discord-style layout, the chosen glass branding, macos traffic lights and dark first paint
+- native gpui window, discord-style layout, shared account card, back/forward navigation, macos traffic lights and dark first paint
 - native discord qr login with mobile confirmation; no manual token required for that flow
 - darker discord-style surfaces, compact navigation, virtualized server and dm lists, recent dm ordering and conversation filtering
 - automatically paged history in both directions, jump to latest, grouped messages, reply previews and composing replies, sending, live edits and deletions
 - image attachments, png/apng/gif stickers, static custom emoji, searchable unicode emoji picker, markdown, bot embeds and components v2 layouts
-- ordinary and super reaction displays, separate counts, your-reaction highlighting and live add/remove updates
+- ordinary and super reaction displays, separate counts, your-reaction highlighting, native burst/hover animation and live add/remove updates
 - a collapsible channel list, bounded on-demand member sidebar with roles and presence, and a floating translucent jump-to-latest control
 - bot buttons and string selectors through discord interactions, plus explicit link controls
 - on-demand profiles with overlapping avatars, banners, biographies, pronouns, server identity, decorations, layered frames, bounded effects and role chips
@@ -26,7 +26,7 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 - optional saved login in keychain, credential manager or secret service
 - per-conversation drafts, compact spacing, notification privacy and background connection settings
 
-voice and video calls, email/password login, quest integration and javascript plugin compatibility are future work. reaction chips currently display existing reactions; adding reactions, nitro burst animations and lottie sticker playback are not implemented yet. incoming call notifications are informational until native voice is implemented. this milestone adds native qr login through discord mobile, with manual session entry retained under advanced sign-in. the ui never reads a token from another application. the live qr handshake passed on 2026-11-12. the user has also confirmed account access and real message delivery; the exact sign-in route was not separately recorded.
+voice and video calls, email/password login, quest integration and javascript plugin compatibility are future work. reaction chips currently display existing reactions; adding reactions, the original discord nitro animation assets and lottie sticker playback are not implemented yet. incoming call notifications are informational until native voice is implemented. this milestone adds native qr login through discord mobile, with manual session entry retained under advanced sign-in. the ui never reads a token from another application. the live qr handshake passed on 2026-11-12. the user has also confirmed account access and real message delivery; the exact sign-in route was not separately recorded.
 
 ## run it
 
