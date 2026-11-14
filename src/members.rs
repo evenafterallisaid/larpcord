@@ -15,6 +15,7 @@ pub struct Members {
     pub online: u32,
     pub received: bool,
     pub rows: BTreeMap<usize, Row>,
+    groups: BTreeMap<String, u32>,
     pub bucket: usize,
 }
 impl Members {
@@ -42,6 +43,23 @@ impl Members {
             .unwrap_or(self.online as u64)
             .min(u32::MAX as u64) as u32;
         if let Some(groups) = data["groups"].as_array() {
+            self.groups = groups
+                .iter()
+                .take(2000)
+                .filter_map(|group| {
+                    Some((
+                        group["id"].as_str()?.to_string(),
+                        group["count"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
+                    ))
+                })
+                .collect();
+            for row in self.rows.values_mut() {
+                if let Row::Group { id, count } = row
+                    && let Some(current) = self.groups.get(id)
+                {
+                    *count = *current;
+                }
+            }
             self.total = groups
                 .iter()
                 .take(2000)
@@ -66,7 +84,7 @@ impl Members {
                         if start + offset > end {
                             break;
                         }
-                        if let Some(row) = parse(item) {
+                        if let Some(row) = parse(item, &self.groups) {
                             self.rows.insert(start + offset, row);
                         }
                     }
@@ -77,7 +95,7 @@ impl Members {
                     self.rows.retain(|i, _| *i < start || *i > end);
                 }
                 "UPDATE" => {
-                    if let Some(row) = parse(&op["item"]) {
+                    if let Some(row) = parse(&op["item"], &self.groups) {
                         self.rows.insert(index, row);
                     }
                 }
@@ -86,7 +104,7 @@ impl Members {
                     for (i, row) in rest {
                         self.rows.insert(i.saturating_add(1), row);
                     }
-                    if let Some(row) = parse(&op["item"]) {
+                    if let Some(row) = parse(&op["item"], &self.groups) {
                         self.rows.insert(index, row);
                     }
                 }
@@ -142,11 +160,15 @@ fn activity_text(v: &Value) -> Option<String> {
         })
         .map(|s| s.chars().take(160).collect())
 }
-fn parse(v: &Value) -> Option<Row> {
+fn parse(v: &Value, groups: &BTreeMap<String, u32>) -> Option<Row> {
     if let Some(g) = v.get("group") {
         return Some(Row::Group {
             id: g["id"].as_str()?.to_string(),
-            count: g["count"].as_u64().unwrap_or(0).min(u32::MAX as u64) as u32,
+            count: g["count"]
+                .as_u64()
+                .map(|n| n.min(u32::MAX as u64) as u32)
+                .or_else(|| groups.get(g["id"].as_str()?).copied())
+                .unwrap_or(0),
         });
     }
     let m = v.get("member")?;
@@ -179,5 +201,27 @@ mod tests {
         assert!(
             matches!(m.rows.get(&1),Some(Row::Member(_,status,activity)) if status=="dnd"&&activity.as_deref()==Some("Playing a game"))
         );
+    }
+
+    #[test]
+    fn role_headers_use_metadata_counts_when_sync_rows_only_contain_ids() {
+        let mut members = Members::default();
+        members.reset(Some("1".into()), Some("2".into()));
+        members.apply(&serde_json::json!({"guild_id":"1","groups":[{"id":"99","count":8}],"ops":[{"op":"SYNC","range":[0,0],"items":[{"group":{"id":"99"}}]}]}));
+        assert!(matches!(
+            members.rows.get(&0),
+            Some(Row::Group { count: 8, .. })
+        ));
+        members
+            .apply(&serde_json::json!({"guild_id":"1","groups":[{"id":"99","count":9}],"ops":[]}));
+        assert!(matches!(
+            members.rows.get(&0),
+            Some(Row::Group { count: 9, .. })
+        ));
+        members.apply(
+            &serde_json::json!({"guild_id":"1","groups":[{"id":"99","count":u64::MAX}],"ops":[]}),
+        );
+        assert_eq!(members.total, 2_000_000);
+        assert!(members.rows.len() <= 300);
     }
 }
