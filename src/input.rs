@@ -71,6 +71,18 @@ impl TextInput {
         cx.notify();
     }
 
+    pub fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
+        let range = self.selected_range.clone();
+        let mut content = self.content.to_string();
+        content.replace_range(range.clone(), text);
+        self.content = content.into();
+        let cursor = range.start + text.len();
+        self.selected_range = cursor..cursor;
+        self.marked_range = None;
+        cx.emit(Changed);
+        cx.notify();
+    }
+
     fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
         if self.marked_range.is_none() {
             cx.emit(Submit);
