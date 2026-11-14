@@ -7,7 +7,7 @@ pub enum Row {
     Group { id: String, count: u32 },
     Member(Box<Member>, String, Option<String>),
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Members {
     pub guild: Option<String>,
     pub channel: Option<String>,
@@ -17,6 +17,42 @@ pub struct Members {
     pub rows: BTreeMap<usize, Row>,
     groups: BTreeMap<String, u32>,
     pub bucket: usize,
+}
+
+#[derive(Default)]
+pub struct Views(std::collections::VecDeque<(Members, std::time::Instant)>);
+impl Views {
+    pub fn select(
+        &mut self,
+        current: &mut Members,
+        guild: Option<String>,
+        channel: Option<String>,
+    ) {
+        if current.guild == guild && current.channel == channel {
+            return;
+        }
+        self.0
+            .retain(|(_, at)| at.elapsed() < std::time::Duration::from_secs(60));
+        let found = self
+            .0
+            .iter()
+            .position(|(m, _)| m.guild == guild && m.channel == channel);
+        let mut next = found
+            .and_then(|index| self.0.remove(index))
+            .map(|(m, _)| m)
+            .unwrap_or_else(|| {
+                let mut m = Members::default();
+                m.reset(guild, channel);
+                m
+            });
+        std::mem::swap(current, &mut next);
+        if next.received && next.guild.is_some() {
+            self.0.push_back((next, std::time::Instant::now()));
+        }
+        while self.0.len() > 2 {
+            self.0.pop_front();
+        }
+    }
 }
 impl Members {
     pub fn demo() -> Self {
@@ -186,6 +222,25 @@ fn parse(v: &Value, groups: &BTreeMap<String, u32>) -> Option<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn returning_to_a_recent_channel_keeps_rows_without_mixing_channel_views() {
+        let mut current = Members::demo();
+        let mut views = Views::default();
+        views.select(&mut current, Some("larp".into()), Some("other".into()));
+        assert!(!current.received);
+        assert!(current.rows.is_empty());
+        views.select(&mut current, Some("larp".into()), Some("campfire".into()));
+        assert!(current.received);
+        assert_eq!(current.rows.len(), 4);
+        views.select(&mut current, Some("larp".into()), Some("campfire".into()));
+        assert_eq!(current.rows.len(), 4);
+        for n in 0..8 {
+            current.received = true;
+            views.select(&mut current, Some("larp".into()), Some(n.to_string()));
+        }
+        assert_eq!(views.0.len(), 2);
+    }
     #[test]
     fn sparse_member_updates_shift_rows_and_stay_bounded() {
         let mut m = Members::default();

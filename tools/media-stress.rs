@@ -1,9 +1,13 @@
 //! real-renderer regression check: churn images, retain a portrait, then leave the window idle.
 //! no account, credentials, network requests or discord messages are involved.
 //! run as a normal binary: examples enable gpui test-support through dev dependencies.
-#![allow(dead_code)]
+// included media regressions precede the manual renderer harness.
+#![allow(dead_code, clippy::items_after_test_module)]
 include!("../src/media.rs");
-use gpui::{prelude::*, *};
+use gpui::{
+    Application, Bounds, Context, Render, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    div, img, prelude::*, px, rgb, size,
+};
 
 struct Stress {
     media: Media,
@@ -68,7 +72,8 @@ impl Stress {
         .detach();
         Self {
             media: Media {
-                tx,
+                tx: tx.clone(),
+                portraits: tx,
                 cache: RefCell::new(Cache::default()),
             },
             visible: Vec::new(),

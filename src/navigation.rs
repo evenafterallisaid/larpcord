@@ -204,6 +204,68 @@ fn ids(field: Wire<'_>) -> Option<Vec<String>> {
     }
 }
 
+#[derive(Default)]
+pub struct History {
+    items: Vec<String>,
+    cursor: usize,
+}
+impl History {
+    pub fn visit(&mut self, id: String) {
+        if self.items.get(self.cursor) == Some(&id) {
+            return;
+        }
+        if !self.items.is_empty() {
+            self.items.truncate(self.cursor + 1);
+        }
+        self.items.push(id);
+        if self.items.len() > 32 {
+            self.items.remove(0);
+        }
+        self.cursor = self.items.len() - 1;
+    }
+    pub fn can_back(&self) -> bool {
+        self.cursor > 0
+    }
+    pub fn can_forward(&self) -> bool {
+        self.cursor + 1 < self.items.len()
+    }
+    pub fn back(&mut self) -> Option<String> {
+        if !self.can_back() {
+            return None;
+        }
+        self.cursor -= 1;
+        self.items.get(self.cursor).cloned()
+    }
+    pub fn forward(&mut self) -> Option<String> {
+        if !self.can_forward() {
+            return None;
+        }
+        self.cursor += 1;
+        self.items.get(self.cursor).cloned()
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::History;
+    #[test]
+    fn back_forward_and_new_navigation_preserve_a_bounded_trail() {
+        let mut history = History::default();
+        history.visit("a".into());
+        history.visit("b".into());
+        assert_eq!(history.back().as_deref(), Some("a"));
+        history.visit("a".into());
+        assert_eq!(history.forward().as_deref(), Some("b"));
+        history.back();
+        history.visit("c".into());
+        assert!(!history.can_forward());
+        for n in 0..100 {
+            history.visit(n.to_string());
+        }
+        assert_eq!(history.items.len(), 32);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

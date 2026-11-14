@@ -8,9 +8,11 @@ use std::{
 
 use gpui::RenderImage;
 use image::{AnimationDecoder, Frame, ImageDecoder, ImageReader};
+#[path = "media/disk.rs"]
+mod disk;
 
 const BUDGET: usize = 12 * 1024 * 1024;
-const IDENTITY_BUDGET: usize = 4 * 1024 * 1024;
+const IDENTITY_BUDGET: usize = 8 * 1024 * 1024;
 const ENTRIES: usize = 128;
 
 pub fn cdn_url(value: &str) -> bool {
@@ -42,7 +44,7 @@ pub fn avatar(id: &str, hash: Option<&str>) -> Option<String> {
         return None;
     }
     Some(format!(
-        "https://cdn.discordapp.com/avatars/{id}/{hash}.png?size=128"
+        "https://cdn.discordapp.com/avatars/{id}/{hash}.webp?size=128"
     ))
 }
 
@@ -69,15 +71,9 @@ pub fn sticker(id: &str, format: u8, motion: bool) -> Option<String> {
 fn identity_asset(url: &str) -> bool {
     reqwest::Url::parse(url).ok().is_some_and(|url| {
         let path = url.path();
-        [
-            "/avatars/",
-            "/icons/",
-            "/emojis/",
-            "/avatar-decoration-presets/",
-            "/media/v1/collectibles-shop/",
-        ]
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
+        ["/avatars/", "/icons/", "/emojis/"]
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
             || path.contains("/avatars/")
     })
 }
@@ -127,6 +123,7 @@ struct Entry {
     used: u64,
     pending: bool,
     attempted: Instant,
+    failures: u8,
 }
 #[derive(Default)]
 struct Cache {
@@ -144,18 +141,21 @@ pub struct Loaded {
 
 pub struct Media {
     tx: async_channel::Sender<String>,
+    portraits: async_channel::Sender<String>,
     cache: RefCell<Cache>,
 }
 
 impl Media {
     pub fn new() -> (Self, async_channel::Receiver<Loaded>) {
         let (tx, requests) = async_channel::bounded::<String>(32);
+        let (portraits, portrait_requests) = async_channel::bounded::<String>(128);
         let (results, rx) = async_channel::bounded(8);
         // headless checks never download public media.
         if cfg!(test) {
             return (
                 Self {
                     tx,
+                    portraits,
                     cache: RefCell::new(Cache::default()),
                 },
                 rx,
@@ -177,48 +177,79 @@ impl Media {
                     else {
                         return;
                     };
-                    let gate = Arc::new(tokio::sync::Semaphore::new(2));
-                    while let Ok(url) = requests.recv().await {
-                        let Ok(permit) = gate.clone().acquire_owned().await else {
-                            break;
-                        };
-                        let client = client.clone();
-                        let results = results.clone();
-                        tokio::spawn(async move {
-                            let data = download(&client, &url).await;
-                            let image = match data {
-                                Some(data) => {
-                                    let bounds = decode_bounds(&url);
-                                    let motion = url.ends_with("#motion");
-                                    tokio::task::spawn_blocking(move || {
-                                        if motion {
-                                            decode_motion(data, bounds)
-                                        } else {
-                                            decode(data, bounds)
-                                        }
-                                    })
-                                    .await
-                                    .ok()
-                                    .flatten()
+                    let disk = Arc::new(disk::Disk::new());
+                    let decoders = Arc::new(tokio::sync::Semaphore::new(2));
+                    let mut workers = tokio::task::JoinSet::new();
+                    for (requests, count) in [(portrait_requests, 4), (requests, 2)] {
+                        for _ in 0..count {
+                            let (client, requests, results, disk, decoders) = (
+                                client.clone(),
+                                requests.clone(),
+                                results.clone(),
+                                disk.clone(),
+                                decoders.clone(),
+                            );
+                            workers.spawn(async move {
+                                while let Ok(url) = requests.recv().await {
+                                    let cache = disk.clone();
+                                    let key = url.clone();
+                                    let cached =
+                                        tokio::task::spawn_blocking(move || cache.read(&key))
+                                            .await
+                                            .ok()
+                                            .flatten();
+                                    let from_disk = cached.is_some();
+                                    let data = match cached {
+                                        Some(bytes) => Some(bytes),
+                                        None => download(&client, &url).await,
+                                    };
+                                    let image = if let Some(data) = data {
+                                        let Ok(_permit) = decoders.acquire().await else {
+                                            break;
+                                        };
+                                        let key = url.clone();
+                                        let cache = disk.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            let image = if key.ends_with("#motion") {
+                                                decode_motion(data.clone(), decode_bounds(&key))
+                                            } else {
+                                                decode(data.clone(), decode_bounds(&key))
+                                            };
+                                            if image.is_some() && !from_disk {
+                                                cache.write(&key, &data);
+                                            }
+                                            if image.is_none() && from_disk {
+                                                cache.remove(&key);
+                                            }
+                                            image
+                                        })
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                    } else {
+                                        None
+                                    };
+                                    let bytes = image.as_ref().map_or(0, |i| {
+                                        (0..i.frame_count())
+                                            .filter_map(|n| i.as_bytes(n))
+                                            .map(|b| b.len())
+                                            .sum()
+                                    });
+                                    if results.send(Loaded { url, image, bytes }).await.is_err() {
+                                        break;
+                                    }
                                 }
-                                None => None,
-                            };
-                            let bytes = image.as_ref().map_or(0, |i| {
-                                (0..i.frame_count())
-                                    .filter_map(|n| i.as_bytes(n))
-                                    .map(|b| b.len())
-                                    .sum()
                             });
-                            let _ = results.send(Loaded { url, image, bytes }).await;
-                            drop(permit);
-                        });
+                        }
                     }
+                    while workers.join_next().await.is_some() {}
                 });
             })
             .expect("media worker");
         (
             Self {
                 tx,
+                portraits,
                 cache: RefCell::new(Cache::default()),
             },
             rx,
@@ -244,12 +275,19 @@ impl Media {
             entry.used = clock;
             if entry.pending
                 || entry.image.is_some()
-                || entry.attempted.elapsed() < Duration::from_secs(60)
+                || entry.attempted.elapsed()
+                    < Duration::from_secs(if entry.failures == 1 { 2 } else { 60 })
             {
                 return entry.image.clone();
             }
         }
-        if self.tx.try_send(url.to_string()).is_ok() {
+        let failures = cache.entries.get(url).map_or(0, |e| e.failures);
+        let queue = if identity_asset(url) {
+            &self.portraits
+        } else {
+            &self.tx
+        };
+        if queue.try_send(url.to_string()).is_ok() {
             cache.entries.insert(
                 url.to_string(),
                 Entry {
@@ -259,6 +297,7 @@ impl Media {
                     used: clock,
                     pending: true,
                     attempted: Instant::now(),
+                    failures,
                 },
             );
         }
@@ -270,12 +309,19 @@ impl Media {
         let mut cache = self.cache.borrow_mut();
         cache.clock += 1;
         let clock = cache.clock;
+        let mut failures = 0;
         if let Some(old) = cache.entries.remove(&loaded.url) {
+            failures = old.failures;
             cache.bytes -= old.bytes;
             retired.extend(old.image);
         }
         cache.bytes += loaded.bytes;
         let identity = identity_asset(&loaded.url);
+        failures = if loaded.image.is_none() {
+            failures.saturating_add(1)
+        } else {
+            0
+        };
         cache.entries.insert(
             loaded.url,
             Entry {
@@ -285,11 +331,13 @@ impl Media {
                 used: clock,
                 pending: false,
                 attempted: Instant::now(),
+                failures,
             },
         );
         // portraits and icons have their own allowance, so a large attachment cannot evict them.
         for identity in [true, false] {
             let budget = if identity { IDENTITY_BUDGET } else { BUDGET };
+            let entries = if identity { ENTRIES * 2 } else { ENTRIES };
             loop {
                 let (bytes, count) = cache
                     .entries
@@ -298,7 +346,7 @@ impl Media {
                     .fold((0, 0), |(bytes, count), (_, entry)| {
                         (bytes + entry.bytes, count + 1)
                     });
-                if bytes <= budget && count <= ENTRIES {
+                if bytes <= budget && count <= entries {
                     break;
                 }
                 let key = cache
@@ -313,7 +361,7 @@ impl Media {
                     // a visible working set may exceed the soft allowance. never cycle its images
                     // through placeholders on every repaint; retain a bounded working set instead.
                     let hard_budget = budget * 3;
-                    if bytes > hard_budget || count > ENTRIES * 2 {
+                    if bytes > hard_budget || count > entries * 2 {
                         let key = cache
                             .entries
                             .iter()
@@ -339,13 +387,36 @@ impl Media {
         }
         retired
     }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        let cache = self.cache.borrow();
+        cache
+            .entries
+            .iter()
+            .filter(|(url, e)| {
+                cache.visible.contains(*url) && !e.pending && e.image.is_none() && e.failures == 1
+            })
+            .map(|(_, e)| Duration::from_secs(2).saturating_sub(e.attempted.elapsed()))
+            .min()
+    }
 }
 
 async fn download(client: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
     if !cdn_url(url) {
         return None;
     }
-    let mut response = client.get(url).send().await.ok()?.error_for_status().ok()?;
+    let mut response = client
+        .get(url)
+        .timeout(Duration::from_secs(if identity_asset(url) {
+            8
+        } else {
+            20
+        }))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
     if response
         .content_length()
         .is_some_and(|n| n > 8 * 1024 * 1024)
@@ -458,7 +529,7 @@ fn asset_id(id: &str) -> bool {
 pub fn guild_icon(id: &str, hash: Option<&str>) -> Option<String> {
     let hash = hash?;
     (asset_id(id) && asset_hash(hash))
-        .then(|| format!("https://cdn.discordapp.com/icons/{id}/{hash}.png?size=128"))
+        .then(|| format!("https://cdn.discordapp.com/icons/{id}/{hash}.webp?size=128"))
 }
 pub fn banner(id: &str, guild: Option<&str>, hash: &str) -> Option<String> {
     if !asset_id(id) || !asset_hash(hash) {
@@ -483,7 +554,7 @@ pub fn decoration(asset: &str) -> Option<String> {
 pub fn member_avatar(guild: &str, user: &str, hash: &str) -> Option<String> {
     (asset_id(guild) && asset_id(user) && asset_hash(hash)).then(|| {
         format!(
-            "https://cdn.discordapp.com/guilds/{guild}/users/{user}/avatars/{hash}.png?size=256"
+            "https://cdn.discordapp.com/guilds/{guild}/users/{user}/avatars/{hash}.webp?size=256"
         )
     })
 }
@@ -491,6 +562,62 @@ pub fn member_avatar(guild: &str, user: &str, hash: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portraits_do_not_queue_behind_attachments_or_large_cosmetics() {
+        let (tx, content) = async_channel::bounded(1);
+        let (portraits, icons) = async_channel::bounded(4);
+        let media = Media {
+            tx,
+            portraits,
+            cache: RefCell::new(Cache::default()),
+        };
+        media.get("https://cdn.discordapp.com/attachments/1/image.png");
+        media.get("https://cdn.discordapp.com/avatars/1/abc.png?size=128");
+        media.get("https://cdn.discordapp.com/icons/2/abc.png?size=128");
+        assert!(icons.try_recv().unwrap().contains("/avatars/"));
+        assert!(icons.try_recv().unwrap().contains("/icons/"));
+        assert!(content.try_recv().unwrap().contains("/attachments/"));
+        assert!(!identity_asset(
+            "https://cdn.discordapp.com/media/v1/collectibles-shop/1/static"
+        ));
+    }
+
+    #[test]
+    fn a_visible_failed_image_gets_one_short_retry_instead_of_a_refresh_loop() {
+        let (tx, requests) = async_channel::bounded(4);
+        let media = Media {
+            portraits: tx.clone(),
+            tx,
+            cache: RefCell::new(Cache::default()),
+        };
+        let url = "https://cdn.discordapp.com/icons/1/abc.webp";
+        media.get(url);
+        requests.try_recv().unwrap();
+        media.receive(Loaded {
+            url: url.into(),
+            image: None,
+            bytes: 0,
+        });
+        assert!(media.retry_after().is_some());
+        media
+            .cache
+            .borrow_mut()
+            .entries
+            .get_mut(url)
+            .unwrap()
+            .attempted = Instant::now() - Duration::from_secs(3);
+        media.get(url);
+        assert!(requests.try_recv().is_ok());
+        media.receive(Loaded {
+            url: url.into(),
+            image: None,
+            bytes: 0,
+        });
+        assert!(media.retry_after().is_none());
+        media.get(url);
+        assert!(requests.try_recv().is_err());
+    }
     #[test]
     fn public_media_never_uses_an_arbitrary_origin() {
         for url in [
@@ -513,7 +640,8 @@ mod tests {
     fn decoded_cache_evicts_old_rows_and_keeps_recent_images() {
         let (tx, _rx) = async_channel::bounded(1);
         let media = Media {
-            tx,
+            tx: tx.clone(),
+            portraits: tx,
             cache: RefCell::new(Cache::default()),
         };
         for index in 0..160 {
@@ -560,7 +688,8 @@ mod tests {
     fn attachment_churn_keeps_portraits_stable_and_returns_every_retired_texture() {
         let (tx, _rx) = async_channel::bounded(1);
         let media = Media {
-            tx,
+            tx: tx.clone(),
+            portraits: tx,
             cache: RefCell::new(Cache::default()),
         };
         let portrait = "https://cdn.discordapp.com/avatars/1/abcdef.png?size=128";
@@ -604,11 +733,12 @@ mod tests {
     fn idle_repaints_do_not_evict_the_visible_working_set() {
         let (tx, _rx) = async_channel::bounded(1);
         let media = Media {
-            tx,
+            tx: tx.clone(),
+            portraits: tx,
             cache: RefCell::new(Cache::default()),
         };
         let mut ids = Vec::new();
-        for index in 0..32 {
+        for index in 0..48 {
             let url = format!("https://cdn.discordapp.com/avatars/{index}/abc.png");
             media.get(&url);
             let image = Arc::new(RenderImage::new(vec![Frame::new(image::RgbaImage::new(
