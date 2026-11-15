@@ -835,7 +835,7 @@ where
             changed = viewed.changed(), if ready => {
                 if changed.is_err() {return Err(ConnectionError::Transient);}
                 let current = viewed.borrow_and_update().clone();
-                if let Some(payload) = view_subscription_change(&subscribed,&current) {
+                for payload in view_subscription_frames(&subscribed,&current) {
                     socket.send(Frame::Text(payload.to_string().into())).await?;
                 }
                 session.subscribed_guild = Some(current.clone());
@@ -879,7 +879,7 @@ where
                             ready = true;
                             subscribed = if kind == "RESUMED" {session.subscribed_guild.clone().unwrap_or_default()}else{Viewed::default()};
                             let current = viewed.borrow_and_update().clone();
-                            if let Some(payload) = view_subscription_change(&subscribed,&current) {socket.send(Frame::Text(payload.to_string().into())).await?;}
+                            for payload in view_subscription_frames(&subscribed,&current) {socket.send(Frame::Text(payload.to_string().into())).await?;}
                             session.subscribed_guild = Some(current.clone());
                             subscribed = current;
                         }
@@ -917,12 +917,6 @@ fn view_subscription_change(previous: &Viewed, current: &Viewed) -> Option<Value
     }
     if let Some(id) = &current.guild {
         let mut channels = serde_json::Map::new();
-        if previous.guild == current.guild
-            && previous.channel != current.channel
-            && let Some(old) = &previous.channel
-        {
-            channels.insert(old.clone(), json!([]));
-        }
         if current.members
             && let Some(channel) = &current.channel
         {
@@ -938,6 +932,46 @@ fn view_subscription_change(previous: &Viewed, current: &Viewed) -> Option<Value
         );
     }
     (!subscriptions.is_empty()).then(|| json!({"op":37,"d":{"subscriptions":subscriptions}}))
+}
+
+fn view_subscription_frames(previous: &Viewed, current: &Viewed) -> Vec<Value> {
+    let Some(mut final_frame) = view_subscription_change(previous, current) else {
+        return Vec::new();
+    };
+    let Some(guild) = &current.guild else {
+        return vec![final_frame];
+    };
+    let mut frames = Vec::new();
+    let active = current.members && current.channel.is_some();
+    if active
+        && (previous.guild != current.guild
+            || previous.channel != current.channel
+            || !previous.members)
+    {
+        // the guild must be subscribed in an earlier frame before discord accepts ranges.
+        if previous.guild != current.guild {
+            let mut activate = final_frame.clone();
+            activate["d"]["subscriptions"][guild]["channels"] = json!({});
+            frames.push(activate);
+        }
+        // unchanged ranges produce no new sync, even after leaving the guild. move the
+        // window first, then restore it. empty per-channel ranges cause a 4002 close.
+        let mut displaced = final_frame.clone();
+        let channel = current.channel.as_ref().unwrap();
+        let start = current.bucket + 100;
+        displaced["d"]["subscriptions"][guild]["channels"] = json!({channel:[[start,start+99]]});
+        frames.push(displaced);
+    } else if !active
+        && previous.members
+        && previous.guild == current.guild
+        && let Some(channel) = &previous.channel
+    {
+        // closing the rail parks the server range outside the retained viewport.
+        let start = previous.bucket + 100;
+        final_frame["d"]["subscriptions"][guild]["channels"] = json!({channel:[[start,start+99]]});
+    }
+    frames.push(final_frame);
+    frames
 }
 #[cfg(test)]
 fn guild_subscription_change(previous: Option<&str>, current: Option<&str>) -> Option<Value> {
@@ -1060,9 +1094,10 @@ mod tests {
             ..before.clone()
         };
         let payload = view_subscription_change(&before, &switched).unwrap();
-        assert_eq!(
-            payload["d"]["subscriptions"]["1"]["channels"]["2"],
-            json!([])
+        assert!(
+            payload["d"]["subscriptions"]["1"]["channels"]
+                .get("2")
+                .is_none()
         );
         assert_eq!(
             payload["d"]["subscriptions"]["1"]["channels"]["3"],
@@ -1071,6 +1106,107 @@ mod tests {
         let body = send_body("hi", "123", Some("456"));
         assert_eq!(body["message_reference"]["message_id"], "456");
         assert_eq!(body["allowed_mentions"]["replied_user"], false);
+    }
+
+    #[tokio::test]
+    async fn member_subscriptions_prime_guilds_and_refresh_ranges_after_returning() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let view = |guild: &str, channel: &str| Viewed {
+            guild: Some(guild.into()),
+            channel: Some(channel.into()),
+            members: true,
+            bucket: 0,
+        };
+        let (selection, mut viewed) = watch::channel(view("1", "2"));
+        let _keep_selection = selection.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket
+                .send(Frame::Text(
+                    json!({"op":10,"d":{"heartbeat_interval":1000}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            let _identify = socket.next().await.unwrap().unwrap();
+            socket
+                .send(Frame::Text(
+                    json!({"op":0,"t":"READY","s":1,"d":{"session_id":"fixture"}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            let mut active = std::collections::HashSet::new();
+            let mut held = HashMap::<String, Value>::new();
+            let mut syncs = 0;
+            let mut sequence = 1;
+            while let Some(Ok(Frame::Text(text))) = socket.next().await {
+                let packet: Value = serde_json::from_str(&text).unwrap();
+                if packet["op"] == 1 {
+                    socket
+                        .send(Frame::Text(json!({"op":11}).to_string().into()))
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                for (guild, subscription) in packet["d"]["subscriptions"].as_object().unwrap() {
+                    let primed = active.contains(guild);
+                    if subscription["typing"] == true {
+                        active.insert(guild.clone());
+                    } else {
+                        active.remove(guild);
+                    }
+                    for ranges in subscription["channels"].as_object().unwrap().values() {
+                        // the real service rejects an empty per-channel range array.
+                        assert!(!ranges.as_array().unwrap().is_empty());
+                        if !primed || held.get(guild) == Some(ranges) {
+                            continue;
+                        }
+                        held.insert(guild.clone(), ranges.clone());
+                        sequence += 1;
+                        socket.send(Frame::Text(json!({"op":0,"t":"GUILD_MEMBER_LIST_UPDATE","s":sequence,"d":{"guild_id":guild,"id":"everyone","ops":[{"op":"SYNC","range":ranges[0],"items":[]}]}}).to_string().into())).await.unwrap();
+                        if ranges == &json!([[0, 99]]) {
+                            syncs += 1;
+                            match syncs {
+                                1 => selection.send(view("3", "4")).unwrap(),
+                                2 => selection.send(view("1", "2")).unwrap(),
+                                3 => {
+                                    socket
+                                        .send(Frame::Close(Some(
+                                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                                code: 4004.into(),
+                                                reason: "fixture complete".into(),
+                                            },
+                                        )))
+                                        .await
+                                        .unwrap();
+                                    return syncs;
+                                }
+                                _ => panic!("unexpected repeated sync"),
+                            }
+                        }
+                    }
+                }
+            }
+            syncs
+        });
+        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let api = Api::new(Zeroizing::new("synthetic-not-a-credential".into())).unwrap();
+        let (events, _receiver) = async_channel::bounded(16);
+        let mut session = Session::default();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_watched_connection(socket, &api, &events, 1, &mut session, &mut viewed),
+        )
+        .await;
+        assert!(matches!(result, Ok(Err(ConnectionError::Fatal))));
+        assert_eq!(server.await.unwrap(), 3);
     }
 
     #[tokio::test]
