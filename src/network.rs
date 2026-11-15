@@ -917,6 +917,12 @@ fn view_subscription_change(previous: &Viewed, current: &Viewed) -> Option<Value
     }
     if let Some(id) = &current.guild {
         let mut channels = serde_json::Map::new();
+        if previous.guild == current.guild
+            && previous.channel != current.channel
+            && let Some(old) = &previous.channel
+        {
+            channels.insert(old.clone(), json!([]));
+        }
         if current.members
             && let Some(channel) = &current.channel
         {
@@ -1049,6 +1055,19 @@ mod tests {
         assert_eq!(payload["d"]["subscriptions"]["1"]["channels"], json!({}));
         assert_eq!(payload["d"]["subscriptions"]["1"]["activities"], false);
         assert!(view_subscription_change(&closed, &closed).is_none());
+        let switched = Viewed {
+            channel: Some("3".into()),
+            ..before.clone()
+        };
+        let payload = view_subscription_change(&before, &switched).unwrap();
+        assert_eq!(
+            payload["d"]["subscriptions"]["1"]["channels"]["2"],
+            json!([])
+        );
+        assert_eq!(
+            payload["d"]["subscriptions"]["1"]["channels"]["3"],
+            json!([[0, 99]])
+        );
         let body = send_body("hi", "123", Some("456"));
         assert_eq!(body["message_reference"]["message_id"], "456");
         assert_eq!(body["allowed_mentions"]["replied_user"], false);

@@ -5,16 +5,16 @@
 
 this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the first preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.1.0-preview.2).
 
-**0.2.0-dev.7 is a development preview.** this branch contains the next login and layout milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
+**0.2.0-dev.8 is a development preview.** this branch contains the next login and layout milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
 
 ## what works in this milestone
 
-- native gpui window, discord-style layout, the chosen glass branding, macos traffic lights and dark first paint
+- native gpui window, discord-style layout, shared account card, back/forward navigation, macos traffic lights and dark first paint
 - native discord qr login with mobile confirmation; no manual token required for that flow
 - darker discord-style surfaces, compact navigation, virtualized server and dm lists, recent dm ordering and conversation filtering
 - automatically paged history in both directions, jump to latest, grouped messages, reply previews and composing replies, sending, live edits and deletions
 - image attachments, png/apng/gif stickers, static custom emoji, searchable unicode emoji picker, markdown, bot embeds and components v2 layouts
-- ordinary and super reaction displays, separate counts, your-reaction highlighting and live add/remove updates
+- ordinary and super reaction displays, separate counts, your-reaction highlighting, native burst/hover animation and live add/remove updates
 - a collapsible channel list, bounded on-demand member sidebar with roles and presence, and a floating translucent jump-to-latest control
 - bot buttons and string selectors through discord interactions, plus explicit link controls
 - on-demand profiles with overlapping avatars, banners, biographies, pronouns, server identity, decorations, layered frames, bounded effects and role chips
@@ -26,7 +26,7 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 - optional saved login in keychain, credential manager or secret service
 - per-conversation drafts, compact spacing, notification privacy and background connection settings
 
-voice and video calls, email/password login, quest integration and javascript plugin compatibility are future work. reaction chips currently display existing reactions; adding reactions, nitro burst animations and lottie sticker playback are not implemented yet. incoming call notifications are informational until native voice is implemented. this milestone adds native qr login through discord mobile, with manual session entry retained under advanced sign-in. the ui never reads a token from another application. the live qr handshake passed on 2026-11-12. the user has also confirmed account access and real message delivery; the exact sign-in route was not separately recorded.
+voice and video calls, email/password login, quest integration and javascript plugin compatibility are future work. reaction chips currently display existing reactions; adding reactions, the original discord nitro animation assets and lottie sticker playback are not implemented yet. incoming call notifications are informational until native voice is implemented. this milestone adds native qr login through discord mobile, with manual session entry retained under advanced sign-in. the ui never reads a token from another application. the live qr handshake passed on 2026-11-12. the user has also confirmed account access and real message delivery; the exact sign-in route was not separately recorded.
 
 ## run it
 
@@ -48,9 +48,11 @@ an account session token is a password. keep it private. larpcord is an independ
 - video decoders start only after a click, one viewer at a time, and are released when it closes; queues are bounded and software decoders use two threads
 - at most 12 conversation histories, with 200 messages each, live in memory
 - switching conversations evicts the least recently used history while retaining the active one
-- visible images decode off the ui thread; portraits and content have separate soft allowances of 4 mib and 12 mib, each with 128 entries; a visible working set can use up to three times its allowance to avoid repeated eviction, with a 256-entry hard limit per pool
+- public encoded images have a bounded 64 mib disk cache, reused after scrolling or restarting; portraits/icons have four dedicated download slots and content has two, with two decoders shared across both queues
+- recently viewed member lists are retained for up to 60 seconds, with at most two previous channel views
+- visible images decode off the ui thread; portraits and content have separate soft allowances of 8 mib and 12 mib, with 256 and 128 entries respectively; a visible working set can use up to three times its allowance to avoid repeated eviction, with hard entry ceilings of 512 and 256
 - media uses public discord cdn requests without account credentials; external links open only after a click
-- animated emoji use a still frame for now
+- animated emoji use a still frame for now; super reactions have short native particle bursts and hover replay, with reduced-motion support
 - the network service runs on a two-worker rust runtime, independently of window rendering
 - the ui waits for pushed events. it has no refresh loop or background game scanner
 - history merges preserve concurrent message edits, reaction changes, new messages and deletions
