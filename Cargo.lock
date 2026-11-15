@@ -3364,7 +3364,7 @@ dependencies = [
 
 [[package]]
 name = "larpcord"
-version = "0.2.0-dev.8"
+version = "0.2.0-dev.9"
 dependencies = [
  "alhazen-gpui",
  "anyhow",

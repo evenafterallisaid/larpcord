@@ -3,21 +3,23 @@
 <p align="center">a little room to breathe.</p>
 <p align="center">a native discord client, written in rust with gpui.</p>
 
-this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the first preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.1.0-preview.2).
+this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the current published preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.2.0-dev.8).
 
-**0.2.0-dev.8 is a development preview.** this branch contains the next login and layout milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
+**0.2.0-dev.9 is a development preview.** this branch contains the friends, profiles and layout milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
 
 ## what works in this milestone
 
 - native gpui window, discord-style layout, shared account card, back/forward navigation, macos traffic lights and dark first paint
 - native discord qr login with mobile confirmation; no manual token required for that flow
-- darker discord-style surfaces, compact navigation, virtualized server and dm lists, recent dm ordering and conversation filtering
+- layered charcoal surfaces, a single compact title/navigation bar, virtualized server and dm lists, recent dm ordering and conversation filtering
+- a friends home with online/all filters, search, live relationship updates and opening direct conversations
+- live dm presence badges and activity lines, with native idle, busy and offline shapes
 - automatically paged history in both directions, jump to latest, grouped messages, reply previews and composing replies, sending, live edits and deletions
 - image attachments, png/apng/gif stickers, static custom emoji, searchable unicode emoji picker, markdown, bot embeds and components v2 layouts
 - ordinary and super reaction displays, separate counts, your-reaction highlighting, native burst/hover animation and live add/remove updates
 - a collapsible channel list, bounded on-demand member sidebar with roles and presence, and a floating translucent jump-to-latest control
 - bot buttons and string selectors through discord interactions, plus explicit link controls
-- on-demand profiles with overlapping avatars, banners, biographies, pronouns, server identity, decorations, layered frames, bounded effects and role chips
+- a nonblocking dm profile inspector, expandable full profiles, mutual friend/server counts, profile theme colors and overlapping avatars, banners, biographies, pronouns, server identity, decorations, layered frames, bounded effects and role chips
 - server icons and banners, saved server order and folders, unread/mention badges, a flat single-color home mark and custom typing indicators
 - click-to-play video attachments, cdn video embeds and components v2 video galleries, with a native viewer, seeking, volume and mute
 - floating settings with mouse, scroll and keyboard isolation
