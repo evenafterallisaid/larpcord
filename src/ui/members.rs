@@ -11,9 +11,9 @@ impl Larpcord {
             .w(px(240.))
             .h_full()
             .flex_shrink_0()
-            .bg(rgb(SIDEBAR))
+            .bg(self.color(SIDEBAR))
             .border_l_1()
-            .border_color(rgb(LINE))
+            .border_color(self.color(LINE))
             .child(
                 label(format!("MEMBERS · {}", users.len()))
                     .px_4()
@@ -44,7 +44,7 @@ impl Larpcord {
                                             .gap_3()
                                             .rounded_md()
                                             .cursor_pointer()
-                                            .hover(|s| s.bg(rgb(SURFACE)))
+                                            .hover(|s| s.bg(this.color(SURFACE)))
                                             .child(this.presence_avatar(&user, 32.))
                                             .child(
                                                 div()
@@ -104,9 +104,9 @@ impl Larpcord {
             .w(px(240.))
             .flex_shrink_0()
             .h_full()
-            .bg(rgb(SIDEBAR))
+            .bg(self.color(SIDEBAR))
             .border_l_1()
-            .border_color(rgb(LINE))
+            .border_color(self.color(LINE))
             .when(count == 0, |s| {
                 s.child(
                     column()
@@ -167,7 +167,7 @@ impl Larpcord {
                     .pb_2()
                     .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(MUTED))
+                    .text_color(self.color(MUTED))
                     .child(format!("{} · {count}", name.to_uppercase()))
                     .into_any_element()
             }
@@ -195,17 +195,8 @@ impl Larpcord {
                             .gap_3()
                             .rounded_md()
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(SURFACE)))
-                            .when_some(self.nameplate(&user, Some(&member)), |s, image| {
-                                s.child(
-                                    img(image)
-                                        .absolute()
-                                        .inset_0()
-                                        .size_full()
-                                        .rounded_md()
-                                        .object_fit(ObjectFit::Cover),
-                                )
-                            })
+                            .hover(|s| s.bg(self.color(SURFACE)))
+                            .child(self.nameplate_art(&user, Some(&member), 40.))
                             .child(
                                 div()
                                     .relative()
@@ -215,14 +206,19 @@ impl Larpcord {
                                         Some(&member),
                                         self.selected_guild.as_deref(),
                                         32.,
-                                        false,
+                                        self.hovered_name.as_deref() == Some(&hover_key),
                                     ))
                                     .child(
-                                        div()
-                                            .absolute()
-                                            .right(px(-1.))
-                                            .bottom(px(-1.))
-                                            .child(chrome::presence_badge(status, 12., SIDEBAR)),
+                                        div().absolute().right(px(-1.)).bottom(px(-1.)).child(
+                                            chrome::presence_badge(
+                                                status,
+                                                14.,
+                                                self.settings
+                                                    .theme
+                                                    .tokens(self.settings.custom_theme)
+                                                    .sidebar,
+                                            ),
+                                        ),
                                     ),
                             )
                             .child(

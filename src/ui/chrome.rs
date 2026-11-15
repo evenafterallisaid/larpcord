@@ -121,8 +121,11 @@ impl Larpcord {
                         .bottom(px(-1.))
                         .child(presence_badge(
                             &p.status,
-                            if size < 30. { 10. } else { 12. },
-                            SIDEBAR,
+                            if size < 30. { 11. } else { 14. },
+                            self.settings
+                                .theme
+                                .tokens(self.settings.custom_theme)
+                                .sidebar,
                         )),
                 )
             })
@@ -250,15 +253,7 @@ impl Larpcord {
             .border_1()
             .border_color(rgb(LINE))
             .overflow_hidden()
-            .when_some(self.nameplate(&self.store.user, None), |s, image| {
-                s.child(
-                    img(image)
-                        .absolute()
-                        .inset_0()
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                )
-            })
+            .child(self.nameplate_art(&self.store.user, None, 52.))
             .px_2()
             .gap_2()
             .bg(rgb(PANEL))

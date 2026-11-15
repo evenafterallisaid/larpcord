@@ -30,7 +30,7 @@ impl Larpcord {
             .rounded_lg()
             .overflow_hidden()
             .border_1()
-            .border_color(rgb(LINE))
+            .border_color(self.color(LINE))
             .bg(rgb(0x09090b))
             .cursor_pointer()
             .when_some(image, |s, image| {
@@ -55,7 +55,7 @@ impl Larpcord {
                             .bg(rgba(0x000000b8))
                             .border_1()
                             .border_color(rgba(0xffffff30))
-                            .child(icon("play", 22.).text_color(rgb(TEXT)))
+                            .child(icon("play", 22.).text_color(self.color(TEXT)))
                             .hover(|s| s.bg(rgb(0x5865f2))),
                     ),
             )
@@ -68,7 +68,7 @@ impl Larpcord {
                         .px_3()
                         .py_2()
                         .bg(rgba(0x0000008c))
-                        .child(label(title.clone()).text_color(rgb(TEXT)).truncate()),
+                        .child(label(title.clone()).text_color(self.color(TEXT)).truncate()),
                 )
             })
             .tooltip(|_, cx| cx.new(|_| Hint("Play video".into())).into())
@@ -160,9 +160,9 @@ impl Larpcord {
                     .max_w(px(1000.))
                     .h(relative(0.92))
                     .min_h_0()
-                    .bg(rgb(PANEL))
+                    .bg(self.color(PANEL))
                     .border_1()
-                    .border_color(rgb(LINE))
+                    .border_color(self.color(LINE))
                     .rounded_xl()
                     .overflow_hidden()
                     .child(

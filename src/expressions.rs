@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub fn id(value: &str) -> bool {
@@ -47,7 +47,7 @@ impl Emoji {
     }
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Sticker {
     pub id: String,
     #[serde(default)]
@@ -96,11 +96,15 @@ pub fn packs(value: Value) -> Vec<StickerPack> {
         .collect()
 }
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Gif {
     pub title: String,
     pub url: String,
     pub preview: Option<String>,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
 }
 
 fn https_host(value: &str, hosts: &[&str]) -> bool {
@@ -152,6 +156,8 @@ pub fn gifs(value: Value) -> Vec<Gif> {
                     .collect(),
                 url,
                 preview,
+                width: v["width"].as_u64().unwrap_or(1).min(4096) as u32,
+                height: v["height"].as_u64().unwrap_or(1).min(4096) as u32,
             })
         })
         .collect()
@@ -167,9 +173,14 @@ pub enum Tab {
 
 #[derive(Default)]
 pub struct Picker {
+    pub favorites: Vec<Gif>,
+    pub favorites_loaded: bool,
+    pub favorites_loading: bool,
+    pub favorites_error: Option<String>,
     pub hovered: Option<String>,
     pub tab: Tab,
     pub scope: Option<String>,
+    pub pending_scope: Option<String>,
     pub recent: Vec<String>,
     pub gifs: Vec<Gif>,
     pub query: String,

@@ -75,12 +75,12 @@ impl Larpcord {
             .gap_3()
             .rounded_md()
             .bg(if self.home_page {
-                rgb(SURFACE)
+                self.color(SURFACE)
             } else {
                 rgba(0x00000000)
             })
-            .hover(|s| s.bg(rgb(SURFACE)))
-            .text_color(rgb(if self.home_page { TEXT } else { MUTED }))
+            .hover(|s| s.bg(self.color(SURFACE)))
+            .text_color(self.color(if self.home_page { TEXT } else { MUTED }))
             .cursor_pointer()
             .child(icon("users", 22.))
             .child(
@@ -128,11 +128,11 @@ impl Larpcord {
             .flex_1()
             .min_w_0()
             .h_full()
-            .bg(rgb(BG))
+            .bg(self.color(BG))
             .rounded_tl_lg()
             .border_l_1()
             .border_t_1()
-            .border_color(rgb(LINE))
+            .border_color(self.color(LINE))
             .overflow_hidden()
             .child(
                 row()
@@ -141,7 +141,7 @@ impl Larpcord {
                     .px_4()
                     .gap_3()
                     .border_b_1()
-                    .border_color(rgb(LINE))
+                    .border_color(self.color(LINE))
                     .child(icon("users", 22.))
                     .child(
                         div()
@@ -149,7 +149,7 @@ impl Larpcord {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Friends"),
                     )
-                    .child(div().h(px(24.)).w(px(1.)).bg(rgb(LINE)))
+                    .child(div().h(px(24.)).w(px(1.)).bg(self.color(LINE)))
                     .children(
                         [
                             ("friends-online", "Online", true),
@@ -162,7 +162,7 @@ impl Larpcord {
                                 .py_0()
                                 .px_3()
                                 .bg(if self.friends_online == online {
-                                    rgb(SURFACE)
+                                    self.color(SURFACE)
                                 } else {
                                     rgba(0x00000000)
                                 })
@@ -182,7 +182,7 @@ impl Larpcord {
                     .mt_4()
                     .px_3()
                     .rounded_lg()
-                    .bg(rgb(PANEL))
+                    .bg(self.color(PANEL))
                     .child(div().flex_1().child(self.friend_search.clone()))
                     .child(icon("search", 18.)),
             )
@@ -207,7 +207,7 @@ impl Larpcord {
                         .items_center()
                         .justify_center()
                         .gap_3()
-                        .child(icon("users", 48.).text_color(rgb(MUTED)))
+                        .child(icon("users", 48.).text_color(self.color(MUTED)))
                         .child(div().text_size(px(18.)).child(if query.is_empty() {
                             "A little quiet here"
                         } else {
@@ -264,11 +264,11 @@ impl Larpcord {
                     .h(px(64.))
                     .w_full()
                     .border_t_1()
-                    .border_color(rgb(LINE))
+                    .border_color(self.color(LINE))
                     .px_3()
                     .gap_3()
                     .rounded_md()
-                    .hover(|s| s.bg(rgb(SURFACE)))
+                    .hover(|s| s.bg(self.color(SURFACE)))
                     .cursor_pointer()
                     .child(self.presence_avatar(&user, 32.))
                     .child(

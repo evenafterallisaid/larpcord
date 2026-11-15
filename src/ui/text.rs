@@ -25,7 +25,7 @@ impl Larpcord {
                         highlights.push((range.clone(), HighlightStyle {
                             font_weight:span.bold.then_some(FontWeight::BOLD),
                             font_style:span.italic.then_some(FontStyle::Italic),
-                            background_color:span.code.then(|| rgb(PANEL).into()),
+                            background_color:span.code.then(|| self.color(PANEL).into()),
                             color:span.link.as_ref().map(|_| rgb(0x65b8f7).into()),
                             strikethrough:span.strike.then_some(StrikethroughStyle {thickness:px(1.),color:None}),
                             ..HighlightStyle::default()
@@ -46,7 +46,7 @@ impl Larpcord {
                             match part {
                                 crate::content::Part::Text(text) => for word in text.split_inclusive(char::is_whitespace) {
                                     let styled=div().max_w(px(360.)).flex_shrink_0().when(span.bold,|s|s.font_weight(FontWeight::BOLD)).when(span.italic,|s|s.italic()).when(span.strike,|s|s.line_through())
-                                        .when(span.code,|s|s.font_family("monospace").bg(rgb(PANEL)).rounded_sm().px_1()).child(word.to_string());
+                                        .when(span.code,|s|s.font_family("monospace").bg(self.color(PANEL)).rounded_sm().px_1()).child(word.to_string());
                                     if let Some(url)=&span.link {let url=url.clone();items.push(styled.id(("text-link",items.len())).cursor_pointer().text_color(rgb(0x65b8f7)).on_click(move |_,_,cx|open_https(&url,cx)).into_any_element());}
                                     else {items.push(styled.into_any_element());}
                                 },
@@ -61,8 +61,8 @@ impl Larpcord {
                 row().id(("rich-block",index)).w_full().min_w_0().flex_wrap().min_h(px(22.))
                     .text_size(px(if block.heading>0 {22.-(block.heading.min(4)-1) as f32*2.}else if jumbo {40.} else{font_size})).line_height(px(if block.heading>0{28.}else if jumbo {48.} else{22.}))
                     .when(block.heading>0,|s|s.font_weight(FontWeight::BOLD).mt_1())
-                    .when(block.code,|s|s.font_family("monospace").p_2().rounded_md().bg(rgb(PANEL)))
-                    .when(block.quote,|s|s.pl_3().border_l_2().border_color(rgb(MUTED))).children(items)
+                    .when(block.code,|s|s.font_family("monospace").p_2().rounded_md().bg(self.color(PANEL)))
+                    .when(block.quote,|s|s.pl_3().border_l_2().border_color(self.color(MUTED))).children(items)
             })).into_any_element()
     }
 }

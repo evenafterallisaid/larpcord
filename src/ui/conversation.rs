@@ -1,6 +1,32 @@
 use super::*;
 
 impl Larpcord {
+    pub(super) fn timeline_divider(&self, title: &str, unread: bool) -> AnyElement {
+        let color = if unread {
+            rgb(0xed4245)
+        } else {
+            self.color(LINE)
+        };
+        row()
+            .h(px(32.))
+            .px_4()
+            .gap_3()
+            .child(div().h(px(1.)).flex_1().bg(color))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if unread {
+                        rgb(0xff8086)
+                    } else {
+                        self.color(MUTED)
+                    })
+                    .child(title.to_string()),
+            )
+            .child(div().h(px(1.)).flex_1().bg(color))
+            .into_any_element()
+    }
+
     pub(super) fn reply_preview(&self, message: &Message) -> AnyElement {
         let cached = message
             .message_reference
@@ -21,7 +47,7 @@ impl Larpcord {
             .gap_1()
             .min_w_0()
             .text_size(px(12.))
-            .text_color(rgb(MUTED))
+            .text_color(self.color(MUTED))
             .child(
                 div()
                     .absolute()
@@ -84,7 +110,7 @@ impl Larpcord {
                                     column()
                                         .gap_2()
                                         .items_center()
-                                        .text_color(rgb(MUTED))
+                                        .text_color(self.color(MUTED))
                                         .text_size(px(12.))
                                         .child(sticker.name.clone())
                                         .when(sticker.format_type == 3, |s| {
@@ -176,9 +202,9 @@ impl Larpcord {
                         .bg(if own || burst {
                             rgba((tint << 8) | 0x25)
                         } else {
-                            rgb(SURFACE)
+                            self.color(SURFACE)
                         })
-                        .text_color(rgb(if own || burst { 0xd8d3ff } else { MUTED }))
+                        .text_color(self.color(if own || burst { 0xd8d3ff } else { MUTED }))
                         .text_size(px(12.))
                         .child(
                             div()

@@ -335,12 +335,12 @@ impl Larpcord {
         let custom = component.custom_id.clone().unwrap_or_default();
         let selected_message = message.clone();
         column().id("component-menu").track_focus(&self.modal_focus).occlude().absolute().inset_0().top(px(32.)).bg(rgba(0x00000099)).items_center().justify_center()
-            .child(column().w(px(400.)).max_h(relative(0.8)).p_4().gap_3().rounded_xl().bg(rgb(PANEL)).shadow_lg()
+            .child(column().w(px(400.)).max_h(relative(0.8)).p_4().gap_3().rounded_xl().bg(self.color(PANEL)).shadow_lg()
                 .child(row().justify_between().child(div().font_weight(FontWeight::SEMIBOLD).child(component.placeholder.clone().unwrap_or_else(|| "Choose an option".into())))
                     .child(button("close-options","×").on_click(cx.listener(|this,_,window,cx| {this.component_menu=None;if let Some(focus)=this.previous_focus.take(){window.focus(&focus);}cx.notify();}))))
                 .child(column().id("select-options").min_h_0().overflow_y_scroll().gap_1().children(component.options.iter().take(25).enumerate().map(|(i,option)| {
                     let value=option.value.clone();let custom=custom.clone();let message=message.clone();
-                    column().id(("select-option",i)).p_3().gap_1().rounded_md().cursor_pointer().bg(rgb(if self.component_values.contains(&option.value){SURFACE}else{PANEL})).hover(|s|s.bg(rgb(SURFACE)))
+                    column().id(("select-option",i)).p_3().gap_1().rounded_md().cursor_pointer().bg(self.color(if self.component_values.contains(&option.value){SURFACE}else{PANEL})).hover(|s|s.bg(self.color(SURFACE)))
                         .child(div().text_size(px(13.)).child(option.label.clone())).when_some(option.description.clone(),|s,text|s.child(label(text)))
                         .on_click(cx.listener(move |this,_,window,cx| {
                             if multi {if !this.component_values.remove(&value)&&this.component_values.len()<maximum {this.component_values.insert(value.clone());}}

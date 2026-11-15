@@ -3,9 +3,9 @@
 <p align="center">a little room to breathe.</p>
 <p align="center">a native discord client, written in rust with gpui.</p>
 
-this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the current published preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.2.0-dev.9).
+this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the current published preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.2.0-dev.10).
 
-**0.2.0-dev.10 is a development preview.** this branch contains the profiles and expression picker milestone. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
+**0.2.0-dev.11 is a development preview.** this branch contains the native details, themes and media follow-up. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
 
 ## what works in this milestone
 
@@ -14,21 +14,22 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 - layered charcoal surfaces, a single compact title/navigation bar, virtualized server and dm lists, recent dm ordering and conversation filtering
 - a friends home with online/all filters, search, live relationship updates and opening direct conversations
 - live dm presence badges and activity lines, with native idle, busy and offline shapes
-- automatically paged history in both directions, jump to latest, grouped messages, reply previews and composing replies, sending, live edits and deletions
+- automatically paged history in both directions, date and unread separators, jump to latest, grouped messages, reply previews and composing replies, sending, live edits and deletions
 - image attachments, png/apng/gif stickers, static custom emoji, a tabbed picker for unicode/server emoji, searchable GIFs and server/standard sticker packs, markdown, bot embeds and components v2 layouts
 - ordinary and super reaction displays, separate counts, your-reaction highlighting, native burst/hover animation and live add/remove updates
 - a collapsible channel list, bounded on-demand member sidebar with roles and presence, and a floating translucent jump-to-latest control
+- contained message hover controls and a right-click reply/copy/profile menu
 - bot buttons and string selectors through discord interactions, plus explicit link controls
-- a nonblocking dm profile inspector, expandable full profiles, live presence/activity, badge artwork, a direct-message action, mutual friend/server counts, profile theme colors and overlapping avatars, banners, biographies, pronouns, server identity, decorations, layered frames, bounded effects and role chips
+- a nonblocking dm profile inspector, expandable full profiles, live presence/activity, badge artwork, a direct-message action, clickable mutual friend/server lists, profile theme colors and overlapping avatars, banners, biographies, pronouns, server identity, decorations, layered frames, bounded effects and role chips
 - server icons, banners and group chat icons, saved server order and folders, unread/mention badges, a flat single-color home mark and custom typing indicators
-- click-to-play video attachments, cdn video embeds and components v2 video galleries, with a native viewer, seeking, volume and mute
-- floating settings with mouse, scroll and keyboard isolation
+- silent, bounded gifv autoplay and image gif/apng motion; click-to-play video attachments, cdn video embeds and components v2 video galleries, with a native viewer, seeking, volume and mute
+- floating settings with mouse, scroll and keyboard isolation; charcoal, onyx, midnight and rose themes with a semantic custom-theme token file
 - gateway heartbeats, acknowledgement checks, session resume, reconnection backoff and automatic retry after a transient startup failure
 - desktop notifications for direct messages, mentions and incoming call signals
 - optional saved login in keychain, credential manager or secret service
 - per-conversation drafts, compact spacing, notification privacy and background connection settings
 
-the picker adds GIF links and stickers to the composer for review before sending. recent emoji survive restarts. sticker messages use native sticker ids and preserve per-channel drafts; png/apng/gif artwork is supported, while lottie artwork currently uses a named placeholder.
+the picker adds GIF links and stickers to the composer for review before sending. recent emoji, stickers and gifs survive restarts. the gif selector also reads discord favorites and offers explicit star changes without replacing unrelated saved records. sticker messages use native sticker ids and preserve per-channel drafts; png/apng/gif artwork is supported, while lottie artwork currently uses a named placeholder.
 
 voice and video calls, email/password login, quest integration and javascript plugin compatibility are future work. reaction chips currently display existing reactions; adding reactions, the original discord nitro animation assets and lottie sticker playback are not implemented yet. incoming call notifications are informational until native voice is implemented. this milestone adds native qr login through discord mobile, with manual session entry retained under advanced sign-in. the ui never reads a token from another application. the live qr handshake passed on 2026-11-12. the user has also confirmed account access and real message delivery; the exact sign-in route was not separately recorded.
 

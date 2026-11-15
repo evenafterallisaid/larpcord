@@ -19,6 +19,13 @@ use zeroize::Zeroizing;
 use crate::model::{Channel, Guild, Member, Message, Page, Profile, User};
 
 pub enum Event {
+    ProfileBadges {
+        id: String,
+        guild: Option<String>,
+        request: u64,
+        badges: Vec<crate::model::ProfileBadge>,
+    },
+    GifFavorites(Result<Vec<crate::expressions::Gif>, String>),
     Gifs {
         request: u64,
         result: Result<Vec<crate::expressions::Gif>, String>,
@@ -83,6 +90,7 @@ pub struct Envelope {
 }
 
 pub enum Command {
+    GifFavorites(Option<(crate::expressions::Gif, bool)>),
     CancelGifs,
     Gifs {
         request: u64,
@@ -325,6 +333,40 @@ impl Api {
         api
     }
 
+    async fn gif_favorites(
+        &self,
+        change: Option<(crate::expressions::Gif, bool)>,
+    ) -> Result<Vec<crate::expressions::Gif>, String> {
+        let path = "/users/@me/settings-proto/2";
+        let current = crate::gif_favorites::Favorites::decode(
+            &self.request::<Value>(Method::GET, path, None).await?,
+        )?;
+        if let Some((gif, save)) = change {
+            if !crate::expressions::gif_url(&gif.url) && !crate::media::cdn_url(&gif.url) {
+                return Err("Unsupported GIF address".into());
+            }
+            if current.contains(&gif.url) != save {
+                let patch = current.patch(&gif, save)?;
+                let saved = crate::gif_favorites::Favorites::decode(
+                    &self
+                        .request::<Value>(
+                            Method::PATCH,
+                            path,
+                            Some(json!({"settings":patch,"required_data_version":current.version})),
+                        )
+                        .await?,
+                )?;
+                if !saved.confirms(&current, &gif.url, save) {
+                    return Err(
+                        "Discord did not confirm the favorite change. Refresh before trying again."
+                            .into(),
+                    );
+                }
+                return Ok(saved.gifs());
+            }
+        }
+        Ok(current.gifs())
+    }
     async fn gifs(&self, query: &str) -> Result<Vec<crate::expressions::Gif>, String> {
         let options = "media_format=tinygif&provider=klipy&locale=en-US&limit=50";
         let path = if query.is_empty() {
@@ -366,8 +408,9 @@ impl Api {
     }
 
     async fn profile(&self, id: &str, guild: Option<&str>) -> Result<Profile, String> {
-        let mut path =
-            format!("/users/{id}/profile?with_mutual_guilds=true&with_mutual_friends_count=true");
+        let mut path = format!(
+            "/users/{id}/profile?with_mutual_guilds=true&with_mutual_friends=true&with_mutual_friends_count=true"
+        );
         if let Some(guild) = guild {
             path.push_str(&format!("&guild_id={guild}"));
         }
@@ -622,6 +665,10 @@ impl Backend {
                                     let Some(client)=api.clone() else {continue;};let events=events.clone();
                                     requests.spawn(async move {let result=client.request(Method::GET,"/users/@me/settings-proto/1",None).await;emit(&events,generation,Event::Layout(result)).await;});
                                 }
+                                Command::GifFavorites(change) => {
+                                    let Some(client)=api.as_ref().map(Api::discovery) else {continue;};let events=events.clone();
+                                    requests.spawn(async move {let result=client.gif_favorites(change).await;emit(&events,generation,Event::GifFavorites(result)).await;});
+                                }
                                 Command::CancelGifs => {if let Some(old)=gif_request.take() {old.abort();}}
                                 Command::Gifs {request,query} => {
                                     let Some(client)=api.as_ref().map(Api::discovery) else {continue;};
@@ -679,6 +726,14 @@ impl Backend {
                                         let effect_ref = result.as_ref().ok().and_then(|p| p.effect_ref());
                                         let frame_ref=result.as_ref().ok().and_then(|p|p.collectible_ref(3)).map(str::to_string);
                                         emit(&events, generation, Event::Profile {id:id.clone(), guild:guild.clone(), request, result:result.map(Box::new)}).await;
+                                        let badges=async {
+                                            let client=client.discovery();
+                                            if let Ok(Ok(value))=tokio::time::timeout(Duration::from_millis(1500),client.request::<Value>(Method::GET,&format!("/users/{id}/badges"),None)).await {
+                                                let badges=profile_badges(&value);
+                                                emit(&events,generation,Event::ProfileBadges{id:id.clone(),guild:guild.clone(),request,badges}).await;
+                                            }
+                                        };
+                                        let cosmetics=async {
                                         let mut effect=None;
                                         if let Some(reference)=effect_ref {
                                             effect=client.effect(reference.sku_id.as_deref().unwrap_or(&reference.id)).await;
@@ -687,7 +742,9 @@ impl Backend {
                                             }
                                         }
                                         let frame=match frame_ref {Some(sku)=>client.effect(&sku).await.and_then(|e|e.frame),None=>None};
-                                        emit(&events,generation,Event::ProfileEffect{id,guild,request,effect:effect.map(Box::new),frame:frame.map(Box::new)}).await;
+                                        emit(&events,generation,Event::ProfileEffect{id:id.clone(),guild:guild.clone(),request,effect:effect.map(Box::new),frame:frame.map(Box::new)}).await;
+                                        };
+                                        tokio::join!(badges,cosmetics);
                                     });
                                 }
                                 Command::History { channel, started, request, page, cursor } => {
@@ -1134,9 +1191,94 @@ pub fn guild_channels(value: &Value) -> Vec<Channel> {
         .collect()
 }
 
+fn profile_badges(value: &Value) -> Vec<crate::model::ProfileBadge> {
+    value["badges"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(80)
+        .filter(|b| b["owned"].as_bool() == Some(true) && b["hidden"].as_bool() != Some(true))
+        .filter_map(|badge| {
+            let art = badge["current_tier"]
+                .as_str()
+                .and_then(|key| {
+                    badge["tiers"]
+                        .as_array()?
+                        .iter()
+                        .find(|t| t["key"].as_str() == Some(key))
+                })
+                .unwrap_or(badge);
+            let icon = [
+                "simple_icon_raster_url",
+                "simple_icon_url",
+                "complex_icon_static_url",
+            ]
+            .iter()
+            .filter_map(|key| art[*key].as_str().or(badge[*key].as_str()))
+            .find(|url| {
+                crate::media::cdn_url(url)
+                    && !url.split('?').next().is_some_and(|p| p.ends_with(".svg"))
+            })?
+            .to_string();
+            let description = badge["name"]
+                .as_str()
+                .or(badge["description"].as_str())
+                .unwrap_or("Discord badge")
+                .chars()
+                .take(160)
+                .collect();
+            Some(crate::model::ProfileBadge { icon, description })
+        })
+        .take(40)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn reading_gif_favorites_never_writes_settings() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut api = Api::new(Zeroizing::new("synthetic-session".into())).unwrap();
+        api.endpoint = Some(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 8192];
+            let n = socket.read(&mut bytes).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&bytes[..n])
+                    .starts_with("GET /users/@me/settings-proto/2 HTTP/1.1")
+            );
+            let body = r#"{"settings":""}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        assert!(api.gif_favorites(None).await.unwrap().is_empty());
+        server.await.unwrap();
+    }
+    #[test]
+    fn badge_catalogs_only_display_owned_visible_raster_art() {
+        let result = profile_badges(
+            &json!({"badges":[{"name":"new badge","owned":true,"simple_icon_raster_url":"https://cdn.discordapp.com/assets/new-badge.png"},{"owned":false,"simple_icon_raster_url":"https://cdn.discordapp.com/assets/unearned.png"},{"owned":true,"hidden":true,"simple_icon_raster_url":"https://cdn.discordapp.com/assets/hidden.png"},{"owned":true,"simple_icon_url":"https://evil.invalid/badge.png"}]}),
+        );
+        assert_eq!(result.len(), 1);
+        assert!(result[0].image().unwrap().contains("new-badge.png"));
+    }
+
     #[tokio::test]
     async fn gif_discovery_encodes_searches_and_does_not_hold_the_message_lane() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

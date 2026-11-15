@@ -6,6 +6,7 @@ mod content;
 mod cosmetics;
 mod effects;
 mod expressions;
+mod gif_favorites;
 mod icons;
 mod input;
 mod media;
@@ -16,6 +17,7 @@ mod network;
 mod presence;
 mod reactions;
 mod settings;
+mod theme;
 mod ui;
 mod video;
 
