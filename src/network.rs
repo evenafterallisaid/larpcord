@@ -19,6 +19,10 @@ use zeroize::Zeroizing;
 use crate::model::{Channel, Guild, Member, Message, Page, Profile, User};
 
 pub enum Event {
+    OpenedDm {
+        user: String,
+        result: Result<Channel, String>,
+    },
     Auth {
         attempt: u64,
         event: crate::auth::AuthEvent,
@@ -69,6 +73,7 @@ pub struct Envelope {
 }
 
 pub enum Command {
+    OpenDm(String),
     QrStart {
         attempt: u64,
     },
@@ -318,7 +323,7 @@ impl Api {
 
     async fn profile(&self, id: &str, guild: Option<&str>) -> Result<Profile, String> {
         let mut path =
-            format!("/users/{id}/profile?with_mutual_guilds=false&with_mutual_friends_count=false");
+            format!("/users/{id}/profile?with_mutual_guilds=true&with_mutual_friends_count=true");
         if let Some(guild) = guild {
             path.push_str(&format!("&guild_id={guild}"));
         }
@@ -568,6 +573,16 @@ impl Backend {
                                 Command::Layout => {
                                     let Some(client)=api.clone() else {continue;};let events=events.clone();
                                     requests.spawn(async move {let result=client.request(Method::GET,"/users/@me/settings-proto/1",None).await;emit(&events,generation,Event::Layout(result)).await;});
+                                }
+                                Command::OpenDm(user) => {
+                                    let Some(client)=api.clone() else {continue;};
+                                    if !snowflake(&user) {continue;}
+                                    let events=events.clone();
+                                    requests.spawn(async move {
+                                        let result=client.request::<Channel>(Method::POST,"/users/@me/channels",Some(json!({"recipient_id":user}))).await
+                                            .and_then(|channel|if channel.kind==1 && channel.recipients.iter().any(|u|u.id==user) {Ok(channel)} else {Err("Discord returned another conversation.".into())});
+                                        emit(&events,generation,Event::OpenedDm{user,result}).await;
+                                    });
                                 }
                                 Command::GuildDetails(id,started) => {
                                     let Some(client)=api.clone() else {continue};
@@ -883,7 +898,7 @@ where
                             session.subscribed_guild = Some(current.clone());
                             subscribed = current;
                         }
-                        if matches!(kind.as_str(), "READY" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" | "MESSAGE_REACTION_REMOVE_ALL" | "MESSAGE_REACTION_REMOVE_EMOJI" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE" | "TYPING_START" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE" | "GUILD_MEMBER_UPDATE" | "MESSAGE_ACK" | "USER_SETTINGS_UPDATE" | "USER_SETTINGS_PROTO_UPDATE" | "USER_GUILD_SETTINGS_UPDATE" | "USER_UPDATE" | "GUILD_MEMBER_LIST_UPDATE" | "PRESENCE_UPDATE") {
+                        if matches!(kind.as_str(), "READY" | "READY_SUPPLEMENTAL" | "RELATIONSHIP_ADD" | "RELATIONSHIP_REMOVE" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" | "MESSAGE_REACTION_REMOVE_ALL" | "MESSAGE_REACTION_REMOVE_EMOJI" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE" | "TYPING_START" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE" | "GUILD_MEMBER_UPDATE" | "MESSAGE_ACK" | "USER_SETTINGS_UPDATE" | "USER_SETTINGS_PROTO_UPDATE" | "USER_GUILD_SETTINGS_UPDATE" | "USER_UPDATE" | "GUILD_MEMBER_LIST_UPDATE" | "PRESENCE_UPDATE") {
                             emit(events, generation, Event::Dispatch(kind, data)).await;
                         }
                     }

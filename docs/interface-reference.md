@@ -21,3 +21,11 @@ the reference's `crates/ui/src/lib.rs` (sidebar, channel header and composer), `
 discord's local web bundle routes sparse member updates by guild plus list id, rather than channel id. serein independently derives the same list identity from `member_list_id` or view-channel permission overwrites and reuses rows across matching channels. dev.8 now preserves that identity, ignores updates for a different list and refreshes the subscribed window with a valid nonempty range before restoring the visible range. a prior frame activates the guild subscription. empty per-channel range arrays are rejected by discord and are never sent. unknown identities stay channel-specific. this prevents an unchanged shared list from turning into permanent placeholders when the server sends only a delta.
 
 protocol references inspected: discord's downloaded november 8 web bundle, channel member store module 963307; serein's `crates/client-core/src/lib.rs` shared-member-list selection and `crates/model/src/permissions.rs`. no discord application code or nitro animation assets are bundled.
+
+## dev.9 structure
+
+navigation now shares a single 36px title bar with the native mac traffic lights or custom windows/linux controls. header and composer icon actions use the same 32px targets. the conversation has a restrained top corner and border; channel and member labels share the same density and presence shapes. profile inspectors reserve a 320px column with a scaled 296px card, leaving the conversation interactive. full profiles and settings keep their modal focus barrier.
+
+friends has online/all filters, real relationship/presence data, activity lines and an open-dm action. visiting home preserves the channel draft and does not acknowledge messages in the hidden conversation. ready supplemental presence data merges rather than clearing earlier entries. profile theme colors use a dark readable tint, with server profile colors taking precedence over global colors.
+
+these changes are an interface foundation, not a claim of discord feature parity. voice, uploads and friend request management are still separate work. `--preview` or `LARPCORD_PREVIEW=1` starts an isolated sample workspace without reading the saved session or writing settings.

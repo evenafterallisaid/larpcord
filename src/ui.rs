@@ -4,6 +4,7 @@ mod components;
 mod composer;
 mod conversation;
 mod cosmetics;
+mod friends;
 mod members;
 mod profile;
 mod text;
@@ -28,13 +29,13 @@ use crate::{
     settings::Settings,
 };
 
-const BG: u32 = 0x111214;
-const PANEL: u32 = 0x09090b;
-const SIDEBAR: u32 = 0x0b0b0d;
-const SURFACE: u32 = 0x1e1f22;
-const LINE: u32 = 0x252529;
-const TEXT: u32 = 0xdcddde;
-const MUTED: u32 = 0x96989d;
+const BG: u32 = 0x1b1c21;
+const PANEL: u32 = 0x111216;
+const SIDEBAR: u32 = 0x15161b;
+const SURFACE: u32 = 0x282a32;
+const LINE: u32 = 0x2d2f38;
+const TEXT: u32 = 0xf2f3f5;
+const MUTED: u32 = 0x9a9da7;
 const ACCENT: u32 = 0xe2e4e9;
 const LILAC: u32 = 0xc1b5ed;
 
@@ -52,6 +53,10 @@ pub struct Larpcord {
     preview_only: bool,
     status: String,
     selected_guild: Option<String>,
+    home_page: bool,
+    friends_online: bool,
+    friend_search: Entity<TextInput>,
+    opening_dm: Option<String>,
     expanded_folders: HashSet<String>,
     guild_details_attempted: HashMap<String, std::time::Instant>,
     selected_channel: Option<String>,
@@ -87,6 +92,7 @@ pub struct Larpcord {
     media: crate::media::Media,
     media_retry: Option<Task<()>>,
     profile: Option<Profile>,
+    profile_inspector: bool,
     profile_guild: Option<String>,
     profile_request: u64,
     profile_started: std::time::Instant,
@@ -157,9 +163,9 @@ fn button(id: impl Into<ElementId>, text: &'static str) -> Stateful<Div> {
     let mut result = row()
         .id(id)
         .gap_2()
-        .px_4()
-        .py_2()
-        .rounded_lg()
+        .px_3()
+        .py(px(6.))
+        .rounded_md()
         .cursor_pointer()
         .bg(rgb(SURFACE))
         .text_size(px(13.))
@@ -260,7 +266,12 @@ impl Render for Hint {
 
 impl Larpcord {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::with_preview(window, cx, std::env::args().any(|arg| arg == "--preview"))
+        Self::with_preview(
+            window,
+            cx,
+            std::env::args().any(|arg| arg == "--preview")
+                || std::env::var_os("LARPCORD_PREVIEW").is_some_and(|value| value == "1"),
+        )
     }
 
     fn with_preview(window: &mut Window, cx: &mut Context<Self>, preview_only: bool) -> Self {
@@ -314,7 +325,7 @@ impl Larpcord {
                 view.update(cx, |view: &mut Self, cx| {
                     if view.settings_tab.is_some()
                         || view.login_open
-                        || view.profile.is_some()
+                        || view.profile_is_modal()
                         || view.component_menu.is_some()
                         || view.video.is_some()
                     {
@@ -337,6 +348,7 @@ impl Larpcord {
         let emoji_search = cx.new(|cx| TextInput::new("Find the perfect emoji", false, cx));
         let search = cx.new(|cx| TextInput::new("Find a conversation", false, cx));
         let token = cx.new(|cx| TextInput::new("Paste a session token", true, cx));
+        let friend_search = cx.new(|cx| TextInput::new("Search friends", false, cx));
         let subscriptions = vec![
             cx.observe_window_activation(window, |this, window, cx| {
                 this.mark_view_read(window, cx);
@@ -350,12 +362,14 @@ impl Larpcord {
             }),
             cx.subscribe(&emoji_search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe(&search, |_, _, _: &Changed, cx| cx.notify()),
+            cx.subscribe(&friend_search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe_in(&composer, window, |this, _, _: &Changed, window, cx| {
                 if this.composer.read(cx).content.is_empty()
+                    || this.home_page
                     || this.preview
                     || this.settings_tab.is_some()
                     || this.login_open
-                    || this.profile.is_some()
+                    || this.profile_is_modal()
                     || this.component_menu.is_some()
                     || this.video.is_some()
                     || !window.is_window_active()
@@ -417,6 +431,10 @@ impl Larpcord {
             preview: true,
             preview_only,
             status: "Preview".into(),
+            home_page: false,
+            friends_online: true,
+            friend_search,
+            opening_dm: None,
             selected_guild: Some("larp".into()),
             expanded_folders: HashSet::new(),
             guild_details_attempted: HashMap::new(),
@@ -453,6 +471,7 @@ impl Larpcord {
             media,
             media_retry: None,
             profile: None,
+            profile_inspector: false,
             profile_guild: None,
             profile_request: 0,
             profile_started: std::time::Instant::now(),
@@ -478,7 +497,7 @@ impl Larpcord {
     fn open_settings(&mut self, tab: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.emoji_open = false;
         if self.login_open
-            || self.profile.is_some()
+            || self.profile_is_modal()
             || self.component_menu.is_some()
             || self.video.is_some()
         {
@@ -548,6 +567,9 @@ impl Larpcord {
 
     fn connect(&mut self, token: Zeroizing<String>, cx: &mut Context<Self>) {
         self.generation += 1;
+        self.home_page = false;
+        self.profile_inspector = false;
+        self.opening_dm = None;
         self.preview = false;
         self.store = Store::default();
         self.member_views = crate::members::Views::default();
@@ -593,6 +615,9 @@ impl Larpcord {
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
+        self.home_page = false;
+        self.profile_inspector = false;
+        self.opening_dm = None;
         self.command(Command::Disconnect);
         self.command(Command::Forget);
         self.store = Store::demo();
@@ -649,11 +674,21 @@ impl Larpcord {
             cx.notify();
             return;
         }
-        if self.selected_channel.as_ref() == Some(&id) && self.members.channel.as_ref() == Some(&id)
+        let was_home = self.home_page;
+        self.home_page = false;
+        self.opening_dm = None;
+        if !was_home
+            && self.selected_channel.as_ref() == Some(&id)
+            && self.members.channel.as_ref() == Some(&id)
         {
             window.focus(&self.composer.focus_handle(cx));
             return;
         }
+        if self.profile_inspector {
+            self.profile = None;
+            self.profile_inspector = false;
+        }
+        self.home_page = false;
         self.navigation.visit(id.clone());
         self.selected_guild = self
             .store
@@ -766,12 +801,13 @@ impl Larpcord {
     }
 
     fn mark_view_read(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.preview
+        if self.home_page
+            || self.preview
             || self.status != "Connected"
             || !window.is_window_active()
             || self.scrolled_away
             || self.settings_tab.is_some()
-            || self.profile.is_some()
+            || self.profile_is_modal()
             || self.video.is_some()
             || self.component_menu.is_some()
             || self.login_open
@@ -800,10 +836,11 @@ impl Larpcord {
                 .await;
             let _ = view.update_in(cx, |this, window, _| {
                 if this.generation == generation
+                    && !this.home_page
                     && window.is_window_active()
                     && this.selected_channel.as_ref() == Some(&channel)
                     && !this.scrolled_away
-                    && this.profile.is_none()
+                    && !this.profile_is_modal()
                     && this.settings_tab.is_none()
                     && this.video.is_none()
                     && this.component_menu.is_none()
@@ -877,10 +914,11 @@ impl Larpcord {
     }
 
     fn send(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if self.sending.is_some()
+        if self.home_page
+            || self.sending.is_some()
             || self.settings_tab.is_some()
             || self.login_open
-            || self.profile.is_some()
+            || self.profile_is_modal()
             || self.component_menu.is_some()
             || self.video.is_some()
             || self.emoji_open
@@ -1001,6 +1039,21 @@ impl Larpcord {
                     }
                 }
             }
+            Event::OpenedDm { user, result } => {
+                if self.opening_dm.as_ref() != Some(&user) {
+                    return;
+                }
+                self.opening_dm = None;
+                match result {
+                    Ok(channel) => {
+                        let id = channel.id.clone();
+                        self.store.channels.insert(id.clone(), channel);
+                        self.selected_guild = None;
+                        self.choose_channel(id, window, cx);
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
             Event::Layout(result) => {
                 if let Ok(value) = result
                     && let Some(layout) = crate::navigation::Layout::parse(&value)
@@ -1027,6 +1080,8 @@ impl Larpcord {
             Event::Status(status) => {
                 if status == "Connected" {
                     self.error = None;
+                } else {
+                    self.opening_dm = None;
                 }
                 self.status = status;
             }
@@ -1314,6 +1369,7 @@ impl Larpcord {
     fn dispatch(&mut self, kind: &str, data: Value, window: &mut Window, cx: &mut Context<Self>) {
         match kind {
             "READY" => {
+                self.store.presences.ready(&data);
                 self.login_open = false;
                 self.qr = QrState::Idle;
                 if let Ok(user) = serde_json::from_value(data["user"].clone()) {
@@ -1333,9 +1389,27 @@ impl Larpcord {
                 self.store.mentions.clear();
                 self.store.read.clear();
                 self.store.users.clear();
-                for user in data["users"].as_array().into_iter().flatten().take(2000) {
-                    if let Ok(user) = serde_json::from_value::<User>(user.clone()) {
-                        self.store.users.insert(user.id.clone(), user);
+                self.store.relationships.clear();
+                for relation in data["relationships"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(2000)
+                {
+                    self.store.relationship(relation);
+                }
+                // friends get the bounded identity cache before unrelated bootstrapped users.
+                for friends_first in [true, false] {
+                    for user in data["users"].as_array().into_iter().flatten().take(10000) {
+                        let friend = user["id"]
+                            .as_str()
+                            .is_some_and(|id| self.store.relationships.get(id) == Some(&1));
+                        if friend == friends_first
+                            && self.store.users.len() < 2000
+                            && let Ok(user) = serde_json::from_value::<User>(user.clone())
+                        {
+                            self.store.users.insert(user.id.clone(), user);
+                        }
                     }
                 }
                 self.store.own_roles.clear();
@@ -1403,8 +1477,21 @@ impl Larpcord {
                     }
                 }
             }
-            "GUILD_MEMBER_LIST_UPDATE" => self.members.apply(&data),
-            "PRESENCE_UPDATE" => self.members.presence(&data),
+            "RELATIONSHIP_ADD" => self.store.relationship(&data),
+            "READY_SUPPLEMENTAL" => self.store.presences.merge(&data),
+            "RELATIONSHIP_REMOVE" => {
+                if let Some(id) = data["id"].as_str() {
+                    self.store.relationships.remove(id);
+                }
+            }
+            "GUILD_MEMBER_LIST_UPDATE" => {
+                self.members.apply(&data);
+                self.store.presences.members(&data);
+            }
+            "PRESENCE_UPDATE" => {
+                self.members.presence(&data);
+                self.store.presences.update(&data);
+            }
             "USER_UPDATE" => {
                 let Some(id) = data["id"].as_str() else {
                     return;
@@ -1588,7 +1675,8 @@ impl Larpcord {
                         .get(&message.channel_id)
                         .is_none_or(|c| message.id.parse::<u64>().unwrap_or(0) > c.activity());
                     self.store.note_message(&message.channel_id, &message.id);
-                    let selected = self.selected_channel.as_ref() == Some(&message.channel_id);
+                    let selected = !self.home_page
+                        && self.selected_channel.as_ref() == Some(&message.channel_id);
                     let own = message.author.id == self.store.user.id;
                     if selected {
                         self.typing.remove(&message.author.id);
@@ -1599,7 +1687,7 @@ impl Larpcord {
                             && window.is_window_active()
                             && !self.scrolled_away
                             && self.settings_tab.is_none()
-                            && self.profile.is_none()
+                            && !self.profile_is_modal()
                             && self.video.is_none())
                     {
                         self.store.unread.insert(message.channel_id.clone());
@@ -1758,62 +1846,6 @@ impl Larpcord {
         }
     }
 
-    fn titlebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        row()
-            .h(px(32.))
-            .flex_shrink_0()
-            .px_3()
-            .gap_2()
-            .bg(rgb(PANEL))
-            .when(cfg!(target_os = "macos"), |s| s.pl(px(86.)))
-            .on_mouse_down(MouseButton::Left, |event, window, _| {
-                if event.click_count == 2 {
-                    window.zoom_window();
-                } else {
-                    window.start_window_move();
-                }
-            })
-            .child(
-                img(ImageSource::Resource(Resource::Embedded(
-                    "mascot.png".into(),
-                )))
-                .size(px(20.)),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(MUTED))
-                    .child("Larpcord"),
-            )
-            .child(div().flex_1())
-            .when(!cfg!(target_os = "macos"), |s| {
-                s.children([
-                    button("minimize", "")
-                        .child(icon("minus", 16.))
-                        .py_0()
-                        .on_click(|_, window, _| window.minimize_window())
-                        .into_any_element(),
-                    button("maximize", "")
-                        .child(icon("maximize", 16.))
-                        .py_0()
-                        .on_click(|_, window, _| window.zoom_window())
-                        .into_any_element(),
-                    button("close-window", "")
-                        .child(icon("close", 16.))
-                        .py_0()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if this.settings.keep_connected {
-                                window.minimize_window();
-                            } else {
-                                cx.quit();
-                            }
-                        }))
-                        .into_any_element(),
-                ])
-            })
-    }
-
     fn rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut dm_ids = self
             .store
@@ -1873,22 +1905,7 @@ impl Larpcord {
                     .cursor_pointer()
                     .child(svg().path("home.svg").size(px(28.)).text_color(rgb(TEXT)))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.selected_guild = None;
-                        this.search.update(cx, |input, cx| input.set("", cx));
-                        let channel = this
-                            .store
-                            .channels
-                            .values()
-                            .filter(|c| c.guild_id.is_none() && c.readable())
-                            .max_by_key(|c| c.activity())
-                            .map(|c| c.id.clone());
-                        if let Some(channel) = channel {
-                            this.choose_channel(channel, window, cx);
-                        } else {
-                            this.selected_channel = None;
-                            this.command(Command::ViewGuild(None));
-                            this.refresh_messages();
-                        }
+                        this.show_friends(window, cx);
                         cx.notify();
                     })),
             )
@@ -2162,7 +2179,7 @@ impl Larpcord {
 
     fn dm_row(&self, channel: &Channel, cx: &mut Context<Self>) -> AnyElement {
         let id = channel.id.clone();
-        let selected = self.selected_channel.as_ref() == Some(&id);
+        let selected = !self.home_page && self.selected_channel.as_ref() == Some(&id);
         let unread = self.store.unread.contains(&id);
         let pings = self.store.mentions.get(&id).copied().unwrap_or(0);
         let content = row()
@@ -2190,13 +2207,13 @@ impl Larpcord {
             .gap_3()
             .rounded_md()
             .cursor_pointer()
-            .bg(rgb(if selected { 0x232428 } else { SIDEBAR }))
+            .bg(rgb(if selected { SURFACE } else { SIDEBAR }))
             .hover(|s| s.bg(rgb(SURFACE)))
             .child(
                 channel
                     .recipients
                     .first()
-                    .map(|user| self.avatar(user, 32.))
+                    .map(|user| self.presence_avatar(user, 32.))
                     .unwrap_or_else(|| {
                         div()
                             .size(px(28.))
@@ -2207,18 +2224,38 @@ impl Larpcord {
                     }),
             )
             .child(
-                div()
+                column()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
                     .text_color(rgb(if selected || unread { TEXT } else { MUTED }))
                     .relative()
                     .child(
+                        div()
+                            .truncate()
+                            .font_weight(if unread {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .child(
+                                channel
+                                    .recipients
+                                    .first()
+                                    .map(|user| {
+                                        self.display_name(&channel.label(), user, None, false)
+                                    })
+                                    .unwrap_or_else(|| {
+                                        div().child(channel.label()).into_any_element()
+                                    }),
+                            ),
+                    )
+                    .when_some(
                         channel
                             .recipients
                             .first()
-                            .map(|user| self.display_name(&channel.label(), user, None, false))
-                            .unwrap_or_else(|| div().child(channel.label()).into_any_element()),
+                            .and_then(|u| self.store.presences.get(&u.id))
+                            .and_then(|p| p.activity.as_ref()),
+                        |s, text| s.child(label(text.clone()).text_size(px(11.)).truncate()),
                     ),
             )
             .when(pings > 0, |s| s.child(ping_badge(pings)))
@@ -2307,7 +2344,8 @@ impl Larpcord {
                 navigation.push(
                     row()
                         .id(SharedString::from(format!("category-{category}")))
-                        .h(px(36.))
+                        .h(px(32.))
+                        .pt_2()
                         .px_1()
                         .gap_1()
                         .cursor_pointer()
@@ -2325,7 +2363,7 @@ impl Larpcord {
                         .child(
                             label(title.to_uppercase())
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(10.)),
+                                .text_size(px(11.)),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.collapsed_categories.remove(&clicked) {
@@ -2352,9 +2390,10 @@ impl Larpcord {
                     .h(px(if channel.guild_id.is_none() { 40. } else { 32. }))
                     .px_2()
                     .gap_2()
+                    .relative()
                     .rounded_md()
                     .cursor_pointer()
-                    .bg(rgb(if selected { 0x232428 } else { SIDEBAR }))
+                    .bg(rgb(if selected { SURFACE } else { SIDEBAR }))
                     .hover(|s| s.bg(rgb(SURFACE)))
                     .text_color(rgb(if selected { TEXT } else { MUTED }))
                     .child(if channel.guild_id.is_none() {
@@ -2383,6 +2422,11 @@ impl Larpcord {
                             .flex_1()
                             .truncate()
                             .text_size(px(15.))
+                            .font_weight(if selected || self.store.unread.contains(&id) {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
                             .child(channel.label()),
                     )
                     .when(
@@ -2392,7 +2436,17 @@ impl Larpcord {
                     .when(
                         self.store.unread.contains(&id)
                             && self.store.mentions.get(&id).copied().unwrap_or(0) == 0,
-                        |s| s.child(div().size(px(6.)).rounded_full().bg(rgb(TEXT))),
+                        |s| {
+                            s.child(
+                                div()
+                                    .absolute()
+                                    .left(px(-8.))
+                                    .w(px(4.))
+                                    .h(px(8.))
+                                    .rounded_r_full()
+                                    .bg(rgb(TEXT)),
+                            )
+                        },
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.choose_channel(id.clone(), window, cx)
@@ -2401,7 +2455,7 @@ impl Larpcord {
             );
         }
         column()
-            .w(px(280.))
+            .w(px(256.))
             .h_full()
             .flex_shrink_0()
             .bg(rgb(SIDEBAR))
@@ -2503,10 +2557,12 @@ impl Larpcord {
             })
             .when(self.selected_guild.is_none(), |s| {
                 s.child(
-                    row().px_4().pt_4().pb_2().child(
-                        label("DIRECT MESSAGES")
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD),
+                    column().child(self.friends_navigation(cx)).child(
+                        row().px_4().pt_4().pb_2().child(
+                            label("DIRECT MESSAGES")
+                                .text_size(px(11.))
+                                .font_weight(FontWeight::SEMIBOLD),
+                        ),
                     ),
                 )
             })
@@ -2536,7 +2592,7 @@ impl Larpcord {
                     .flex_1()
                     .min_h_0()
                     .px_2()
-                    .gap_1()
+                    .gap(px(2.))
                     .overflow_y_scroll()
                     .children(navigation)
                     .into_any_element()
@@ -2561,18 +2617,26 @@ impl Larpcord {
             })
     }
 
+    fn profile_is_modal(&self) -> bool {
+        self.profile.is_some() && !self.profile_inspector
+    }
+
     fn open_profile(&mut self, user: User, window: &mut Window, cx: &mut Context<Self>) {
+        self.profile_inspector = false;
         self.emoji_open = false;
         self.previous_focus = window.focused(cx);
         window.focus(&self.modal_focus);
         self.profile_error = None;
         self.profile_request += 1;
         self.profile_started = std::time::Instant::now();
-        self.profile_guild = self
-            .selected_channel
-            .as_ref()
-            .and_then(|id| self.store.channels.get(id))
-            .and_then(|c| c.guild_id.clone());
+        self.profile_guild = if self.home_page {
+            None
+        } else {
+            self.selected_channel
+                .as_ref()
+                .and_then(|id| self.store.channels.get(id))
+                .and_then(|c| c.guild_id.clone())
+        };
         let key = (user.id.clone(), self.profile_guild.clone());
         let cached = self
             .profiles
@@ -2897,7 +2961,7 @@ impl Larpcord {
                     cx.notify();
                 })
             })
-            .hover(|s| s.bg(rgb(0x17181b)))
+            .hover(|s| s.bg(rgba(0xffffff06)))
             .text_size(px(16.))
             .line_height(px(22.))
             .items_start()
@@ -2949,9 +3013,11 @@ impl Larpcord {
             .and_then(|id| self.store.channels.get(id));
         let title = channel.map_or_else(|| "Your little corner".into(), Channel::label);
         let topic = channel.and_then(|c| c.topic.clone()).unwrap_or_default();
+        let has_topic = !topic.is_empty();
         let weak = cx.weak_entity();
         let selected = self.selected_channel.clone();
         let header = row()
+            .debug_selector(|| "channel-header".into())
             .h(px(48.))
             .flex_shrink_0()
             .px_4()
@@ -2962,7 +3028,7 @@ impl Larpcord {
                 channel
                     .and_then(|c| c.recipients.first())
                     .filter(|_| self.selected_guild.is_none())
-                    .map(|user| self.avatar(user, 24.))
+                    .map(|user| self.presence_avatar(user, 24.))
                     .unwrap_or_else(|| {
                         icon(
                             crate::icons::channel_icon(channel.map_or(0, |c| c.kind)),
@@ -2984,9 +3050,15 @@ impl Larpcord {
                         let title = title.clone();
                         move |_, cx| cx.new(|_| Hint(title.clone())).into()
                     })
-                    .child(title),
+                    .child(
+                        channel
+                            .and_then(|c| c.recipients.first())
+                            .filter(|_| self.selected_guild.is_none())
+                            .map(|user| self.display_name(&title, user, None, false))
+                            .unwrap_or_else(|| div().child(title).into_any_element()),
+                    ),
             )
-            .when(!topic.is_empty(), |s| {
+            .when(has_topic, |s| {
                 s.child(div().w(px(1.)).h(px(24.)).bg(rgb(LINE))).child(
                     label(topic)
                         .min_w_0()
@@ -2995,7 +3067,7 @@ impl Larpcord {
                         .text_size(px(13.)),
                 )
             })
-            .child(div().flex_1())
+            .when(!has_topic, |s| s.child(div().flex_1()))
             .when(channel.is_some_and(|c| c.guild_id.is_some()), |s| {
                 s.child(
                     toolbar_button("toggle-members", "users", "Toggle member list").on_click(
@@ -3011,11 +3083,21 @@ impl Larpcord {
                 channel.and_then(|c| c.recipients.first()).cloned(),
                 |s, user| {
                     s.child(
-                        toolbar_button("conversation-profile", "user", "View profile").on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                this.open_profile(user.clone(), window, cx)
-                            }),
-                        ),
+                        toolbar_button("conversation-profile", "user", "Toggle profile panel")
+                            .when(self.profile_inspector, |s| {
+                                s.bg(rgb(SURFACE)).text_color(rgb(TEXT))
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if this.profile_inspector {
+                                    this.profile = None;
+                                    this.profile_inspector = false;
+                                } else {
+                                    this.open_profile(user.clone(), window, cx);
+                                    this.profile_inspector = true;
+                                    window.focus(&this.composer.focus_handle(cx));
+                                }
+                                cx.notify();
+                            })),
                     )
                 },
             )
@@ -3093,7 +3175,8 @@ impl Larpcord {
                 )
                 .child(
                     column()
-                        .p_4()
+                        .px_4()
+                        .pb_4()
                         .pt_2()
                         .gap_2()
                         .when_some(self.error.clone(), |s, error| {
@@ -3157,7 +3240,7 @@ impl Larpcord {
                         })
                         .child(
                             row()
-                                .min_h(px(50.))
+                                .min_h(px(44.))
                                 .px_3()
                                 .gap_2()
                                 .rounded_xl()
@@ -3165,20 +3248,10 @@ impl Larpcord {
                                 .border_color(rgb(LINE))
                                 .bg(rgb(SURFACE))
                                 .child(div().flex_1().min_w_0().child(self.composer.clone()))
-                                .child(button("choose-emoji", "").p_2().child(icon("smile",22.)).tooltip(|_,cx|cx.new(|_|Hint("Select emoji".into())).into()).on_click(cx.listener(|this,_,window,cx|{this.emoji_open= !this.emoji_open;this.emoji_search.update(cx,|input,cx|input.set("",cx));if this.emoji_open {window.focus(&this.emoji_search.focus_handle(cx));}cx.notify();})))
+                                .child(toolbar_button("choose-emoji", "smile", "Select emoji").on_click(cx.listener(|this,_,window,cx|{this.emoji_open= !this.emoji_open;this.emoji_search.update(cx,|input,cx|input.set("",cx));if this.emoji_open {window.focus(&this.emoji_search.focus_handle(cx));}cx.notify();})))
                                 .child(
-                                    button(
-                                        "send",
-                                        if self.sending.is_some() {
-                                            "Sending…"
-                                        } else {
-                                            ""
-                                        },
-                                    )
-                                    .child(icon("send",20.))
-                                    .p_2()
-                                    .bg(rgb(SURFACE))
-                                    .text_color(rgb(ACCENT))
+                                    toolbar_button("send", "send", "Send message")
+                                    .text_color(rgb(if self.sending.is_some() { MUTED } else { ACCENT }))
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.send(window, cx)),
                                     ),
@@ -3198,9 +3271,15 @@ impl Larpcord {
             })
             .into_any_element();
         column()
+            .debug_selector(|| "conversation-shell".into())
             .flex_1()
             .min_w_0()
             .h_full()
+            .rounded_tl_lg()
+            .border_l_1()
+            .border_t_1()
+            .border_color(rgb(LINE))
+            .overflow_hidden()
             .child(header)
             .child(
                 row()
@@ -3210,7 +3289,11 @@ impl Larpcord {
                     .child(content)
                     .when(self.members_open && self.selected_guild.is_some(), |s| {
                         s.child(self.member_rail(cx))
-                    }),
+                    })
+                    .when_some(
+                        self.profile.as_ref().filter(|_| self.profile_inspector),
+                        |s, profile| s.child(self.profile_panel(profile, cx)),
+                    ),
             )
             .into_any_element()
     }
@@ -3659,21 +3742,22 @@ impl Render for Larpcord {
                     cx.notify();
                 } else if this.video.is_some() {
                     this.close_video(window, cx);
+                } else if this.settings_tab.is_some() {
+                    this.close_settings(window, cx);
                 } else if this.component_menu.take().is_some() || this.profile.take().is_some() {
+                    this.profile_inspector = false;
                     if let Some(focus) = this.previous_focus.take() {
                         window.focus(&focus);
                     }
                     cx.notify();
                 } else if this.login_open {
                     this.close_login(cx);
-                } else if this.settings_tab.is_some() {
-                    this.close_settings(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 if this.settings_tab.is_none()
                     && !this.login_open
-                    && this.profile.is_none()
+                    && !this.profile_is_modal()
                     && this.component_menu.is_none()
                     && this.video.is_none()
                 {
@@ -3681,7 +3765,6 @@ impl Render for Larpcord {
                 }
             }))
             .child(self.titlebar(cx))
-            .child(self.navigation_bar(cx))
             .child(
                 row()
                     .flex_1()
@@ -3689,7 +3772,7 @@ impl Render for Larpcord {
                     .items_start()
                     .child(
                         column()
-                            .w(px(352.))
+                            .w(px(328.))
                             .flex_shrink_0()
                             .h_full()
                             .child(
@@ -3701,14 +3784,19 @@ impl Render for Larpcord {
                             )
                             .child(self.account_bar(cx)),
                     )
-                    .child(self.conversation(cx)),
+                    .child(if self.home_page {
+                        self.friends_page(cx)
+                    } else {
+                        self.conversation(cx)
+                    }),
             )
             .when(self.emoji_open, |s| s.child(self.emoji_panel(cx)))
             .when(self.settings_tab.is_some(), |s| s.child(self.settings(cx)))
             .when(self.login_open, |s| s.child(self.login_screen(cx)))
-            .when_some(self.profile.clone(), |s, user| {
-                s.child(self.profile_panel(&user, cx))
-            })
+            .when_some(
+                self.profile.clone().filter(|_| !self.profile_inspector),
+                |s, user| s.child(self.profile_panel(&user, cx)),
+            )
             .when(self.video.is_some(), |s| s.child(self.video_panel(cx)))
             .when_some(self.component_menu.clone(), |s, (message, component)| {
                 s.child(self.component_menu_panel(&message, &component, cx))
@@ -3721,6 +3809,27 @@ mod tests {
     use super::{Larpcord, Message, Page};
     use crate::network::{Envelope, Event};
     use gpui::{Context, Focusable, TestAppContext, Window};
+
+    #[gpui::test]
+    fn compact_chrome_aligns_with_the_conversation_and_its_controls_stay_clickable(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{Modifiers, point, px, size};
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        let chrome = cx.debug_bounds("window-chrome").unwrap();
+        let shell = cx.debug_bounds("conversation-shell").unwrap();
+        let header = cx.debug_bounds("channel-header").unwrap();
+        let settings = cx.debug_bounds("nav-settings").unwrap();
+        assert_eq!(chrome.size.height, px(36.));
+        assert_eq!(shell.origin.y, chrome.bottom());
+        assert_eq!(header.size.height, px(48.));
+        assert!(settings.origin.y >= chrome.origin.y && settings.bottom() <= chrome.bottom());
+        cx.simulate_click(settings.center(), Modifiers::default());
+        cx.update(|_, cx| assert!(view.read(cx).settings_tab.is_some()));
+    }
 
     #[gpui::test]
     fn latest_button_floats_inside_the_timeline_without_shrinking_it(cx: &mut TestAppContext) {
@@ -3830,6 +3939,125 @@ mod tests {
             "avatar must overlap the banner boundary"
         );
         assert_eq!(avatar.size.width, px(96.));
+    }
+
+    #[gpui::test]
+    fn friends_home_preserves_drafts_and_does_not_read_the_hidden_chat(cx: &mut TestAppContext) {
+        let window = cx.add_window(|window, cx| Larpcord::with_preview(window, cx, true));
+        window.update(cx,|view,window,cx| {
+            view.settings.notifications = false;
+            view.composer.update(cx,|input,cx|input.set("unsent campfire draft",cx));
+            let before = view.store.cached_messages();
+            view.show_friends(window,cx);
+            view.send(window,cx);
+            assert_eq!(view.store.cached_messages(),before);
+            view.dispatch("MESSAGE_CREATE",serde_json::json!({"id":"9999","channel_id":"campfire","author":{"id":"someone","username":"someone"},"content":"a synthetic incoming message"}),window,cx);
+            assert!(view.store.unread.contains("campfire"));
+            let user = view.store.users["moss"].clone();
+            view.open_friend_dm(user,window,cx);
+            assert!(!view.home_page);
+            assert_eq!(view.selected_channel.as_deref(),Some("sample-dm-moss"));
+            assert_eq!(view.drafts.get("campfire").map(String::as_str),Some("unsent campfire draft"));
+            assert!(view.composer.read(cx).content.is_empty());
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn profile_inspector_keeps_chat_interactive_but_full_profile_blocks_sending(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|window, cx| Larpcord::with_preview(window, cx, true));
+        window
+            .update(cx, |view, window, cx| {
+                view.open_profile(view.store.user.clone(), window, cx);
+                view.profile_inspector = true;
+                let before = view.store.cached_messages();
+                view.composer
+                    .update(cx, |input, cx| input.set("offline inspector draft", cx));
+                view.send(window, cx);
+                assert_eq!(view.store.cached_messages(), before + 1);
+                assert!(view.profile.is_some());
+                assert!(view.composer.read(cx).content.is_empty());
+                view.profile_inspector = false;
+                view.composer
+                    .update(cx, |input, cx| input.set("keep this draft", cx));
+                view.send(window, cx);
+                assert_eq!(view.store.cached_messages(), before + 1);
+                assert_eq!(view.composer.read(cx).content.as_ref(), "keep this draft");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn profile_inspector_reserves_a_side_column_and_scales_the_card(cx: &mut TestAppContext) {
+        use gpui::{point, px, size};
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx, |view, cx| {
+            view.profile = Some(crate::model::Profile {
+                user: view.store.user.clone(),
+                ..Default::default()
+            });
+            view.profile_inspector = true;
+            view.members_open = false;
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        let card = cx.debug_bounds("profile-card").unwrap();
+        let timeline = cx.debug_bounds("timeline").unwrap();
+        assert_eq!(card.size.width, px(296.));
+        assert!(timeline.right() <= card.origin.x);
+        assert!(timeline.size.width >= px(400.));
+        assert!(card.size.height >= px(450.));
+        view.update(cx, |view, cx| {
+            view.profile.as_mut().unwrap().frame_asset = Some(crate::effects::ProfileFrame {
+                inner_width: 440.,
+                overflow_horizontal: 44.,
+                overflow_top: 60.,
+                overflow_bottom: 20.,
+                layers: vec![crate::effects::FrameLayer {
+                    id: "sample".into(),
+                    kind: "staple".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        let card = cx.debug_bounds("profile-card").unwrap();
+        let column = cx.debug_bounds("profile-side-column").unwrap();
+        let horizontal_art = card.size.width * 0.1;
+        let top_art = card.size.width * (60. / 440.);
+        assert!(card.origin.x - horizontal_art >= column.origin.x + px(10.));
+        assert!(card.right() + horizontal_art <= column.right() - px(10.));
+        assert!(card.origin.y - top_art >= column.origin.y + px(10.));
+    }
+
+    #[gpui::test]
+    fn ready_prioritizes_friends_before_unrelated_users_in_the_identity_cache(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|window, cx| Larpcord::with_preview(window, cx, true));
+        window
+            .update(cx, |view, window, cx| {
+                let mut users = (0..2000)
+                    .map(|id| serde_json::json!({"id":format!("other-{id}"),"username":"other"}))
+                    .collect::<Vec<_>>();
+                users.push(serde_json::json!({"id":"friend","username":"friend"}));
+                view.dispatch(
+                    "READY",
+                    serde_json::json!({"users":users,"relationships":[{"id":"friend","type":1}]}),
+                    window,
+                    cx,
+                );
+                assert_eq!(view.store.users.len(), 2000);
+                assert_eq!(view.store.users["friend"].username, "friend");
+            })
+            .unwrap();
     }
 
     #[gpui::test]

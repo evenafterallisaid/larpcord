@@ -4,7 +4,7 @@ impl Larpcord {
     fn interact(&mut self, message: &Message, data: Value, cx: &mut Context<Self>) {
         if self.settings_tab.is_some()
             || self.login_open
-            || self.profile.is_some()
+            || self.profile_is_modal()
             || self.video.is_some()
             || self.interaction.is_some()
         {

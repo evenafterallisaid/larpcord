@@ -81,7 +81,7 @@ impl Larpcord {
     fn open_video(&mut self, url: &str, title: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_tab.is_some()
             || self.login_open
-            || self.profile.is_some()
+            || self.profile_is_modal()
             || self.component_menu.is_some()
             || self.video.is_some()
         {

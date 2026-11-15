@@ -110,12 +110,6 @@ impl Larpcord {
                 let name = member.nick.as_deref().unwrap_or_else(|| user.name());
                 let key = format!("member-{}", user.id);
                 let hover_key = key.clone();
-                let dot = match status.as_str() {
-                    "online" => 0x43a25a,
-                    "idle" => 0xf0b232,
-                    "dnd" => 0xf23f43,
-                    _ => 0x80848e,
-                };
                 div()
                     .w_full()
                     .px_2()
@@ -156,11 +150,7 @@ impl Larpcord {
                                             .absolute()
                                             .right(px(-1.))
                                             .bottom(px(-1.))
-                                            .size(px(11.))
-                                            .rounded_full()
-                                            .border_2()
-                                            .border_color(rgb(SIDEBAR))
-                                            .bg(rgb(dot)),
+                                            .child(chrome::presence_badge(status, 12., SIDEBAR)),
                                     ),
                             )
                             .child(
@@ -177,7 +167,7 @@ impl Larpcord {
                                         ),
                                     ))
                                     .when_some(activity.clone(), |s, text| {
-                                        s.child(label(text).truncate().text_size(px(10.)))
+                                        s.child(label(text).truncate().text_size(px(11.)))
                                     }),
                             )
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {

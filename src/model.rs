@@ -80,6 +80,7 @@ pub struct ProfileDetails {
     pub banner: Option<String>,
     pub accent_color: Option<u32>,
     pub profile_effect: Option<ProfileEffectRef>,
+    pub theme_colors: Option<[u32; 2]>,
     #[serde(default, deserialize_with = "nullable_vec")]
     pub collectibles: Vec<crate::cosmetics::Reference>,
 }
@@ -90,12 +91,19 @@ pub struct Profile {
     pub user_profile: Option<ProfileDetails>,
     pub guild_member: Option<Member>,
     pub guild_member_profile: Option<ProfileDetails>,
+    pub mutual_guilds: Option<Vec<MutualGuild>>,
+    pub mutual_friends_count: Option<u32>,
     #[serde(skip)]
     pub effect_asset: Option<crate::effects::Effect>,
     #[serde(skip)]
     pub roles: Vec<Role>,
     #[serde(skip)]
     pub frame_asset: Option<crate::effects::ProfileFrame>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct MutualGuild {
+    pub id: String,
 }
 
 impl Profile {
@@ -137,6 +145,13 @@ impl Profile {
             .or(self.user.accent_color)
             .unwrap_or(0x5865f2)
             & 0xffffff
+    }
+    pub fn theme(&self) -> Option<[u32; 2]> {
+        self.guild_member_profile
+            .as_ref()
+            .and_then(|p| p.theme_colors)
+            .or_else(|| self.user_profile.as_ref().and_then(|p| p.theme_colors))
+            .filter(|colors| colors.iter().all(|c| *c <= 0xffffff))
     }
     pub fn collectible_ref(&self, kind: u8) -> Option<&str> {
         self.guild_member_profile
@@ -455,6 +470,8 @@ struct History {
 pub struct Store {
     pub user: User,
     pub users: HashMap<String, User>,
+    pub presences: crate::presence::Presences,
+    pub relationships: HashMap<String, u8>,
     pub guilds: Vec<Guild>,
     pub channels: HashMap<String, Channel>,
     pub unread: HashSet<String>,
@@ -470,6 +487,26 @@ pub struct Store {
 }
 
 impl Store {
+    pub fn relationship(&mut self, value: &serde_json::Value) {
+        let Some(id) = value["id"]
+            .as_str()
+            .or_else(|| value["user_id"].as_str())
+            .or_else(|| value["user"]["id"].as_str())
+        else {
+            return;
+        };
+        let Some(kind) = value["type"].as_u64().filter(|n| (1..=4).contains(n)) else {
+            return;
+        };
+        if self.relationships.len() < 2000 || self.relationships.contains_key(id) {
+            self.relationships.insert(id.into(), kind as u8);
+        }
+        if let Ok(user) = serde_json::from_value::<User>(value["user"].clone())
+            && (self.users.len() < 2000 || self.users.contains_key(&user.id))
+        {
+            self.users.insert(user.id.clone(), user);
+        }
+    }
     pub fn mentioned(&self, message: &Message) -> bool {
         if message.mentions.iter().any(|u| u.id == self.user.id) {
             return true;
@@ -967,12 +1004,43 @@ impl Store {
         })).expect("sample reply"));
         store.insert(serde_json::from_value(serde_json::json!({"id":"11","channel_id":"campfire","author":{"id":"clover","username":"clover"},"timestamp":"2026-11-12T18:39:10Z","content":"and this line should share the same header."})).expect("sample follow-up"));
         store.insert(Message { id: "20".into(), channel_id: "build-log".into(), author: store.user.clone(), content: "Native Rust + GPUI. This preview uses sample messages. Connect your account when you're ready.".into(), ..Message::default() });
+        for (id, status, activity) in [
+            ("moss", "online", "Building a little home"),
+            ("clover", "idle", "Away for tea"),
+        ] {
+            store.users.insert(
+                id.into(),
+                User {
+                    id: id.into(),
+                    username: id.into(),
+                    ..Default::default()
+                },
+            );
+            store.relationships.insert(id.into(), 1);
+            store.presences.update(&serde_json::json!({"user_id":id,"status":status,"activities":[{"type":4,"state":activity}]}));
+        }
         store
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn server_profile_theme_takes_precedence_without_changing_global_colors() {
+        let profile: Profile = serde_json::from_value(serde_json::json!({
+            "user":{"id":"1"},
+            "user_profile":{"theme_colors":[1122867,4478310]},
+            "guild_member_profile":{"theme_colors":[7833753,11189196]}
+        }))
+        .unwrap();
+        assert_eq!(profile.theme(), Some([7833753, 11189196]));
+        let global = Profile {
+            guild_member_profile: None,
+            ..profile.clone()
+        };
+        assert_eq!(global.theme(), Some([1122867, 4478310]));
+    }
+
     #[test]
     fn live_role_and_everyone_mentions_respect_suppression() {
         let mut store = Store {

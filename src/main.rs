@@ -12,6 +12,7 @@ mod members;
 mod model;
 mod navigation;
 mod network;
+mod presence;
 mod reactions;
 mod settings;
 mod ui;
