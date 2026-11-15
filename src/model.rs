@@ -50,6 +50,7 @@ pub struct RoleColors {
 #[derive(Clone, Default, Deserialize)]
 pub struct Role {
     pub id: String,
+    pub permissions: Option<String>,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -187,6 +188,8 @@ pub struct Guild {
 pub struct Channel {
     pub id: String,
     pub guild_id: Option<String>,
+    pub member_list_id: Option<String>,
+    pub permission_overwrites: Option<Vec<MemberOverwrite>>,
     pub name: Option<String>,
     #[serde(rename = "type", default)]
     pub kind: u8,
@@ -197,6 +200,13 @@ pub struct Channel {
     pub recipients: Vec<User>,
     pub topic: Option<String>,
     pub last_message_id: Option<String>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct MemberOverwrite {
+    pub id: String,
+    pub allow: String,
+    pub deny: String,
 }
 
 impl Channel {

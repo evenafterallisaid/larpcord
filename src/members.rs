@@ -11,6 +11,7 @@ pub enum Row {
 pub struct Members {
     pub guild: Option<String>,
     pub channel: Option<String>,
+    pub list_id: Option<String>,
     pub total: usize,
     pub online: u32,
     pub received: bool,
@@ -27,24 +28,37 @@ impl Views {
         current: &mut Members,
         guild: Option<String>,
         channel: Option<String>,
+        list_id: Option<String>,
     ) {
-        if current.guild == guild && current.channel == channel {
+        if current.guild == guild && current.channel == channel && current.list_id == list_id {
+            return;
+        }
+        // discord shares one sparse stream across channels with the same visibility list.
+        if guild.is_some()
+            && current.guild == guild
+            && list_id.is_some()
+            && current.list_id == list_id
+        {
+            current.channel = channel;
+            current.bucket = 0;
+            current.trim();
             return;
         }
         self.0
             .retain(|(_, at)| at.elapsed() < std::time::Duration::from_secs(60));
-        let found = self
-            .0
-            .iter()
-            .position(|(m, _)| m.guild == guild && m.channel == channel);
+        let found = self.0.iter().position(|(m, _)| {
+            m.guild == guild && m.list_id == list_id && (m.channel == channel || list_id.is_some())
+        });
         let mut next = found
             .and_then(|index| self.0.remove(index))
             .map(|(m, _)| m)
             .unwrap_or_else(|| {
                 let mut m = Members::default();
-                m.reset(guild, channel);
+                m.reset(guild, channel.clone());
+                m.list_id = list_id;
                 m
             });
+        next.channel = channel.clone();
         std::mem::swap(current, &mut next);
         if next.received && next.guild.is_some() {
             self.0.push_back((next, std::time::Instant::now()));
@@ -53,6 +67,79 @@ impl Views {
             self.0.pop_front();
         }
     }
+}
+
+pub fn list_identity(
+    channel: &crate::model::Channel,
+    roles: &[crate::model::Role],
+) -> Option<String> {
+    if matches!(channel.kind, 10..=12) {
+        return None;
+    }
+    if let Some(id) = &channel.member_list_id {
+        return Some(id.clone());
+    }
+    let guild = channel.guild_id.as_ref()?;
+    let base = roles
+        .iter()
+        .find(|role| &role.id == guild)?
+        .permissions
+        .as_ref()?
+        .parse::<u128>()
+        .ok()?;
+    let overwrites = channel.permission_overwrites.as_ref()?;
+    if overwrites.len() > 1000 {
+        return None;
+    }
+    let mut restricted = false;
+    let mut entries = Vec::new();
+    for overwrite in overwrites {
+        let allow = overwrite.allow.parse::<u128>().ok()?;
+        let deny = overwrite.deny.parse::<u128>().ok()?;
+        restricted |= deny & 1024 != 0;
+        if allow & 1024 != 0 {
+            entries.push(format!("allow:{}", overwrite.id));
+        } else if deny & 1024 != 0 {
+            entries.push(format!("deny:{}", overwrite.id));
+        }
+    }
+    if base & 1024 != 0 && !restricted {
+        return Some("everyone".into());
+    }
+    entries.sort();
+    Some(list_hash(entries.join(",").as_bytes()).to_string())
+}
+
+// murmurhash3 x86/32, seed zero: the wire identity is a hash of visibility overwrites.
+fn list_hash(bytes: &[u8]) -> u32 {
+    let scramble = |value: u32| {
+        value
+            .wrapping_mul(0xcc9e2d51)
+            .rotate_left(15)
+            .wrapping_mul(0x1b873593)
+    };
+    let mut hash = 0_u32;
+    let (chunks, tail) = bytes.as_chunks::<4>();
+    for chunk in chunks {
+        hash ^= scramble(u32::from_le_bytes(*chunk));
+        hash = hash
+            .rotate_left(13)
+            .wrapping_mul(5)
+            .wrapping_add(0xe6546b64);
+    }
+    let mut last = 0;
+    for (index, byte) in tail.iter().enumerate() {
+        last |= u32::from(*byte) << (index * 8);
+    }
+    if !tail.is_empty() {
+        hash ^= scramble(last);
+    }
+    hash ^= bytes.len() as u32;
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x85ebca6b);
+    hash ^= hash >> 13;
+    hash = hash.wrapping_mul(0xc2b2ae35);
+    hash ^ (hash >> 16)
 }
 impl Members {
     pub fn demo() -> Self {
@@ -71,6 +158,11 @@ impl Members {
     }
     pub fn apply(&mut self, data: &Value) {
         if data["guild_id"].as_str() != self.guild.as_deref() {
+            return;
+        }
+        if let (Some(expected), Some(received)) = (self.list_id.as_deref(), data["id"].as_str())
+            && expected != received
+        {
             return;
         }
         self.received = true;
@@ -224,20 +316,97 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_lists_survive_channel_switches_and_reject_other_list_deltas() {
+        let mut current = Members::demo();
+        current.list_id = Some("everyone".into());
+        let mut views = Views::default();
+        views.select(
+            &mut current,
+            Some("larp".into()),
+            Some("other".into()),
+            Some("everyone".into()),
+        );
+        assert_eq!(current.rows.len(), 4);
+        assert_eq!(current.channel.as_deref(), Some("other"));
+        current.apply(&serde_json::json!({"guild_id":"larp","id":"restricted","ops":[{"op":"INVALIDATE","range":[0,99]}]}));
+        assert_eq!(current.rows.len(), 4);
+        current.apply(&serde_json::json!({"guild_id":"larp","id":"everyone","ops":[{"op":"DELETE","index":3}]}));
+        assert_eq!(current.rows.len(), 3);
+        views.select(
+            &mut current,
+            Some("larp".into()),
+            Some("private".into()),
+            Some("restricted".into()),
+        );
+        assert!(!current.received);
+        assert!(current.rows.is_empty());
+        views.select(
+            &mut current,
+            Some("larp".into()),
+            Some("third".into()),
+            Some("everyone".into()),
+        );
+        assert_eq!(current.rows.len(), 3);
+        assert_eq!(current.channel.as_deref(), Some("third"));
+    }
+
+    #[test]
+    fn member_list_identity_uses_wire_metadata_or_visibility_overwrites() {
+        assert_eq!(list_hash(b""), 0);
+        assert_eq!(list_hash(b"foo"), 0xf6a5c420);
+        assert_eq!(list_hash(b"hello"), 0x248bfa47);
+        let roles: Vec<crate::model::Role> =
+            serde_json::from_value(serde_json::json!([{"id":"1","permissions":"1024"}])).unwrap();
+        let mut channel: crate::model::Channel = serde_json::from_value(
+            serde_json::json!({"id":"2","guild_id":"1","permission_overwrites":[]}),
+        )
+        .unwrap();
+        assert_eq!(list_identity(&channel, &roles).as_deref(), Some("everyone"));
+        channel.permission_overwrites = Some(vec![crate::model::MemberOverwrite {
+            id: "1".into(),
+            allow: "0".into(),
+            deny: "1024".into(),
+        }]);
+        assert_eq!(
+            list_identity(&channel, &roles),
+            Some(list_hash(b"deny:1").to_string())
+        );
+        channel.member_list_id = Some("wire-value".into());
+        assert_eq!(list_identity(&channel, &[]).as_deref(), Some("wire-value"));
+        channel.kind = 11;
+        assert!(list_identity(&channel, &roles).is_none());
+    }
+
+    #[test]
     fn returning_to_a_recent_channel_keeps_rows_without_mixing_channel_views() {
         let mut current = Members::demo();
         let mut views = Views::default();
-        views.select(&mut current, Some("larp".into()), Some("other".into()));
+        views.select(
+            &mut current,
+            Some("larp".into()),
+            Some("other".into()),
+            None,
+        );
         assert!(!current.received);
         assert!(current.rows.is_empty());
-        views.select(&mut current, Some("larp".into()), Some("campfire".into()));
+        views.select(
+            &mut current,
+            Some("larp".into()),
+            Some("campfire".into()),
+            None,
+        );
         assert!(current.received);
         assert_eq!(current.rows.len(), 4);
-        views.select(&mut current, Some("larp".into()), Some("campfire".into()));
+        views.select(
+            &mut current,
+            Some("larp".into()),
+            Some("campfire".into()),
+            None,
+        );
         assert_eq!(current.rows.len(), 4);
         for n in 0..8 {
             current.received = true;
-            views.select(&mut current, Some("larp".into()), Some(n.to_string()));
+            views.select(&mut current, Some("larp".into()), Some(n.to_string()), None);
         }
         assert_eq!(views.0.len(), 2);
     }

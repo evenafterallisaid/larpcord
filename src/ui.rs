@@ -679,6 +679,16 @@ impl Larpcord {
         self.typing_task = None;
         self.typing_sent = None;
         self.selected_channel = Some(id.clone());
+        let list_id = self.store.channels.get(&id).and_then(|channel| {
+            let roles = self
+                .store
+                .guilds
+                .iter()
+                .find(|g| Some(&g.id) == channel.guild_id.as_ref())
+                .map(|g| g.roles.as_slice())
+                .unwrap_or_default();
+            crate::members::list_identity(channel, roles)
+        });
         self.member_views.select(
             &mut self.members,
             self.store
@@ -686,6 +696,7 @@ impl Larpcord {
                 .get(&id)
                 .and_then(|c| c.guild_id.clone()),
             Some(id.clone()),
+            list_id,
         );
         self.subscribe_members();
         if !self.preview {
@@ -2364,7 +2375,7 @@ impl Larpcord {
                             .w(px(22.))
                             .text_size(px(21.))
                             .text_color(rgb(0x80848e))
-                            .child(icon(if channel.kind == 2 { "volume" } else { "hash" }, 18.))
+                            .child(icon(crate::icons::channel_icon(channel.kind), 18.))
                             .into_any_element()
                     })
                     .child(
@@ -2952,17 +2963,37 @@ impl Larpcord {
                     .and_then(|c| c.recipients.first())
                     .filter(|_| self.selected_guild.is_none())
                     .map(|user| self.avatar(user, 24.))
-                    .unwrap_or_else(|| icon("hash", 22.).text_color(rgb(MUTED)).into_any_element()),
+                    .unwrap_or_else(|| {
+                        icon(
+                            crate::icons::channel_icon(channel.map_or(0, |c| c.kind)),
+                            22.,
+                        )
+                        .text_color(rgb(MUTED))
+                        .into_any_element()
+                    }),
             )
             .child(
                 div()
+                    .id("channel-title")
+                    .min_w_0()
+                    .max_w(px(240.))
+                    .truncate()
                     .text_size(px(16.))
                     .font_weight(FontWeight::SEMIBOLD)
+                    .tooltip({
+                        let title = title.clone();
+                        move |_, cx| cx.new(|_| Hint(title.clone())).into()
+                    })
                     .child(title),
             )
             .when(!topic.is_empty(), |s| {
-                s.child(div().w(px(1.)).h(px(24.)).bg(rgb(LINE)))
-                    .child(label(topic).truncate().text_size(px(13.)))
+                s.child(div().w(px(1.)).h(px(24.)).bg(rgb(LINE))).child(
+                    label(topic)
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_size(px(13.)),
+                )
             })
             .child(div().flex_1())
             .when(channel.is_some_and(|c| c.guild_id.is_some()), |s| {

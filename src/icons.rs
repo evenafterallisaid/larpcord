@@ -10,6 +10,14 @@ pub fn icon(name: &str, size: f32) -> Svg {
 
 pub static ASSETS: &[(&str, &[u8])] = &[
     (
+        "icons/announcement.svg",
+        include_bytes!("../assets/icons/announcement.svg"),
+    ),
+    (
+        "icons/thread.svg",
+        include_bytes!("../assets/icons/thread.svg"),
+    ),
+    (
         "icons/arrow-left.svg",
         include_bytes!("../assets/icons/arrow-left.svg"),
     ),
@@ -91,3 +99,12 @@ pub static ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/settings.svg"),
     ),
 ];
+
+pub fn channel_icon(kind: u8) -> &'static str {
+    match kind {
+        2 | 13 => "volume",
+        5 => "announcement",
+        10..=12 => "thread",
+        _ => "hash",
+    }
+}
