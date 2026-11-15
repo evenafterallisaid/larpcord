@@ -19,6 +19,16 @@ use zeroize::Zeroizing;
 use crate::model::{Channel, Guild, Member, Message, Page, Profile, User};
 
 pub enum Event {
+    Gifs {
+        request: u64,
+        result: Result<Vec<crate::expressions::Gif>, String>,
+    },
+    StickerPacks(Result<Vec<crate::expressions::StickerPack>, String>),
+    GuildExpressions {
+        guild: String,
+        emojis: Option<Vec<crate::expressions::Emoji>>,
+        stickers: Option<Vec<crate::expressions::Sticker>>,
+    },
     OpenedDm {
         user: String,
         result: Result<Channel, String>,
@@ -73,6 +83,13 @@ pub struct Envelope {
 }
 
 pub enum Command {
+    CancelGifs,
+    Gifs {
+        request: u64,
+        query: String,
+    },
+    StickerPacks,
+    GuildExpressions(String),
     OpenDm(String),
     QrStart {
         attempt: u64,
@@ -96,6 +113,7 @@ pub enum Command {
         content: String,
         nonce: String,
         reply: Option<String>,
+        sticker: Option<String>,
     },
     Notify {
         title: String,
@@ -162,6 +180,7 @@ struct Api {
     endpoint: Option<String>,
     token: Arc<Zeroizing<String>>,
     gate: Arc<Mutex<Instant>>,
+    discovery_gate: Arc<Mutex<Instant>>,
     effects: Arc<Mutex<EffectCache>>,
     session_id: Arc<std::sync::Mutex<Option<String>>>,
     reads: Arc<Mutex<ReadSync>>,
@@ -253,6 +272,7 @@ impl Api {
             endpoint: None,
             token: Arc::new(token),
             gate: Arc::new(Mutex::new(Instant::now())),
+            discovery_gate: Arc::new(Mutex::new(Instant::now())),
             effects: Arc::new(Mutex::new(EffectCache::default())),
             session_id: Arc::new(std::sync::Mutex::new(None)),
             reads: Arc::new(Mutex::new(ReadSync::default())),
@@ -297,6 +317,30 @@ impl Api {
             }
         }
         cache.by_id.get(id).cloned()
+    }
+
+    fn discovery(&self) -> Self {
+        let mut api = self.clone();
+        api.gate = self.discovery_gate.clone();
+        api
+    }
+
+    async fn gifs(&self, query: &str) -> Result<Vec<crate::expressions::Gif>, String> {
+        let options = "media_format=tinygif&provider=klipy&locale=en-US&limit=50";
+        let path = if query.is_empty() {
+            format!("/gifs/trending-gifs?{options}")
+        } else {
+            let encoded: String =
+                reqwest::Url::parse_with_params("https://discord.com/", [("q", query)])
+                    .map_err(|_| "Invalid search".to_string())?
+                    .query()
+                    .unwrap_or_default()
+                    .into();
+            format!("/gifs/search?{encoded}&{options}")
+        };
+        self.request(Method::GET, &path, None)
+            .await
+            .map(crate::expressions::gifs)
     }
 
     async fn ack(&self, channel: &str, message: &str) -> Result<(), String> {
@@ -468,10 +512,13 @@ fn safe_delay(seconds: f64) -> Duration {
     })
 }
 
-fn send_body(content: &str, nonce: &str, reply: Option<&str>) -> Value {
+fn send_body(content: &str, nonce: &str, reply: Option<&str>, sticker: Option<&str>) -> Value {
     let mut body = json!({"content":content,"nonce":nonce,"enforce_nonce":true,"allowed_mentions":{"parse":[],"replied_user":false}});
     if let Some(id) = reply.filter(|id| snowflake(id)) {
         body["message_reference"] = json!({"message_id":id,"fail_if_not_exists":false});
+    }
+    if let Some(id) = sticker.filter(|id| snowflake(id)) {
+        body["sticker_ids"] = json!([id]);
     }
     body
 }
@@ -492,6 +539,7 @@ impl Backend {
             runtime.block_on(async move {
                 let mut tasks = JoinSet::new();
                 let mut requests = JoinSet::new();
+                let mut gif_request:Option<tokio::task::AbortHandle>=None;
                 let mut auth = JoinSet::new();
                 let mut api = None::<Api>;
                 let mut generation = 0;
@@ -574,6 +622,32 @@ impl Backend {
                                     let Some(client)=api.clone() else {continue;};let events=events.clone();
                                     requests.spawn(async move {let result=client.request(Method::GET,"/users/@me/settings-proto/1",None).await;emit(&events,generation,Event::Layout(result)).await;});
                                 }
+                                Command::CancelGifs => {if let Some(old)=gif_request.take() {old.abort();}}
+                                Command::Gifs {request,query} => {
+                                    let Some(client)=api.as_ref().map(Api::discovery) else {continue;};
+                                    if let Some(old)=gif_request.take() {old.abort();}
+                                    let events=events.clone();let query=query.chars().take(100).collect::<String>();
+                                    gif_request=Some(requests.spawn(async move {
+                                        let result=client.gifs(&query).await;
+                                        emit(&events,generation,Event::Gifs{request,result}).await;
+                                    }));
+                                }
+                                Command::StickerPacks => {
+                                    let Some(client)=api.as_ref().map(Api::discovery) else {continue;};let events=events.clone();
+                                    requests.spawn(async move {
+                                        let result=client.request(Method::GET,"/sticker-packs",None).await.map(crate::expressions::packs);
+                                        emit(&events,generation,Event::StickerPacks(result)).await;
+                                    });
+                                }
+                                Command::GuildExpressions(guild) => {
+                                    let Some(client)=api.as_ref().map(Api::discovery) else {continue;};
+                                    if !snowflake(&guild) {continue;}let events=events.clone();
+                                    requests.spawn(async move {
+                                        let emojis=client.request::<Vec<crate::expressions::Emoji>>(Method::GET,&format!("/guilds/{guild}/emojis"),None).await.ok();
+                                        let stickers=client.request::<Vec<crate::expressions::Sticker>>(Method::GET,&format!("/guilds/{guild}/stickers"),None).await.ok();
+                                        emit(&events,generation,Event::GuildExpressions{guild,emojis,stickers}).await;
+                                    });
+                                }
                                 Command::OpenDm(user) => {
                                     let Some(client)=api.clone() else {continue;};
                                     if !snowflake(&user) {continue;}
@@ -649,12 +723,12 @@ impl Backend {
                                     if !snowflake(&channel) { continue; }
                                     requests.spawn(async move {let _ = client.request::<()>(Method::POST,&format!("/channels/{channel}/typing"),None).await;});
                                 }
-                                Command::Send { channel, content, nonce,reply } => {
+                                Command::Send { channel, content, nonce,reply,sticker } => {
                                     let Some(client) = api.clone() else { continue; };
-                                    if !snowflake(&channel) || content.is_empty() || content.chars().count() > 2000 { continue; }
+                                    if !snowflake(&channel) || (content.is_empty() && sticker.is_none()) || content.chars().count() > 2000 || sticker.as_deref().is_some_and(|id|!snowflake(id)) { continue; }
                                     let events = events.clone();
                                     requests.spawn(async move {
-                                        let result = client.request::<Message>(Method::POST, &format!("/channels/{channel}/messages"), Some(send_body(&content,&nonce,reply.as_deref()))).await;
+                                        let result = client.request::<Message>(Method::POST, &format!("/channels/{channel}/messages"), Some(send_body(&content,&nonce,reply.as_deref(),sticker.as_deref()))).await;
                                         emit(&events, generation, Event::Sent { nonce, result: result.map(Box::new) }).await;
                                     });
                                 }
@@ -898,7 +972,7 @@ where
                             session.subscribed_guild = Some(current.clone());
                             subscribed = current;
                         }
-                        if matches!(kind.as_str(), "READY" | "READY_SUPPLEMENTAL" | "RELATIONSHIP_ADD" | "RELATIONSHIP_REMOVE" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" | "MESSAGE_REACTION_REMOVE_ALL" | "MESSAGE_REACTION_REMOVE_EMOJI" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE" | "TYPING_START" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE" | "GUILD_MEMBER_UPDATE" | "MESSAGE_ACK" | "USER_SETTINGS_UPDATE" | "USER_SETTINGS_PROTO_UPDATE" | "USER_GUILD_SETTINGS_UPDATE" | "USER_UPDATE" | "GUILD_MEMBER_LIST_UPDATE" | "PRESENCE_UPDATE") {
+                        if matches!(kind.as_str(), "READY" | "READY_SUPPLEMENTAL" | "RELATIONSHIP_ADD" | "RELATIONSHIP_REMOVE" | "GUILD_CREATE" | "GUILD_UPDATE" | "GUILD_DELETE" | "CHANNEL_CREATE" | "CHANNEL_UPDATE" | "CHANNEL_DELETE" | "CHANNEL_RECIPIENT_ADD" | "CHANNEL_RECIPIENT_REMOVE" | "MESSAGE_CREATE" | "MESSAGE_UPDATE" | "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" | "MESSAGE_REACTION_REMOVE_ALL" | "MESSAGE_REACTION_REMOVE_EMOJI" | "MESSAGE_DELETE" | "MESSAGE_DELETE_BULK" | "CALL_CREATE" | "TYPING_START" | "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" | "GUILD_ROLE_DELETE" | "GUILD_MEMBER_UPDATE" | "GUILD_EMOJIS_UPDATE" | "GUILD_STICKERS_UPDATE" | "MESSAGE_ACK" | "USER_SETTINGS_UPDATE" | "USER_SETTINGS_PROTO_UPDATE" | "USER_GUILD_SETTINGS_UPDATE" | "USER_UPDATE" | "GUILD_MEMBER_LIST_UPDATE" | "PRESENCE_UPDATE") {
                             emit(events, generation, Event::Dispatch(kind, data)).await;
                         }
                     }
@@ -1037,6 +1111,8 @@ pub fn guild_from_ready(value: &Value) -> Option<Guild> {
         "premium_subscription_count",
         "premium_tier",
         "roles",
+        "emojis",
+        "stickers",
     ] {
         if let Some(outer) = value.get(field) {
             properties[field] = outer.clone();
@@ -1061,6 +1137,52 @@ pub fn guild_channels(value: &Value) -> Vec<Channel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn gif_discovery_encodes_searches_and_does_not_hold_the_message_lane() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut api = Api::new(Zeroizing::new("synthetic-session".into())).unwrap();
+        api.endpoint = Some(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = vec![0; 8192];
+            let size = socket.read(&mut bytes).await.unwrap();
+            let request = String::from_utf8_lossy(&bytes[..size]);
+            let path = request
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap();
+            let url = reqwest::Url::parse(&format!("http://localhost{path}")).unwrap();
+            assert_eq!(url.path(), "/gifs/search");
+            assert_eq!(
+                url.query_pairs().find(|(k, _)| k == "q").unwrap().1,
+                "cats & 犬"
+            );
+            assert!(!path.contains("synthetic-session"));
+            let body = r#"[{"url":"https://klipy.com/gifs/cat","preview":"https://static.klipy.com/cat.gif","title":"cat"}]"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let _message_lane = api.gate.lock().await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), api.discovery().gifs("cats & 犬"))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(result.len(), 1);
+        server.await.unwrap();
+    }
     async fn validation_server(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1118,9 +1240,10 @@ mod tests {
             payload["d"]["subscriptions"]["1"]["channels"]["3"],
             json!([[0, 99]])
         );
-        let body = send_body("hi", "123", Some("456"));
+        let body = send_body("hi", "123", Some("456"), Some("789"));
         assert_eq!(body["message_reference"]["message_id"], "456");
         assert_eq!(body["allowed_mentions"]["replied_user"], false);
+        assert_eq!(body["sticker_ids"], json!(["789"]));
     }
 
     #[tokio::test]

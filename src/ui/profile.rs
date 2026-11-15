@@ -27,6 +27,8 @@ impl Larpcord {
             (rgb(top), rgb(bottom))
         };
         let user = &profile.user;
+        let message_user = user.clone();
+        let presence = self.store.presences.get(&user.id);
         let member = profile.guild_member.as_ref();
         let name = member
             .and_then(|m| m.nick.as_deref())
@@ -245,9 +247,11 @@ impl Larpcord {
                                     .gap_4()
                                     .child(
                                         column()
+                                            .debug_selector(||"profile-identity".into())
                                             .gap_1()
                                             .child(
-                                                div()
+                                                row().gap_2().child(div()
+                                                    .min_w_0().flex_1().truncate()
                                                     .text_size(px(if inspector {
                                                         22.
                                                     } else {
@@ -256,27 +260,46 @@ impl Larpcord {
                                                     .font_weight(FontWeight::BOLD)
                                                     .child(
                                                         self.display_name(name, user, member, true),
-                                                    ),
+                                                    ))
+                                                    .when(user.id!=self.store.user.id,|s|s.child(
+                                                        toolbar_button("profile-message","message","Open direct message")
+                                                            .on_click(cx.listener(move |this,_,window,cx| {
+                                                                this.profile=None;this.profile_inspector=false;this.previous_focus=None;
+                                                                window.focus(&this.root_focus);
+                                                                this.open_friend_dm(message_user.clone(),window,cx);
+                                                            }))
+                                                    )),
                                             )
-                                            .child(label(format!("@{}", user.username)))
-                                            .when_some(
+                                            .child(row().gap_2().flex_wrap().child(label(format!("@{}", user.username))).when_some(
                                                 profile
                                                     .pronouns()
                                                     .filter(|s| !s.is_empty())
                                                     .map(str::to_string),
-                                                |s, pronouns| s.child(label(pronouns)),
-                                            ),
+                                                |s, pronouns| s.child(label("·")).child(label(pronouns)),
+                                            ))
+                                            .when_some(presence,|s,p|s.child(
+                                                row().gap_2().mt_1().child(chrome::presence_badge(&p.status,12.,u32::from(top)>>8))
+                                                    .child(label(match p.status.as_str(){"online"=>"Online","idle"=>"Idle","dnd"=>"Do Not Disturb",_=>"Offline"}).text_size(px(11.)))
+                                            ))
+                                            .when_some(presence.and_then(|p|p.activity.as_ref()),|s,activity|s.child(label(activity.clone()).text_size(px(12.)))),
                                     )
                                     .when(user.bot, |s| s.child(badge("APP")))
+                                    .when(!profile.badges.is_empty(),|s|s.child(
+                                        row().gap_2().min_h(px(24.)).flex_wrap().children(profile.badges.iter().take(16).filter(|b|!b.icon.is_empty()&&b.icon.len()<=128&&b.icon.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_'||c==b'-')).filter_map(|b| {
+                                            let image=self.media.get(&format!("https://cdn.discordapp.com/badge-icons/{}.png",b.icon))?;
+                                            let hint=b.description.chars().take(160).collect::<String>();
+                                            Some(div().id(SharedString::from(format!("profile-badge-{}",b.icon))).child(img(image).size(px(20.)).object_fit(ObjectFit::Contain)).tooltip(move |_,cx|cx.new(|_|Hint(hint.clone())).into()))
+                                        }))
+                                    ))
                                     .when(
-                                        profile.mutual_guilds.is_some()
-                                            || profile.mutual_friends_count.is_some(),
+                                        profile.mutual_guilds.as_ref().is_some_and(|g|!g.is_empty())
+                                            || profile.mutual_friends_count.is_some_and(|n|n>0),
                                         |s| {
                                             let mut counts = Vec::new();
-                                            if let Some(n) = profile.mutual_friends_count {
+                                            if let Some(n) = profile.mutual_friends_count.filter(|n|*n>0) {
                                                 counts.push(format!("{n} mutual friends"));
                                             }
-                                            if let Some(guilds) = &profile.mutual_guilds {
+                                            if let Some(guilds) = profile.mutual_guilds.as_ref().filter(|g|!g.is_empty()) {
                                                 counts.push(format!(
                                                     "{} mutual servers",
                                                     guilds.len()
@@ -323,7 +346,7 @@ impl Larpcord {
                                         profile.bio().filter(|s| !s.is_empty()).map(str::to_string),
                                         |s, bio| {
                                             s.child(
-                                                column()
+                                                column().p_3().rounded_lg().bg(rgba(0x00000020))
                                                     .gap_2()
                                                     .child(
                                                         label("ABOUT ME")
@@ -336,7 +359,7 @@ impl Larpcord {
                                     )
                                     .when(!roles.is_empty(), |s| {
                                         s.child(
-                                            column()
+                                            column().p_3().rounded_lg().bg(rgba(0x00000020))
                                                 .gap_2()
                                                 .child(
                                                     label("ROLES")
@@ -436,7 +459,8 @@ impl Larpcord {
                                         self.profile_guild.as_deref(),
                                         if inspector { 72. } else { 88. },
                                         true,
-                                    )),
+                                    ))
+                                    .when_some(presence,|s,p|s.child(div().absolute().right_0().bottom_0().child(chrome::presence_badge(&p.status,if inspector {16.}else{20.},u32::from(top)>>8)))),
                             )
                             .child(
                                 toolbar_button("copy-user-id", "copy", "Copy user ID")

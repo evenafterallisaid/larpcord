@@ -8,7 +8,7 @@ impl Larpcord {
         self.selected_guild = None;
         self.profile = None;
         self.profile_inspector = false;
-        self.emoji_open = false;
+        self.close_picker();
         self.command(Command::ViewGuild(None));
         window.focus(&self.friend_search.focus_handle(cx));
         cx.notify();

@@ -24,6 +24,7 @@ pub struct User {
     pub accent_color: Option<u32>,
     #[serde(default)]
     pub bot: bool,
+    pub premium_type: Option<u8>,
     pub typing_indicator_style: Option<crate::cosmetics::TypingStyle>,
     pub avatar_decoration_data: Option<AvatarDecoration>,
     pub display_name_styles: Option<crate::cosmetics::NameStyle>,
@@ -93,12 +94,22 @@ pub struct Profile {
     pub guild_member_profile: Option<ProfileDetails>,
     pub mutual_guilds: Option<Vec<MutualGuild>>,
     pub mutual_friends_count: Option<u32>,
+    #[serde(default, deserialize_with = "nullable_vec")]
+    pub badges: Vec<ProfileBadge>,
     #[serde(skip)]
     pub effect_asset: Option<crate::effects::Effect>,
     #[serde(skip)]
     pub roles: Vec<Role>,
     #[serde(skip)]
     pub frame_asset: Option<crate::effects::ProfileFrame>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct ProfileBadge {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub icon: String,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -197,15 +208,18 @@ pub struct Guild {
     pub premium_tier: Option<u8>,
     #[serde(default)]
     pub roles: Vec<Role>,
+    pub emojis: Option<Vec<crate::expressions::Emoji>>,
+    pub stickers: Option<Vec<crate::expressions::Sticker>>,
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Channel {
     pub id: String,
     pub guild_id: Option<String>,
     pub member_list_id: Option<String>,
     pub permission_overwrites: Option<Vec<MemberOverwrite>>,
     pub name: Option<String>,
+    pub icon: Option<String>,
     #[serde(rename = "type", default)]
     pub kind: u8,
     #[serde(default)]
@@ -217,7 +231,7 @@ pub struct Channel {
     pub last_message_id: Option<String>,
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct MemberOverwrite {
     pub id: String,
     pub allow: String,

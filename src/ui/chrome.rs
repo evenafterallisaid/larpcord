@@ -77,6 +77,36 @@ fn toolbar_button_hover(
         .tooltip(move |_, cx| cx.new(|_| Hint(hint.into())).into())
 }
 impl Larpcord {
+    pub(super) fn channel_avatar(&self, channel: &Channel, size: f32) -> AnyElement {
+        if channel.kind == 3 {
+            let image = crate::media::group_icon(&channel.id, channel.icon.as_deref())
+                .and_then(|url| self.media.get(&url));
+            row()
+                .size(px(size))
+                .flex_shrink_0()
+                .rounded_full()
+                .overflow_hidden()
+                .justify_center()
+                .bg(rgb(SURFACE))
+                .child(
+                    image
+                        .map(|image| {
+                            img(image)
+                                .size_full()
+                                .object_fit(ObjectFit::Cover)
+                                .into_any_element()
+                        })
+                        .unwrap_or_else(|| icon("users", size * 0.6).into_any_element()),
+                )
+                .into_any_element()
+        } else {
+            channel
+                .recipients
+                .first()
+                .map(|user| self.presence_avatar(user, size))
+                .unwrap_or_else(|| icon("user", size).into_any_element())
+        }
+    }
     pub(super) fn presence_avatar(&self, user: &User, size: f32) -> AnyElement {
         div()
             .relative()

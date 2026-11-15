@@ -5,6 +5,7 @@ mod components;
 mod content;
 mod cosmetics;
 mod effects;
+mod expressions;
 mod icons;
 mod input;
 mod media;

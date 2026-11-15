@@ -6,6 +6,7 @@ mod conversation;
 mod cosmetics;
 mod friends;
 mod members;
+mod picker;
 mod profile;
 mod text;
 mod video;
@@ -70,6 +71,14 @@ pub struct Larpcord {
     composer: Entity<TextInput>,
     emoji_search: Entity<TextInput>,
     emoji_open: bool,
+    picker: crate::expressions::Picker,
+    picker_debounce: Option<Task<()>>,
+    picker_scroll: UniformListScrollHandle,
+    selected_sticker: Option<crate::expressions::Sticker>,
+    pending_sticker: Option<crate::expressions::Sticker>,
+    failed_sticker: Option<crate::expressions::Sticker>,
+    sticker_drafts: HashMap<String, crate::expressions::Sticker>,
+    expression_attempts: HashSet<String>,
     reply_to: Option<composer::Reply>,
     pending_reply: Option<composer::Reply>,
     hovered_message: Option<String>,
@@ -360,7 +369,10 @@ impl Larpcord {
             cx.subscribe_in(&token, window, |this, _, _: &Submit, window, cx| {
                 this.login(window, cx)
             }),
-            cx.subscribe(&emoji_search, |_, _, _: &Changed, cx| cx.notify()),
+            cx.subscribe(&emoji_search, |this, _, _: &Changed, cx| {
+                this.picker_changed(cx);
+                cx.notify();
+            }),
             cx.subscribe(&search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe(&friend_search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe_in(&composer, window, |this, _, _: &Changed, window, cx| {
@@ -416,17 +428,22 @@ impl Larpcord {
                 true
             }
         });
+        let settings = if preview_only {
+            Settings::default()
+        } else {
+            Settings::load()
+        };
+        let picker = crate::expressions::Picker {
+            recent: settings.recent_emoji.clone(),
+            ..Default::default()
+        };
         Self {
             root_focus,
             modal_focus: cx.focus_handle(),
             previous_focus: None,
             backend,
             store,
-            settings: if preview_only {
-                Settings::default()
-            } else {
-                Settings::load()
-            },
+            settings,
             generation: 0,
             preview: true,
             preview_only,
@@ -449,6 +466,14 @@ impl Larpcord {
             composer,
             emoji_search,
             emoji_open: false,
+            picker,
+            picker_debounce: None,
+            picker_scroll: UniformListScrollHandle::new(),
+            selected_sticker: None,
+            pending_sticker: None,
+            failed_sticker: None,
+            sticker_drafts: HashMap::new(),
+            expression_attempts: HashSet::new(),
             reply_to: None,
             pending_reply: None,
             hovered_message: None,
@@ -495,7 +520,7 @@ impl Larpcord {
     }
 
     fn open_settings(&mut self, tab: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.emoji_open = false;
+        self.close_picker();
         if self.login_open
             || self.profile_is_modal()
             || self.component_menu.is_some()
@@ -546,7 +571,7 @@ impl Larpcord {
     }
 
     fn open_login(&mut self, cx: &mut Context<Self>) {
-        self.emoji_open = false;
+        self.close_picker();
         self.login_open = true;
         self.settings_tab = None;
         self.qr_attempt += 1;
@@ -566,6 +591,15 @@ impl Larpcord {
     }
 
     fn connect(&mut self, token: Zeroizing<String>, cx: &mut Context<Self>) {
+        self.picker = crate::expressions::Picker {
+            recent: self.settings.recent_emoji.clone(),
+            ..Default::default()
+        };
+        self.selected_sticker = None;
+        self.pending_sticker = None;
+        self.failed_sticker = None;
+        self.sticker_drafts.clear();
+        self.expression_attempts.clear();
         self.generation += 1;
         self.home_page = false;
         self.profile_inspector = false;
@@ -582,7 +616,7 @@ impl Larpcord {
         self.loading.clear();
         self.pages.clear();
         self.live_tail.clear();
-        self.emoji_open = false;
+        self.close_picker();
         self.reply_to = None;
         self.pending_reply = None;
         self.read_task = None;
@@ -614,6 +648,15 @@ impl Larpcord {
     }
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
+        self.picker = crate::expressions::Picker {
+            recent: self.settings.recent_emoji.clone(),
+            ..Default::default()
+        };
+        self.selected_sticker = None;
+        self.pending_sticker = None;
+        self.failed_sticker = None;
+        self.sticker_drafts.clear();
+        self.expression_attempts.clear();
         self.generation += 1;
         self.home_page = false;
         self.profile_inspector = false;
@@ -634,7 +677,7 @@ impl Larpcord {
         self.loading.clear();
         self.pages.clear();
         self.live_tail.clear();
-        self.emoji_open = false;
+        self.close_picker();
         self.reply_to = None;
         self.pending_reply = None;
         self.read_task = None;
@@ -699,6 +742,12 @@ impl Larpcord {
             self.last_channels.insert(guild.clone(), id.clone());
         }
         if let Some(old) = &self.selected_channel {
+            if let Some(sticker) = self.selected_sticker.take() {
+                self.sticker_drafts.insert(old.clone(), sticker);
+                if self.sticker_drafts.len() > 32 {
+                    self.sticker_drafts.retain(|id, _| id == old);
+                }
+            }
             self.drafts
                 .insert(old.clone(), self.composer.read(cx).content.to_string());
             if self.drafts.len() > 32 {
@@ -706,7 +755,7 @@ impl Larpcord {
             }
         }
         self.live_tail.clear();
-        self.emoji_open = false;
+        self.close_picker();
         self.reply_to = None;
         self.read_task = None;
         self.typing.clear();
@@ -714,6 +763,7 @@ impl Larpcord {
         self.typing_task = None;
         self.typing_sent = None;
         self.selected_channel = Some(id.clone());
+        self.selected_sticker = self.sticker_drafts.remove(&id);
         let list_id = self.store.channels.get(&id).and_then(|channel| {
             let roles = self
                 .store
@@ -931,7 +981,7 @@ impl Larpcord {
             return;
         }
         let content = self.composer.read(cx).content.trim().to_string();
-        if content.is_empty() {
+        if content.is_empty() && self.selected_sticker.is_none() {
             return;
         }
         if content.chars().count() > 2000 {
@@ -958,6 +1008,11 @@ impl Larpcord {
                     .take()
                     .map(|r| serde_json::json!({"message_id":r.id,"channel_id":r.channel})),
                 timestamp: chrono::Utc::now().to_rfc3339(),
+                sticker_items: self
+                    .selected_sticker
+                    .take()
+                    .map(|s| vec![s.message()])
+                    .unwrap_or_default(),
                 ..Message::default()
             });
             self.composer.update(cx, |input, cx| input.set("", cx));
@@ -974,10 +1029,12 @@ impl Larpcord {
                     .as_ref()
                     .filter(|r| r.channel == channel)
                     .map(|r| r.id.clone()),
+                sticker: self.selected_sticker.as_ref().map(|s| s.id.clone()),
             }) {
                 Ok(()) => {
                     self.drafts.remove(&channel);
                     self.pending_reply = self.reply_to.take();
+                    self.pending_sticker = self.selected_sticker.take();
                     self.sending = Some((nonce, channel, content));
                     self.composer.update(cx, |input, cx| input.set("", cx));
                 }
@@ -1025,6 +1082,54 @@ impl Larpcord {
             return;
         }
         match envelope.event {
+            Event::Gifs { request, result } => {
+                if self.emoji_open
+                    && self.picker.tab == crate::expressions::Tab::Gifs
+                    && self.picker.request == request
+                {
+                    self.picker.loading = false;
+                    match result {
+                        Ok(gifs) => {
+                            self.picker.gifs = gifs;
+                            self.picker.error = None;
+                        }
+                        Err(error) => self.picker.error = Some(error),
+                    }
+                }
+            }
+            Event::StickerPacks(result) => {
+                self.picker.packs_loading = false;
+                match result {
+                    Ok(packs) => {
+                        self.picker.packs = packs;
+                        self.picker.packs_loaded = true;
+                        self.picker.packs_error = None;
+                    }
+                    Err(error) => self.picker.packs_error = Some(error),
+                }
+            }
+            Event::GuildExpressions {
+                guild,
+                mut emojis,
+                mut stickers,
+            } => {
+                if let Some(g) = self.store.guilds.iter_mut().find(|g| g.id == guild) {
+                    if g.emojis.is_none() {
+                        if let Some(items) = emojis.as_mut() {
+                            items.retain(crate::expressions::Emoji::valid);
+                            items.truncate(1000);
+                        }
+                        g.emojis = emojis;
+                    }
+                    if g.stickers.is_none() {
+                        if let Some(items) = stickers.as_mut() {
+                            items.retain(crate::expressions::Sticker::valid);
+                            items.truncate(500);
+                        }
+                        g.stickers = stickers;
+                    }
+                }
+            }
             Event::Auth { attempt, event } => {
                 if attempt != self.qr_attempt || !self.login_open {
                     return;
@@ -1255,6 +1360,7 @@ impl Larpcord {
                     let (_, channel, content) = self.sending.take().unwrap();
                     match result {
                         Ok(message) => {
+                            self.pending_sticker = None;
                             self.pending_reply = None;
                             let message = *message;
                             let selected = self.selected_channel.as_ref() == Some(&channel);
@@ -1271,6 +1377,18 @@ impl Larpcord {
                             }
                         }
                         Err(error) => {
+                            self.failed_sticker = self.pending_sticker.take();
+                            if let Some(sticker) = self.failed_sticker.clone() {
+                                if self.selected_channel.as_ref() == Some(&channel)
+                                    && self.selected_sticker.is_none()
+                                {
+                                    self.selected_sticker = Some(sticker);
+                                } else {
+                                    self.sticker_drafts
+                                        .entry(channel.clone())
+                                        .or_insert(sticker);
+                                }
+                            }
                             if self.reply_to.is_none()
                                 && self.selected_channel.as_ref() == Some(&channel)
                             {
@@ -1479,6 +1597,44 @@ impl Larpcord {
             }
             "RELATIONSHIP_ADD" => self.store.relationship(&data),
             "READY_SUPPLEMENTAL" => self.store.presences.merge(&data),
+            "GUILD_EMOJIS_UPDATE" => {
+                if let Some(g) = self
+                    .store
+                    .guilds
+                    .iter_mut()
+                    .find(|g| data["guild_id"].as_str() == Some(&g.id))
+                {
+                    g.emojis = serde_json::from_value::<Vec<crate::expressions::Emoji>>(
+                        data["emojis"].clone(),
+                    )
+                    .ok()
+                    .map(|v| {
+                        v.into_iter()
+                            .filter(crate::expressions::Emoji::valid)
+                            .take(1000)
+                            .collect()
+                    });
+                }
+            }
+            "GUILD_STICKERS_UPDATE" => {
+                if let Some(g) = self
+                    .store
+                    .guilds
+                    .iter_mut()
+                    .find(|g| data["guild_id"].as_str() == Some(&g.id))
+                {
+                    g.stickers = serde_json::from_value::<Vec<crate::expressions::Sticker>>(
+                        data["stickers"].clone(),
+                    )
+                    .ok()
+                    .map(|v| {
+                        v.into_iter()
+                            .filter(crate::expressions::Sticker::valid)
+                            .take(500)
+                            .collect()
+                    });
+                }
+            }
             "RELATIONSHIP_REMOVE" => {
                 if let Some(id) = data["id"].as_str() {
                     self.store.relationships.remove(id);
@@ -1549,8 +1705,40 @@ impl Larpcord {
                 }
             }
             "CHANNEL_CREATE" | "CHANNEL_UPDATE" => {
-                if let Ok(channel) = serde_json::from_value::<Channel>(data) {
+                let mut merged = data["id"]
+                    .as_str()
+                    .and_then(|id| self.store.channels.get(id))
+                    .and_then(|channel| serde_json::to_value(channel).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let Some(fields) = data.as_object() {
+                    for (key, value) in fields {
+                        merged[key] = value.clone();
+                    }
+                }
+                if let Ok(channel) = serde_json::from_value::<Channel>(merged) {
                     self.store.channels.insert(channel.id.clone(), channel);
+                }
+            }
+            "CHANNEL_RECIPIENT_ADD" => {
+                if let Some(channel) = data["channel_id"]
+                    .as_str()
+                    .and_then(|id| self.store.channels.get_mut(id))
+                    && channel.kind == 3
+                    && channel.recipients.len() < 100
+                    && let Ok(user) = serde_json::from_value::<User>(data["user"].clone())
+                    && !channel.recipients.iter().any(|old| old.id == user.id)
+                {
+                    channel.recipients.push(user);
+                }
+            }
+            "CHANNEL_RECIPIENT_REMOVE" => {
+                if let Some(channel) = data["channel_id"]
+                    .as_str()
+                    .and_then(|id| self.store.channels.get_mut(id))
+                    && channel.kind == 3
+                    && let Some(user) = data["user"]["id"].as_str()
+                {
+                    channel.recipients.retain(|old| old.id != user);
                 }
             }
             "CHANNEL_DELETE" => {
@@ -1811,6 +1999,14 @@ impl Larpcord {
 
     fn add_guild(&mut self, data: &Value) {
         if let Some(mut guild) = guild_from_ready(data) {
+            if let Some(items) = guild.emojis.as_mut() {
+                items.retain(crate::expressions::Emoji::valid);
+                items.truncate(1000);
+            }
+            if let Some(items) = guild.stickers.as_mut() {
+                items.retain(crate::expressions::Sticker::valid);
+                items.truncate(500);
+            }
             // a later gateway update wins over an older metadata request.
             self.guild_details_attempted.remove(&guild.id);
             if let Some(existing) = self.store.guilds.iter_mut().find(|g| g.id == guild.id) {
@@ -1834,6 +2030,12 @@ impl Larpcord {
                 }
                 if data.get("roles").is_none() && properties.get("roles").is_none() {
                     guild.roles = existing.roles.clone();
+                }
+                if data.get("emojis").is_none() && properties.get("emojis").is_none() {
+                    guild.emojis = existing.emojis.clone();
+                }
+                if data.get("stickers").is_none() && properties.get("stickers").is_none() {
+                    guild.stickers = existing.stickers.clone();
                 }
                 *existing = guild;
             } else {
@@ -1946,13 +2148,7 @@ impl Larpcord {
                 div()
                     .id(SharedString::from(format!("unread-dm-{id}")))
                     .cursor_pointer()
-                    .child(
-                        channel
-                            .recipients
-                            .first()
-                            .map(|user| self.avatar(user, 40.))
-                            .unwrap_or_else(|| icon("user", 40.).into_any_element()),
-                    )
+                    .child(self.channel_avatar(channel, 40.))
                     .tooltip(move |_, cx| cx.new(|_| Hint(name.clone())).into())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.selected_guild = None;
@@ -2191,6 +2387,7 @@ impl Larpcord {
                 channel
                     .recipients
                     .first()
+                    .filter(|_| channel.kind == 1)
                     .and_then(|user| self.nameplate(user, None)),
                 |s, image| {
                     s.child(
@@ -2209,20 +2406,7 @@ impl Larpcord {
             .cursor_pointer()
             .bg(rgb(if selected { SURFACE } else { SIDEBAR }))
             .hover(|s| s.bg(rgb(SURFACE)))
-            .child(
-                channel
-                    .recipients
-                    .first()
-                    .map(|user| self.presence_avatar(user, 32.))
-                    .unwrap_or_else(|| {
-                        div()
-                            .size(px(28.))
-                            .rounded_full()
-                            .bg(rgb(SURFACE))
-                            .child("@")
-                            .into_any_element()
-                    }),
-            )
+            .child(self.channel_avatar(channel, 32.))
             .child(
                 column()
                     .flex_1()
@@ -2241,6 +2425,7 @@ impl Larpcord {
                                 channel
                                     .recipients
                                     .first()
+                                    .filter(|_| channel.kind == 1)
                                     .map(|user| {
                                         self.display_name(&channel.label(), user, None, false)
                                     })
@@ -2249,10 +2434,17 @@ impl Larpcord {
                                     }),
                             ),
                     )
+                    .when(channel.kind == 3, |s| {
+                        s.child(
+                            label(format!("{} members", channel.recipients.len() + 1))
+                                .text_size(px(11.)),
+                        )
+                    })
                     .when_some(
                         channel
                             .recipients
                             .first()
+                            .filter(|_| channel.kind == 1)
                             .and_then(|u| self.store.presences.get(&u.id))
                             .and_then(|p| p.activity.as_ref()),
                         |s, text| s.child(label(text.clone()).text_size(px(11.)).truncate()),
@@ -2623,7 +2815,7 @@ impl Larpcord {
 
     fn open_profile(&mut self, user: User, window: &mut Window, cx: &mut Context<Self>) {
         self.profile_inspector = false;
-        self.emoji_open = false;
+        self.close_picker();
         self.previous_focus = window.focused(cx);
         window.focus(&self.modal_focus);
         self.profile_error = None;
@@ -3026,9 +3218,8 @@ impl Larpcord {
             .border_color(rgb(LINE))
             .child(
                 channel
-                    .and_then(|c| c.recipients.first())
-                    .filter(|_| self.selected_guild.is_none())
-                    .map(|user| self.presence_avatar(user, 24.))
+                    .filter(|c| c.guild_id.is_none())
+                    .map(|c| self.channel_avatar(c, 24.))
                     .unwrap_or_else(|| {
                         icon(
                             crate::icons::channel_icon(channel.map_or(0, |c| c.kind)),
@@ -3052,8 +3243,8 @@ impl Larpcord {
                     })
                     .child(
                         channel
+                            .filter(|c| c.kind == 1)
                             .and_then(|c| c.recipients.first())
-                            .filter(|_| self.selected_guild.is_none())
                             .map(|user| self.display_name(&title, user, None, false))
                             .unwrap_or_else(|| div().child(title).into_any_element()),
                     ),
@@ -3068,19 +3259,25 @@ impl Larpcord {
                 )
             })
             .when(!has_topic, |s| s.child(div().flex_1()))
-            .when(channel.is_some_and(|c| c.guild_id.is_some()), |s| {
-                s.child(
-                    toolbar_button("toggle-members", "users", "Toggle member list").on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.members_open = !this.members_open;
-                            this.subscribe_members();
-                            cx.notify();
-                        }),
-                    ),
-                )
-            })
+            .when(
+                channel.is_some_and(|c| c.guild_id.is_some() || c.kind == 3),
+                |s| {
+                    s.child(
+                        toolbar_button("toggle-members", "users", "Toggle member list").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.members_open = !this.members_open;
+                                this.subscribe_members();
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                },
+            )
             .when_some(
-                channel.and_then(|c| c.recipients.first()).cloned(),
+                channel
+                    .filter(|c| c.kind == 1)
+                    .and_then(|c| c.recipients.first())
+                    .cloned(),
                 |s, user| {
                     s.child(
                         toolbar_button("conversation-profile", "user", "Toggle profile panel")
@@ -3199,6 +3396,7 @@ impl Larpcord {
                         })
                         .when(!self.typing.is_empty(), |s|s.child(self.typing_indicator()))
                         .when(self.reply_to.is_some(),|s|s.child(self.reply_banner(cx)))
+                        .when(self.selected_sticker.is_some(),|s|s.child(self.sticker_draft(cx)))
                         .when_some(self.failed_send.clone(), |s, (channel, content)| {
                             s.child(
                                 column()
@@ -3208,8 +3406,16 @@ impl Larpcord {
                                     .bg(rgb(PANEL))
                                     .child(label(format!(
                                         "Unsent: {}",
-                                        content.chars().take(160).collect::<String>()
+                                        if content.is_empty() {self.failed_sticker.as_ref().map(|s|s.name.clone()).unwrap_or_else(||"Sticker".into())} else {content.chars().take(160).collect::<String>()}
                                     )))
+                                    .when_some(self.failed_sticker.clone(),|s,sticker| {
+                                        let channel=channel.clone();
+                                        s.child(button("restore-unsent-sticker","Restore sticker").on_click(cx.listener(move |this,_,window,cx| {
+                                            this.choose_channel(channel.clone(),window,cx);
+                                            this.selected_sticker=Some(sticker.clone());
+                                            this.failed_sticker=None;this.failed_send=None;cx.notify();
+                                        })))
+                                    })
                                     .child(
                                         row()
                                             .gap_2()
@@ -3231,6 +3437,7 @@ impl Larpcord {
                                                         .is_some_and(|(id, _)| *id == channel)
                                                     {
                                                         this.failed_send = None;
+                                                        this.failed_sticker = None;
                                                     }
                                                     cx.notify();
                                                 }),
@@ -3248,7 +3455,9 @@ impl Larpcord {
                                 .border_color(rgb(LINE))
                                 .bg(rgb(SURFACE))
                                 .child(div().flex_1().min_w_0().child(self.composer.clone()))
-                                .child(toolbar_button("choose-emoji", "smile", "Select emoji").on_click(cx.listener(|this,_,window,cx|{this.emoji_open= !this.emoji_open;this.emoji_search.update(cx,|input,cx|input.set("",cx));if this.emoji_open {window.focus(&this.emoji_search.focus_handle(cx));}cx.notify();})))
+                                .child(toolbar_button("choose-gif", "gif", "Choose GIF").on_click(cx.listener(|this,_,window,cx|this.toggle_picker(crate::expressions::Tab::Gifs,window,cx))))
+                                .child(toolbar_button("choose-sticker", "sticker", "Choose sticker").on_click(cx.listener(|this,_,window,cx|this.toggle_picker(crate::expressions::Tab::Stickers,window,cx))))
+                                .child(toolbar_button("choose-emoji", "smile", "Choose emoji").on_click(cx.listener(|this,_,window,cx|this.toggle_picker(crate::expressions::Tab::Emoji,window,cx))))
                                 .child(
                                     toolbar_button("send", "send", "Send message")
                                     .text_color(rgb(if self.sending.is_some() { MUTED } else { ACCENT }))
@@ -3287,9 +3496,18 @@ impl Larpcord {
                     .min_h_0()
                     .items_start()
                     .child(content)
-                    .when(self.members_open && self.selected_guild.is_some(), |s| {
-                        s.child(self.member_rail(cx))
-                    })
+                    .when(
+                        self.members_open
+                            && (self.selected_guild.is_some()
+                                || channel.is_some_and(|c| c.kind == 3)),
+                        |s| {
+                            s.child(if channel.is_some_and(|c| c.kind == 3) {
+                                self.group_members(channel.unwrap(), cx)
+                            } else {
+                                self.member_rail(cx)
+                            })
+                        },
+                    )
                     .when_some(
                         self.profile.as_ref().filter(|_| self.profile_inspector),
                         |s, profile| s.child(self.profile_panel(profile, cx)),
@@ -3737,7 +3955,7 @@ impl Render for Larpcord {
             )
             .on_action(cx.listener(|this, _: &ClosePanel, window, cx| {
                 if this.emoji_open {
-                    this.emoji_open = false;
+                    this.close_picker();
                     window.focus(&this.composer.focus_handle(cx));
                     cx.notify();
                 } else if this.video.is_some() {
@@ -3809,6 +4027,46 @@ mod tests {
     use super::{Larpcord, Message, Page};
     use crate::network::{Envelope, Event};
     use gpui::{Context, Focusable, TestAppContext, Window};
+
+    #[gpui::test]
+    fn group_icon_updates_keep_the_group_identity_and_recipients(cx: &mut TestAppContext) {
+        let window = cx.add_window(|window, cx| Larpcord::with_preview(window, cx, true));
+        window.update(cx,|view,window,cx| {
+            view.dispatch("CHANNEL_CREATE",serde_json::json!({"id":"123","type":3,"name":"group","icon":"abc","recipients":[{"id":"456","username":"friend"}]}),window,cx);
+            view.dispatch("CHANNEL_UPDATE",serde_json::json!({"id":"123","icon":"def"}),window,cx);
+            let channel=&view.store.channels["123"];
+            assert_eq!(channel.kind,3);assert_eq!(channel.label(),"group");assert_eq!(channel.recipients.len(),1);
+            assert_eq!(crate::media::group_icon(&channel.id,channel.icon.as_deref()).unwrap(),"https://cdn.discordapp.com/channel-icons/123/def.webp?size=128");
+            view.dispatch("CHANNEL_UPDATE",serde_json::json!({"id":"123","icon":null}),window,cx);
+            assert!(view.store.channels["123"].icon.is_none());
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn a_profile_message_action_opens_a_dm_and_preserves_the_old_draft(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, point, px, size};
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx, |view, cx| {
+            view.composer
+                .update(cx, |input, cx| input.set("keep this server draft", cx));
+            view.profile = Some(crate::model::Profile {
+                user: view.store.users["moss"].clone(),
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        let target = cx.debug_bounds("profile-message").unwrap().center();
+        cx.simulate_click(target, Modifiers::default());
+        cx.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(view.profile.is_none());
+            assert_eq!(view.selected_channel.as_deref(), Some("sample-dm-moss"));
+            assert_eq!(view.drafts["campfire"], "keep this server draft");
+        });
+    }
 
     #[gpui::test]
     fn compact_chrome_aligns_with_the_conversation_and_its_controls_stay_clickable(
