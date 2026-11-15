@@ -3816,6 +3816,10 @@ mod tests {
     ) {
         use gpui::{Modifiers, point, px, size};
         let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx, |view, cx| {
+            // exercise the custom platform controls even when this test runs on macos.
+            let _ = view.window_controls(cx);
+        });
         cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
             view.clone()
         });

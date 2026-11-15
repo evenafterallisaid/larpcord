@@ -54,6 +54,15 @@ pub(super) fn toolbar_button(
     name: &'static str,
     hint: &'static str,
 ) -> Stateful<Div> {
+    toolbar_button_hover(id, name, hint, SURFACE)
+}
+
+fn toolbar_button_hover(
+    id: &'static str,
+    name: &'static str,
+    hint: &'static str,
+    hover_color: u32,
+) -> Stateful<Div> {
     row()
         .id(id)
         .debug_selector(move || id.into())
@@ -63,7 +72,7 @@ pub(super) fn toolbar_button(
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .cursor_pointer()
         .text_color(rgb(MUTED))
-        .hover(|s| s.bg(rgb(SURFACE)).text_color(rgb(TEXT)))
+        .hover(move |s| s.bg(rgb(hover_color)).text_color(rgb(TEXT)))
         .child(icon(name, 20.))
         .tooltip(move |_, cx| cx.new(|_| Hint(hint.into())).into())
 }
@@ -166,34 +175,39 @@ impl Larpcord {
                     .on_click(cx.listener(|this, _, window, cx| this.open_settings(1, window, cx))),
             )
             .when(!cfg!(target_os = "macos"), |s| {
-                s.child(div().w(px(8.))).children([
-                    toolbar_button("minimize", "minus", "Minimize")
-                        .w(px(40.))
-                        .h(px(32.))
-                        .rounded_none()
-                        .on_click(|_, window, _| window.minimize_window())
-                        .into_any_element(),
-                    toolbar_button("maximize", "maximize", "Maximize")
-                        .w(px(40.))
-                        .h(px(32.))
-                        .rounded_none()
-                        .on_click(|_, window, _| window.zoom_window())
-                        .into_any_element(),
-                    toolbar_button("close-window", "close", "Close")
-                        .w(px(40.))
-                        .h(px(32.))
-                        .rounded_none()
-                        .hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(TEXT)))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if this.settings.keep_connected {
-                                window.minimize_window();
-                            } else {
-                                cx.quit();
-                            }
-                        }))
-                        .into_any_element(),
-                ])
+                s.child(self.window_controls(cx))
             })
+            .into_any_element()
+    }
+    pub(super) fn window_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        row()
+            .ml_2()
+            .children([
+                toolbar_button("minimize", "minus", "Minimize")
+                    .w(px(40.))
+                    .h(px(32.))
+                    .rounded_none()
+                    .on_click(|_, window, _| window.minimize_window())
+                    .into_any_element(),
+                toolbar_button("maximize", "maximize", "Maximize")
+                    .w(px(40.))
+                    .h(px(32.))
+                    .rounded_none()
+                    .on_click(|_, window, _| window.zoom_window())
+                    .into_any_element(),
+                toolbar_button_hover("close-window", "close", "Close", 0xda373c)
+                    .w(px(40.))
+                    .h(px(32.))
+                    .rounded_none()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.settings.keep_connected {
+                            window.minimize_window();
+                        } else {
+                            cx.quit();
+                        }
+                    }))
+                    .into_any_element(),
+            ])
             .into_any_element()
     }
     pub(super) fn account_bar(&self, cx: &mut Context<Self>) -> AnyElement {
