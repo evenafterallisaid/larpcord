@@ -10,6 +10,7 @@ pub struct Settings {
     pub remember_session: bool,
     pub compact: bool,
     pub animations: bool,
+    pub recent_emoji: Vec<String>,
 }
 
 impl Default for Settings {
@@ -21,6 +22,7 @@ impl Default for Settings {
             remember_session: true,
             compact: false,
             animations: true,
+            recent_emoji: Vec::new(),
         }
     }
 }
@@ -32,10 +34,15 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        Self::path()
+        let mut settings: Self = Self::path()
             .and_then(|path| fs::read(path).ok())
             .and_then(|data| serde_json::from_slice(&data).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        settings
+            .recent_emoji
+            .retain(|s| s.len() <= 128 && !s.chars().any(char::is_control));
+        settings.recent_emoji.truncate(32);
+        settings
     }
 
     pub fn save(&self) -> anyhow::Result<()> {

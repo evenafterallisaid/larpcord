@@ -32,6 +32,29 @@ pub fn cdn_url(value: &str) -> bool {
         })
 }
 
+pub fn gif_preview(value: &str) -> bool {
+    value.len() <= 2048
+        && reqwest::Url::parse(value).ok().is_some_and(|url| {
+            url.scheme() == "https"
+                && url.port_or_known_default() == Some(443)
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.host_str().is_some_and(|h| {
+                    matches!(
+                        h,
+                        "media.tenor.com"
+                            | "c.tenor.com"
+                            | "static.klipy.com"
+                            | "static1.klipy.com"
+                            | "static2.klipy.com"
+                    )
+                })
+                && [".gif", ".png", ".jpg", ".jpeg", ".webp"]
+                    .iter()
+                    .any(|ext| url.path().ends_with(ext))
+        })
+}
+
 pub fn avatar(id: &str, hash: Option<&str>) -> Option<String> {
     let hash = hash?;
     if id.is_empty()
@@ -45,6 +68,24 @@ pub fn avatar(id: &str, hash: Option<&str>) -> Option<String> {
     }
     Some(format!(
         "https://cdn.discordapp.com/avatars/{id}/{hash}.webp?size=128"
+    ))
+}
+
+pub fn group_icon(id: &str, hash: Option<&str>) -> Option<String> {
+    let hash = hash?;
+    if id.is_empty()
+        || id.len() > 20
+        || !id.bytes().all(|b| b.is_ascii_digit())
+        || hash.is_empty()
+        || hash.len() > 128
+        || !hash
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || b == b'a' || b == b'_')
+    {
+        return None;
+    }
+    Some(format!(
+        "https://cdn.discordapp.com/channel-icons/{id}/{hash}.webp?size=128"
     ))
 }
 
@@ -71,14 +112,23 @@ pub fn sticker(id: &str, format: u8, motion: bool) -> Option<String> {
 fn identity_asset(url: &str) -> bool {
     reqwest::Url::parse(url).ok().is_some_and(|url| {
         let path = url.path();
-        ["/avatars/", "/icons/", "/emojis/"]
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
+        [
+            "/avatars/",
+            "/icons/",
+            "/emojis/",
+            "/channel-icons/",
+            "/badge-icons/",
+        ]
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
             || path.contains("/avatars/")
     })
 }
 
 fn decode_bounds(url: &str) -> (u32, u32) {
+    if gif_preview(url) {
+        return (224, 160);
+    }
     if url.contains("#motion") {
         (128, 192)
     } else if url.contains("/media/v1/collectibles-shop/")
@@ -87,7 +137,11 @@ fn decode_bounds(url: &str) -> (u32, u32) {
         (480, 640)
     } else if url.contains("/stickers/") {
         (192, 192)
-    } else if url.contains("/icons/") || url.contains("/emojis/") {
+    } else if url.contains("/icons/")
+        || url.contains("/emojis/")
+        || url.contains("/channel-icons/")
+        || url.contains("/badge-icons/")
+    {
         (128, 128)
     } else if identity_asset(url) {
         (256, 256)
@@ -262,7 +316,7 @@ impl Media {
 
     // requests happen only for rendered rows. failed images retry on a later render, without a timer.
     pub fn get(&self, url: &str) -> Option<Arc<RenderImage>> {
-        if !cdn_url(url) {
+        if !cdn_url(url) && !gif_preview(url) {
             return None;
         }
         let mut cache = self.cache.borrow_mut();
@@ -402,7 +456,7 @@ impl Media {
 }
 
 async fn download(client: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
-    if !cdn_url(url) {
+    if !cdn_url(url) && !gif_preview(url) {
         return None;
     }
     let mut response = client

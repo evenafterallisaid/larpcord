@@ -1,6 +1,78 @@
 use super::*;
 
 impl Larpcord {
+    pub(super) fn group_members(&self, channel: &Channel, cx: &mut Context<Self>) -> AnyElement {
+        let mut users = channel.recipients.clone();
+        if !users.iter().any(|u| u.id == self.store.user.id) {
+            users.push(self.store.user.clone());
+        }
+        users.sort_by_cached_key(|u| u.name().to_lowercase());
+        column()
+            .w(px(240.))
+            .h_full()
+            .flex_shrink_0()
+            .bg(rgb(SIDEBAR))
+            .border_l_1()
+            .border_color(rgb(LINE))
+            .child(
+                label(format!("MEMBERS · {}", users.len()))
+                    .px_4()
+                    .pt_4()
+                    .pb_2()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
+            .child(
+                uniform_list(
+                    "group-members",
+                    users.len(),
+                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                        range
+                            .map(|index| {
+                                let user = users[index].clone();
+                                let clicked = user.clone();
+                                div()
+                                    .px_2()
+                                    .child(
+                                        row()
+                                            .id(SharedString::from(format!(
+                                                "group-member-{}",
+                                                user.id
+                                            )))
+                                            .h(px(44.))
+                                            .px_2()
+                                            .gap_3()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(rgb(SURFACE)))
+                                            .child(this.presence_avatar(&user, 32.))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .truncate()
+                                                    .text_size(px(14.))
+                                                    .child(this.display_name(
+                                                        user.name(),
+                                                        &user,
+                                                        None,
+                                                        false,
+                                                    )),
+                                            )
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.open_profile(clicked.clone(), window, cx)
+                                            })),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .flex_1()
+                .min_h_0(),
+            )
+            .into_any_element()
+    }
     pub(super) fn subscribe_members(&mut self) {
         let Some(channel) = self
             .selected_channel
