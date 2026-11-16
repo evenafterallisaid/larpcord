@@ -14,10 +14,16 @@ impl Larpcord {
             .unwrap_or(profile.mutual_friends.len() as u32);
         let servers = profile.mutual_guilds.as_ref().map_or(0, Vec::len);
         column()
+            .id("profile-tabs")
+            .debug_selector(|| "profile-tabs".into())
+            .w_full()
+            .h(px(68.))
             .flex_shrink_0()
             .gap_2()
             .child(
                 row()
+                    .h(px(20.))
+                    .flex_shrink_0()
                     .gap_2()
                     .children(
                         profile
@@ -48,7 +54,9 @@ impl Larpcord {
                                 .debug_selector(move || format!("profile-tab-{tab}"))
                                 .min_w_0()
                                 .flex_1()
-                                .py_2()
+                                .h(px(36.))
+                                .line_height(px(34.))
+                                .flex_shrink_0()
                                 .text_center()
                                 .text_size(px(11.))
                                 .cursor_pointer()
@@ -272,7 +280,10 @@ impl Larpcord {
                     hash,
                 )
             })
-            .and_then(|url| self.media.get(&url));
+            .and_then(|url| {
+                self.media
+                    .get(&crate::media::motion_url(url, self.motion()))
+            });
         let mut roles = self
             .profile_guild
             .as_ref()
@@ -454,7 +465,7 @@ impl Larpcord {
                                     .bg(rgb(profile.accent()))
                                     .when_some(banner, |s, image| {
                                         s.child(
-                                            img(image)
+                                            img(image.clone()).id(("profile-banner-image",image.id.0))
                                                 .absolute()
                                                 .inset_0()
                                                 .size_full()
@@ -568,10 +579,12 @@ impl Larpcord {
                                         ))
                                     })
                                     .child(self.profile_tabs(profile, cx))
-                                    .when(self.profile_tab != 0 && user.id != self.store.user.id, |s| {
+                                    .child(column().id("profile-tab-body").debug_selector(||"profile-tab-body".into())
+                                        .w_full().flex_1().min_h_0().overflow_hidden()
+                                            .when(self.profile_tab != 0 && user.id != self.store.user.id, |s| {
                                         s.child(self.profile_mutuals(profile, cx))
                                     })
-                                    .when(self.profile_tab == 0 || user.id == self.store.user.id, |s| {
+                                            .when(self.profile_tab == 0 || user.id == self.store.user.id, |s| {
                                         s.child(
                                             column()
                                                 .id("profile-about-scroll")
@@ -672,6 +685,7 @@ impl Larpcord {
                                                 }),
                                         )
                                     })
+                                    )
                                     .when_some(effect_title, |s, title| {
                                         s.child(label(title).text_size(px(10.)))
                                     })
@@ -737,8 +751,7 @@ impl Larpcord {
                                     })),
                             ),
                     )
-                    .children(front)
-                    .map(|s| rise_in(s, "profile-card-rise", self.motion())),
+                    .children(front),
             )
             .map(|element| {
                 fade_in(

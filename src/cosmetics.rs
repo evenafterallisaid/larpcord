@@ -24,6 +24,35 @@ impl NameStyle {
             _ => "Inter",
         }
     }
+    pub fn animated(&self) -> bool {
+        !self.colors.is_empty() && matches!(self.effect_id, Some(2 | 3 | 6 | 7 | 8))
+    }
+    pub fn color_at_time(&self, position: f32, phase: f32, fallback: u32) -> u32 {
+        let phase = if phase.is_finite() {
+            phase.rem_euclid(1.)
+        } else {
+            0.
+        };
+        let position = if matches!(self.effect_id, Some(2 | 7 | 8)) {
+            let wave = (position + phase * 2.).rem_euclid(2.);
+            if wave > 1. { 2. - wave } else { wave }
+        } else {
+            position
+        };
+        let color = self.color_at(position, fallback);
+        if self.effect_id == Some(8) {
+            let shine = (phase * std::f32::consts::TAU + position * 2.)
+                .sin()
+                .max(0.)
+                * 0.22;
+            [16, 8, 0].into_iter().fold(0, |out, shift| {
+                let channel = ((color >> shift) & 255) as f32;
+                out | (((channel + (255. - channel) * shine).round() as u32) << shift)
+            })
+        } else {
+            color
+        }
+    }
     pub fn color_at(&self, position: f32, fallback: u32) -> u32 {
         if self.colors.is_empty() {
             return fallback;
@@ -174,6 +203,34 @@ pub fn register_fonts(cx: &gpui::App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn name_motion_changes_paint_without_changing_text_or_unknown_effects() {
+        let style = NameStyle {
+            effect_id: Some(7),
+            colors: vec![0xff0000, 0x0000ff],
+            ..Default::default()
+        };
+        assert_ne!(
+            style.color_at_time(0.2, 0., 0),
+            style.color_at_time(0.2, 0.25, 0)
+        );
+        assert_eq!(
+            style.color_at_time(0.2, 0., 0),
+            style.color_at_time(0.2, 1., 0)
+        );
+        assert_eq!(
+            style.color_at_time(0.2, f32::NAN, 0),
+            style.color_at_time(0.2, 0., 0)
+        );
+        assert!(
+            !NameStyle {
+                effect_id: Some(90),
+                colors: vec![1],
+                ..Default::default()
+            }
+            .animated()
+        );
+    }
     #[test]
     fn styles_keep_unicode_and_unknown_values_safe() {
         let style: NameStyle = serde_json::from_value(

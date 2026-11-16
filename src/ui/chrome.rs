@@ -115,7 +115,9 @@ impl Larpcord {
             None,
             None,
             size,
-            false,
+            self.hovered_name.as_deref().is_some_and(|key| {
+                key == format!("dm-user-{}", user.id) || key == format!("member-{}", user.id)
+            }),
             self.store.presences.get(&user.id).map(|p| {
                 (
                     p.status.as_str(),

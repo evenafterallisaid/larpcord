@@ -5,7 +5,7 @@
 
 this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the current published preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.2.0-dev.12).
 
-**0.2.0-dev.12 is a development preview.** this release adds sharper streaming gifs, click-to-send picks, account emoji recents, inline composer emoji, smoother navigation and more stable profiles. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
+**0.2.0-dev.13 is a development preview.** this build adds synced sticker recents, clean linked-image tiles, steadier profile tabs, animated identity assets and native name motion, plus the first opt-in modules host. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
 
 ## what works in this milestone
 
@@ -18,13 +18,14 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 - image attachments, png/apng/gif stickers, static custom emoji, a tabbed picker for unicode/server emoji, searchable GIFs and server/standard sticker packs, markdown, bot embeds and components v2 layouts
 - ordinary and super reaction displays, separate counts, your-reaction highlighting, native burst/hover animation and live add/remove updates
 - a collapsible channel list, bounded on-demand member sidebar with roles and presence, and a floating translucent jump-to-latest control with quick fades, smooth scrolling and subtle edge rebound
-- gif-only messages use clean media tiles without the repeated url or embed border; replies show a compact gif label
+- standalone image and gif links use clean media tiles without the repeated url or embed border; replies show a compact gif label
 - aligned member portrait columns with and without nameplates, including loading rows
 - contained message hover controls with quick account-ranked reactions, an emoji submenu, reply/copy/profile actions and matching right-click menus
 - bot buttons and string selectors through discord interactions, plus explicit link controls
 - a nonblocking dm profile inspector, expandable full profiles, live presence/activity, badge artwork, a direct-message action, clickable mutual friend/server lists, profile theme colors and overlapping avatars, banners, biographies, pronouns, server identity, decorations, layered frames, bounded effects and role chips
 - server icons, banners and group chat icons, saved server order and folders, unread/mention badges, a flat single-color home mark and custom typing indicators
 - silent, bounded gifv autoplay and image gif/apng motion; click-to-play video attachments, cdn video embeds and components v2 video galleries, with a native viewer, seeking, volume and mute
+- opt-in local [modules](docs/modules.md) with reviewed permissions, bounded message-label and theme hooks, enable/disable and reload controls
 - floating settings with mouse, scroll and keyboard isolation; charcoal, onyx, midnight and rose themes with a semantic custom-theme token file
 - gateway heartbeats, acknowledgement checks, session resume, reconnection backoff and automatic retry after a transient startup failure
 - desktop notifications for direct messages, mentions and incoming call signals
@@ -33,7 +34,7 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 
 clicking a gif sends it immediately as its own message, while preserving your text and staged sticker. emoji and stickers still go into the composer for review before sending. local emoji, sticker and gif history survives restarts. the emoji picker also reads the account’s synced message/reaction rankings, so saved official-client and kawaicord usage carries over. selections made here are prioritized locally; pending usage not yet saved by the other client is unavailable. custom emoji render inline in the composer while the send payload retains native markup. the gif selector also reads discord favorites and offers explicit star changes without replacing unrelated saved records. sticker messages use native sticker ids and preserve per-channel drafts; png/apng/gif artwork is supported, while lottie artwork currently uses a named placeholder.
 
-voice and video calls, email/password login, quest integration and javascript plugin compatibility are future work. normal reactions can be added or removed using quick actions, the emoji picker or existing reaction chips. original discord nitro animation assets and lottie sticker playback are not implemented yet. incoming call notifications are informational until native voice is implemented. this milestone adds native qr login through discord mobile, with manual session entry retained under advanced sign-in. the ui never reads a token from another application. the live qr handshake passed on 2026-11-12. the user has also confirmed account access and real message delivery; the exact sign-in route was not separately recorded.
+voice and video calls, email/password login, quest integration and javascript plugin compatibility are future work. normal reactions can be added or removed using quick actions, the emoji picker or existing reaction chips. native nitro name motion approximates the effect ids; exact proprietary shader parity and lottie sticker playback are not implemented yet. incoming call notifications are informational until native voice is implemented. this milestone adds native qr login through discord mobile, with manual session entry retained under advanced sign-in. the ui never reads a token from another application. the live qr handshake passed on 2026-11-12. the user has also confirmed account access and real message delivery; the exact sign-in route was not separately recorded.
 
 ## run it
 

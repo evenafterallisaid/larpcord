@@ -188,7 +188,7 @@ impl Larpcord {
         if self.preview {
             return;
         }
-        if self.picker.tab == Tab::Emoji
+        if self.picker.tab != Tab::Gifs
             && !self.picker.recents_loading
             && self
                 .picker
@@ -429,6 +429,44 @@ impl Larpcord {
         recent.extend(choices);
         recent
     }
+    pub(super) fn load_recent_stickers(&mut self) {
+        if self.preview {
+            return;
+        }
+        self.picker
+            .sticker_attempts
+            .retain(|_, time| time.elapsed() < std::time::Duration::from_secs(60));
+        let ids = self
+            .picker
+            .account_stickers
+            .iter()
+            .take(32)
+            .filter(|id| {
+                !self.picker.sticker_details.contains_key(*id)
+                    && !self.settings.recent_stickers.iter().any(|s| &s.id == *id)
+                    && !self
+                        .store
+                        .guilds
+                        .iter()
+                        .any(|g| g.stickers.iter().flatten().any(|s| &s.id == *id))
+                    && !self
+                        .picker
+                        .packs
+                        .iter()
+                        .any(|p| p.stickers.iter().any(|s| &s.id == *id))
+                    && !self.picker.sticker_attempts.contains_key(*id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !ids.is_empty() && self.picker.sticker_attempts.len() + ids.len() <= 128 {
+            self.picker.sticker_attempts.extend(
+                ids.iter()
+                    .cloned()
+                    .map(|id| (id, std::time::Instant::now())),
+            );
+            self.command(Command::StickerDetails(ids));
+        }
+    }
     fn sticker_choices(&self, cx: &Context<Self>) -> Vec<StickerChoice> {
         let query = self.emoji_search.read(cx).content.to_lowercase();
         let mut choices = Vec::new();
@@ -466,21 +504,30 @@ impl Larpcord {
                 }
             }
         }
+        let mut seen = HashSet::new();
         let mut recent = self
-            .settings
-            .recent_stickers
+            .picker
+            .session_stickers
             .iter()
+            .chain(&self.picker.account_stickers)
+            .chain(self.settings.recent_stickers.iter().map(|s| &s.id))
+            .filter(|id| seen.insert((*id).clone()))
+            .filter_map(|id| {
+                choices
+                    .iter()
+                    .find(|c| &c.sticker.id == id)
+                    .map(|c| &c.sticker)
+                    .or_else(|| self.picker.sticker_details.get(id))
+                    .or_else(|| self.settings.recent_stickers.iter().find(|s| &s.id == id))
+            })
             .filter(|s| {
                 query.is_empty()
                     || s.name.to_lowercase().contains(&query)
                     || s.tags.to_lowercase().contains(&query)
             })
+            .take(32)
             .map(|sticker| StickerChoice {
-                sticker: choices
-                    .iter()
-                    .find(|c| c.sticker.id == sticker.id)
-                    .map(|c| c.sticker.clone())
-                    .unwrap_or_else(|| sticker.clone()),
+                sticker: sticker.clone(),
                 source: "Recently used".into(),
                 scope: "recent".into(),
             })
@@ -759,6 +806,9 @@ impl Larpcord {
                     }))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if sticker.available != Some(false) {
+                            this.picker.session_stickers.retain(|id| id != &sticker.id);
+                            this.picker.session_stickers.insert(0, sticker.id.clone());
+                            this.picker.session_stickers.truncate(32);
                             this.settings.recent_stickers.retain(|s| s.id != sticker.id);
                             this.settings.recent_stickers.insert(0, sticker.clone());
                             this.settings.sanitize_recents();
@@ -1254,6 +1304,66 @@ mod tests {
     use crate::network::{Envelope, Event};
     use gpui::{Modifiers, TestAppContext, point, px, size};
 
+    #[gpui::test]
+    fn account_stickers_resolve_metadata_and_merge_session_usage_without_duplicates(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|window, cx| Larpcord::with_preview(window, cx, true));
+        window
+            .update(cx, |view, window, cx| {
+                view.store.guilds.clear();
+                view.settings.recent_stickers.clear();
+                view.picker.packs.clear();
+                view.receive(
+                    Envelope {
+                        generation: 0,
+                        event: Event::EmojiRecents(Ok(crate::gif_favorites::Recents {
+                            stickers: vec!["123".into(), "456".into()],
+                            ..Default::default()
+                        })),
+                    },
+                    window,
+                    cx,
+                );
+                let sticker = |id: &str| crate::expressions::Sticker {
+                    id: id.into(),
+                    name: format!("sticker-{id}"),
+                    format_type: 1,
+                    ..Default::default()
+                };
+                view.receive(
+                    Envelope {
+                        generation: 0,
+                        event: Event::StickerDetails(vec![sticker("123"), sticker("456")]),
+                    },
+                    window,
+                    cx,
+                );
+                view.settings.recent_stickers = vec![sticker("456"), sticker("789")];
+                let choices = view.sticker_choices(cx);
+                assert_eq!(
+                    choices
+                        .iter()
+                        .filter(|c| c.scope == "recent")
+                        .map(|c| c.sticker.id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["123", "456", "789"]
+                );
+                view.picker.session_stickers = vec!["456".into()];
+                let choices = view.sticker_choices(cx);
+                assert_eq!(
+                    choices
+                        .iter()
+                        .map(|c| c.sticker.id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["456", "123", "789"]
+                );
+                view.emoji_search
+                    .update(cx, |input, cx| input.set("sticker-123", cx));
+                assert_eq!(view.sticker_choices(cx).len(), 1);
+            })
+            .unwrap();
+    }
     #[gpui::test]
     fn account_recents_resolve_unicode_and_custom_ids_before_guild_catalogs_load(
         cx: &mut TestAppContext,

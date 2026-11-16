@@ -329,6 +329,48 @@ pub(super) fn embed_gif(embed: &crate::model::Embed) -> Option<GifEmbed<'_>> {
     }
     None
 }
+/// Only bare image links become media tiles. Rich bot cards retain their content.
+pub(super) fn embed_image(embed: &crate::model::Embed) -> Option<&crate::model::EmbedMedia> {
+    if embed.video.is_some()
+        || embed.description.is_some()
+        || !embed.fields.is_empty()
+        || embed.author.is_some()
+        || embed.footer.is_some()
+        || !(embed.kind == "image" || (embed.kind.is_empty() && embed.title.is_none()))
+    {
+        return None;
+    }
+    embed
+        .image
+        .as_ref()
+        .or(embed.thumbnail.as_ref())
+        .filter(|image| image_source(image).is_some())
+}
+pub(super) fn image_source(image: &crate::model::EmbedMedia) -> Option<&str> {
+    image
+        .proxy_url
+        .as_deref()
+        .filter(|u| crate::media::cdn_url(u))
+        .or_else(|| image.url.as_deref().filter(|u| crate::media::cdn_url(u)))
+}
+pub(super) fn media_only(message: &Message) -> bool {
+    if message.flags & 4 != 0 {
+        return false;
+    }
+    let text = message.content.trim();
+    !text.is_empty()
+        && message.embeds.iter().any(|embed| {
+            (embed_gif(embed).is_some() || embed_image(embed).is_some())
+                && (embed.url.as_deref() == Some(text)
+                    || [embed.image.as_ref(), embed.thumbnail.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|image| {
+                            image.url.as_deref() == Some(text)
+                                || image.proxy_url.as_deref() == Some(text)
+                        }))
+        })
+}
 pub(super) fn gif_only(message: &Message) -> bool {
     message.flags & 4 == 0 && gif_link(&message.content, &message.embeds)
 }
@@ -456,6 +498,29 @@ mod tests {
         assert!(!gif_only(&message));
         message.embeds.clear();
         assert!(!gif_only(&message));
+    }
+    #[::core::prelude::v1::test]
+    fn linked_images_are_plain_tiles_but_rich_embeds_and_suppressed_links_stay_intact() {
+        let mut m:Message=serde_json::from_value(serde_json::json!({"id":"1","channel_id":"campfire","author":{"id":"2"},"content":"https://example.com/cat.png","embeds":[{"type":"image","url":"https://example.com/cat.png","thumbnail":{"url":"https://example.com/cat.png","proxy_url":"https://images-ext-1.discordapp.net/external/hash/cat.png","width":200,"height":100}}]})).unwrap();
+        assert!(super::media_only(&m));
+        assert!(super::embed_image(&m.embeds[0]).is_some());
+        m.content.insert_str(0, "look ");
+        assert!(!super::media_only(&m));
+        m.content = "https://example.com/cat.png".into();
+        m.flags = 4;
+        assert!(!super::media_only(&m));
+        m.flags = 0;
+        m.embeds[0].kind = "rich".into();
+        m.embeds[0].description = Some("bot help".into());
+        assert!(!super::media_only(&m));
+        assert!(super::embed_image(&m.embeds[0]).is_none());
+        m.embeds[0].description = None;
+        m.embeds[0].kind = "image".into();
+        m.embeds[0].thumbnail.as_mut().unwrap().proxy_url = None;
+        assert!(
+            !super::media_only(&m),
+            "a link without an approved image source must remain visible"
+        );
     }
     #[gpui::test]
     fn clicking_a_gif_sends_only_the_gif_and_preserves_the_composer(cx: &mut TestAppContext) {
