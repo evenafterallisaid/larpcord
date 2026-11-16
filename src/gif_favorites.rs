@@ -284,6 +284,60 @@ impl Favorites {
             && rest(self) == rest(old)
     }
 }
+/// Read the two normal-client emoji rankings. This path never writes settings.
+pub fn emoji_recents(value: &serde_json::Value) -> Result<(Vec<String>, Vec<String>), String> {
+    let read = || -> Option<(Vec<String>, Vec<String>)> {
+        let encoded = value["settings"].as_str()?;
+        if encoded.len() > 6 * 1024 * 1024 || value["out_of_date"].as_bool() == Some(true) {
+            return None;
+        }
+        let root = fields(&STANDARD.decode(encoded).ok()?)?;
+        let rank = |tag| -> Option<Vec<String>> {
+            let Some(tree) = unique(&root, tag, 2)? else {
+                return Some(vec![]);
+            };
+            if tree.data.len() > 512 * 1024 {
+                return None;
+            }
+            let mut entries = BTreeMap::new();
+            for f in fields(&tree.data)?
+                .into_iter()
+                .filter(|f| f.tag == 1 && f.wire == 2)
+                .take(2048)
+            {
+                let Some(entry) = fields(&f.data) else {
+                    continue;
+                };
+                let Some(Some(key)) = unique(&entry, 1, 2) else {
+                    continue;
+                };
+                let Ok(key) = String::from_utf8(key.data.clone()) else {
+                    continue;
+                };
+                if key.is_empty() || key.len() > 64 || key.chars().any(char::is_control) {
+                    continue;
+                }
+                let Some(Some(item)) = unique(&entry, 2, 2) else {
+                    continue;
+                };
+                let Some(item) = fields(&item.data) else {
+                    continue;
+                };
+                let score = unique(&item, 4, 0)?.map_or(0, |f| f.number as i32);
+                let uses = unique(&item, 1, 0)?.map_or(0, |f| f.number);
+                entries.insert(key, (score, uses));
+            }
+            let mut ranked = entries.into_iter().collect::<Vec<_>>();
+            ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            Some(ranked.into_iter().take(64).map(|(k, _)| k).collect())
+        };
+        Some((rank(6)?, rank(13)?))
+    };
+    read().ok_or_else(|| {
+        "Could not load Discord's recent emoji. Local recents are still available.".into()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +348,31 @@ mod tests {
         blob(1, &v, &mut root);
         root.extend_from_slice(body);
         serde_json::json!({"settings":STANDARD.encode(root)})
+    }
+    #[test]
+    fn account_emoji_rankings_keep_message_and_reaction_history_separate() {
+        let subtree = |keys: &[(&str, u64)]| {
+            let mut out = vec![];
+            for (key, score) in keys {
+                let mut entry = vec![];
+                blob(1, key.as_bytes(), &mut entry);
+                let mut value = vec![];
+                integer(4, *score, &mut value);
+                integer(1, 2, &mut value);
+                blob(2, &value, &mut entry);
+                blob(1, &entry, &mut out);
+            }
+            out
+        };
+        let mut root = vec![];
+        blob(6, &subtree(&[("sob", 1), ("123", 9)]), &mut root);
+        blob(13, &subtree(&[("heart", 8)]), &mut root);
+        blob(99, b"unknown", &mut root);
+        let value = serde_json::json!({"settings":STANDARD.encode(&root)});
+        let (messages, reactions) = emoji_recents(&value).unwrap();
+        assert_eq!(messages, vec!["123", "sob"]);
+        assert_eq!(reactions, vec!["heart"]);
+        assert_eq!(value["settings"].as_str().unwrap(), STANDARD.encode(&root));
     }
     #[test]
     fn favorite_changes_preserve_unknown_entries_and_fail_closed() {

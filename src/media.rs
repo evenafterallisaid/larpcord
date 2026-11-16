@@ -8,6 +8,8 @@ use std::{
 
 use gpui::RenderImage;
 use image::{AnimationDecoder, Frame, ImageDecoder, ImageReader};
+#[path = "media/animation.rs"]
+pub mod animation;
 #[path = "media/disk.rs"]
 mod disk;
 
@@ -133,7 +135,7 @@ fn decode_bounds(url: &str) -> (u32, u32) {
         return (640, 128);
     }
     if gif_preview(url) {
-        return (224, 160);
+        return (400, 264);
     }
     if url.contains("#motion") {
         (128, 192)
@@ -501,6 +503,44 @@ async fn download(client: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
 }
 
 fn decode(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
+    if bytes.len() <= 512 * 1024
+        && std::str::from_utf8(&bytes).ok().is_some_and(|s| {
+            s.trim_start().starts_with("<svg")
+                || (s.trim_start().starts_with("<?xml") && s.contains("<svg"))
+        })
+    {
+        let options = resvg::usvg::Options {
+            image_href_resolver: resvg::usvg::ImageHrefResolver {
+                resolve_data: Box::new(|_, _, _| None),
+                resolve_string: Box::new(|_, _| None),
+            },
+            ..Default::default()
+        };
+        let tree = resvg::usvg::Tree::from_data(&bytes, &options).ok()?;
+        let source = tree.size();
+        if source.width() > 8192. || source.height() > 8192. {
+            return None;
+        }
+        let scale = (bounds.0 as f32 / source.width())
+            .min(bounds.1 as f32 / source.height())
+            .min(1.);
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(
+            (source.width() * scale).ceil().max(1.) as u32,
+            (source.height() * scale).ceil().max(1.) as u32,
+        )?;
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
+        let mut pixels = Vec::with_capacity(pixmap.data().len());
+        for pixel in pixmap.pixels() {
+            let c = pixel.demultiply();
+            pixels.extend_from_slice(&[c.blue(), c.green(), c.red(), c.alpha()]);
+        }
+        let image = image::RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixels)?;
+        return Some(Arc::new(RenderImage::new(vec![Frame::new(image)])));
+    }
     let mut reader = ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
         .ok()?;
@@ -509,7 +549,8 @@ fn decode(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
-    let image = reader.decode().ok()?.thumbnail(bounds.0, bounds.1);
+    let image = reader.decode().ok()?;
+    let image = image.thumbnail(bounds.0.min(image.width()), bounds.1.min(image.height()));
     let mut pixels = image.into_rgba8();
     for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
@@ -569,8 +610,9 @@ fn decode_motion(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>>
     for frame in frames {
         let frame = frame.ok()?;
         let delay = frame.delay();
-        let pixels = image::DynamicImage::ImageRgba8(frame.into_buffer())
-            .thumbnail(bounds.0, bounds.1)
+        let image = image::DynamicImage::ImageRgba8(frame.into_buffer());
+        let pixels = image
+            .thumbnail(bounds.0.min(image.width()), bounds.1.min(image.height()))
             .into_rgba8();
         total += pixels.len();
         if decoded.len() >= 120 || total > 4 * 1024 * 1024 {
@@ -630,6 +672,15 @@ pub fn member_avatar(guild: &str, user: &str, hash: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn badge_svg_rasterization_is_bounded_and_keeps_alpha() {
+        let svg=br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><circle cx="50" cy="50" r="45" fill="red"/></svg>"#.to_vec();
+        let image = decode(svg, (32, 32)).unwrap();
+        assert_eq!(image.size(0).width.0, 32);
+        assert_eq!(image.size(0).height.0, 32);
+        assert_eq!(image.as_bytes(0).unwrap()[3], 0);
+        assert_eq!(image.as_bytes(0).unwrap()[(16 * 32 + 16) * 4 + 2], 255);
+    }
     #[test]
     fn portraits_do_not_queue_behind_attachments_or_large_cosmetics() {
         let (tx, content) = async_channel::bounded(1);

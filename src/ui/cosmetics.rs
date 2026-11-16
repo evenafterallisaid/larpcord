@@ -92,6 +92,17 @@ impl Larpcord {
         size: f32,
         motion: bool,
     ) -> AnyElement {
+        self.avatar_with_status(user, member, guild, size, motion, None)
+    }
+    pub(super) fn avatar_with_status(
+        &self,
+        user: &User,
+        member: Option<&Member>,
+        guild: Option<&str>,
+        size: f32,
+        motion: bool,
+        status: Option<(&str, u32, f32)>,
+    ) -> AnyElement {
         let url = member
             .and_then(|m| m.avatar.as_deref())
             .zip(guild)
@@ -133,6 +144,15 @@ impl Larpcord {
                         None => s.child(user.name().chars().next().unwrap_or('?').to_string()),
                     }),
             )
+            .when_some(status, |s, (status, background, edge)| {
+                s.child(
+                    div()
+                        .absolute()
+                        .right(px(-1.))
+                        .bottom(px(-1.))
+                        .child(chrome::presence_badge(status, edge, background)),
+                )
+            })
             .when_some(decoration, |s, image| {
                 s.child(
                     img(image.clone())
@@ -158,7 +178,7 @@ impl Larpcord {
             .or(user.collectibles.as_ref())
             .and_then(|c| c.nameplate.as_ref())
         else {
-            return div().into_any_element();
+            return div().absolute().inset_0().into_any_element();
         };
         let palette = plate.palette.as_deref();
         let tint = match palette {

@@ -7,10 +7,106 @@ use std::{
 };
 #[derive(Default)]
 pub(super) struct Pool {
-    items: HashMap<String, Entity<Loop>>,
+    items: HashMap<String, Player>,
     visible: HashSet<String>,
 }
 pub(super) type SharedPool = Rc<RefCell<Pool>>;
+enum Player {
+    Video(Entity<Loop>),
+    Image(Entity<ImageLoop>),
+}
+impl Player {
+    fn set_active(&self, active: bool, cx: &mut App) {
+        match self {
+            Self::Video(view) => view.update(cx, |view, cx| view.set_active(active, cx)),
+            Self::Image(view) => view.update(cx, |view, cx| view.set_active(active, cx)),
+        }
+    }
+    fn element(&self) -> AnyElement {
+        match self {
+            Self::Video(view) => view.clone().into_any_element(),
+            Self::Image(view) => view.clone().into_any_element(),
+        }
+    }
+}
+struct ImageLoop {
+    stream: crate::media::animation::Stream,
+    image: Option<std::sync::Arc<RenderImage>>,
+    retired: Vec<std::sync::Arc<RenderImage>>,
+    active: bool,
+    failed: bool,
+    task: Option<Task<()>>,
+}
+impl ImageLoop {
+    fn new(url: String, poster: Option<std::sync::Arc<RenderImage>>) -> Self {
+        Self {
+            stream: crate::media::animation::start(url),
+            image: poster,
+            retired: Vec::new(),
+            active: false,
+            failed: false,
+            task: None,
+        }
+    }
+    fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.active = active;
+        if !active {
+            self.task = None;
+        }
+        if active && !self.failed && self.task.is_none() {
+            self.next(cx);
+        }
+    }
+    fn next(&mut self, cx: &mut Context<Self>) {
+        let requests = self.stream.requests.clone();
+        let frames = self.stream.frames.clone();
+        self.task = Some(cx.spawn(async move |view, cx| {
+            let started = std::time::Instant::now();
+            match requests.try_send(()) {
+                Ok(()) | Err(std::sync::mpsc::TrySendError::Full(())) => {}
+                Err(std::sync::mpsc::TrySendError::Disconnected(())) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.failed = true;
+                        cx.notify();
+                    });
+                    return;
+                }
+            }
+            let frame = frames.recv().await.ok().flatten();
+            let delay = frame.as_ref().map(|f| f.delay);
+            let _ = view.update(cx, |this, cx| {
+                if let Some(frame) = frame {
+                    if let Some(old) = this.image.replace(frame.image) {
+                        this.retired.push(old);
+                    }
+                } else {
+                    this.failed = true;
+                }
+                cx.notify();
+            });
+            if let Some(delay) = delay {
+                cx.background_executor()
+                    .timer(delay.saturating_sub(started.elapsed()))
+                    .await;
+                let _ = view.update(cx, |this, cx| {
+                    this.task = None;
+                    if this.active {
+                        this.next(cx);
+                    }
+                });
+            }
+        }));
+    }
+}
+impl Render for ImageLoop {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.set_active(window.is_window_active(), cx);
+        crate::media::retire(std::mem::take(&mut self.retired), window, 3);
+        div().size_full().when_some(self.image.clone(), |s, image| {
+            s.child(img(image).size_full().object_fit(ObjectFit::Contain))
+        })
+    }
+}
 pub(super) struct Loop {
     player: Entity<VideoPlayer>,
     active: bool,
@@ -26,7 +122,7 @@ impl Loop {
                     decoder_threads: 1,
                     frame_queue_len: 2,
                     packet_queue_len: 8,
-                    max_output_size: Some((400, 300)),
+                    max_output_size: Some((800, 600)),
                     audio_output: alhazen_gpui::alhazen_core::audio::AudioOutputConfig::Disabled,
                     ..Default::default()
                 },
@@ -71,7 +167,7 @@ impl Pool {
             pool.visible.clear();
             if !active {
                 for item in pool.items.values() {
-                    item.update(cx, |view, cx| view.set_active(false, cx));
+                    item.set_active(false, cx);
                 }
             }
         }
@@ -89,11 +185,52 @@ impl Pool {
     }
     pub(super) fn pause(pool: &SharedPool, cx: &mut App) {
         for view in pool.borrow().items.values() {
-            view.update(cx, |view, cx| view.set_active(false, cx));
+            view.set_active(false, cx);
         }
     }
 }
 impl Larpcord {
+    pub(super) fn gif_player(
+        &self,
+        url: &str,
+        still: Option<std::sync::Arc<RenderImage>>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let animated = self.motion()
+            && !self.preview_only
+            && self.settings_tab.is_none()
+            && !self.profile_is_modal()
+            && self.video.is_none();
+        if animated {
+            let mut pool = self.gif_pool.borrow_mut();
+            pool.visible.insert(url.to_string());
+            if !pool.items.contains_key(url)
+                && pool.items.len() < 4
+                && (crate::media::animation::image_url(url) || crate::video::source(url).is_some())
+            {
+                let player = if crate::media::animation::image_url(url) {
+                    Player::Image(cx.new(|_| ImageLoop::new(url.to_string(), still.clone())))
+                } else {
+                    Player::Video(cx.new(|cx| Loop::new(crate::video::source(url).unwrap(), cx)))
+                };
+                pool.items.insert(url.to_string(), player);
+            }
+            pool.items.get(url).map(|player| {
+                if let Player::Image(view) = player {
+                    view.update(cx, |view, cx| {
+                        if view.image.is_none() && still.is_some() {
+                            view.image = still.clone();
+                            cx.notify();
+                        }
+                    });
+                }
+                player.set_active(true, cx);
+                player.element()
+            })
+        } else {
+            None
+        }
+    }
     pub(super) fn gif_card(
         &self,
         url: &str,
@@ -108,26 +245,12 @@ impl Larpcord {
         );
         let still = poster
             .and_then(|p| p.proxy_url.as_deref().or(p.url.as_deref()))
-            .filter(|u| crate::media::cdn_url(u))
+            .filter(|u| crate::media::cdn_url(u) || crate::media::gif_preview(u))
             .and_then(|u| self.media.get(u));
-        let animated = self.motion()
-            && !self.preview_only
-            && self.settings_tab.is_none()
-            && !self.profile_is_modal()
-            && self.video.is_none();
-        let player = if animated {
-            let mut pool = self.gif_pool.borrow_mut();
-            pool.visible.insert(url.to_string());
-            if !pool.items.contains_key(url)
-                && pool.items.len() < 4
-                && let Some(source) = crate::video::source(url)
-            {
-                pool.items
-                    .insert(url.to_string(), cx.new(|cx| Loop::new(source, cx)));
-            }
-            pool.items.get(url).cloned()
-        } else {
+        let player = if self.emoji_open && self.picker.tab == crate::expressions::Tab::Gifs {
             None
+        } else {
+            self.gif_player(url, still.clone(), cx)
         };
         div()
             .id(SharedString::from(format!("gif-{url}")))
@@ -155,5 +278,336 @@ impl Larpcord {
                 }
             })
             .into_any_element()
+    }
+}
+
+type GifEmbed<'a> = (
+    &'a str,
+    Option<&'a crate::model::EmbedMedia>,
+    Option<(u32, u32)>,
+);
+pub(super) fn embed_gif(embed: &crate::model::Embed) -> Option<GifEmbed<'_>> {
+    if embed.kind == "gifv"
+        && let Some(video) = embed.video.as_ref()
+        && let Some(url) = video
+            .proxy_url
+            .as_deref()
+            .or(video.url.as_deref())
+            .filter(|u| crate::video::source(u).is_some())
+    {
+        return Some((
+            url,
+            embed.thumbnail.as_ref().or(embed.image.as_ref()),
+            video.width.zip(video.height),
+        ));
+    }
+    if embed.description.is_some()
+        || !embed.fields.is_empty()
+        || embed.author.is_some()
+        || embed.footer.is_some()
+    {
+        return None;
+    }
+    // A GIF image is media in its own right, even when Discord wraps it in an image embed.
+    for image in [embed.image.as_ref(), embed.thumbnail.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(url) = image
+            .url
+            .as_deref()
+            .filter(|u| crate::media::animation::image_url(u))
+            .or_else(|| {
+                image
+                    .proxy_url
+                    .as_deref()
+                    .filter(|u| crate::media::animation::image_url(u))
+            })
+        {
+            return Some((url, Some(image), image.width.zip(image.height)));
+        }
+    }
+    None
+}
+pub(super) fn gif_only(message: &Message) -> bool {
+    message.flags & 4 == 0 && gif_link(&message.content, &message.embeds)
+}
+pub(super) fn gif_link(content: &str, embeds: &[crate::model::Embed]) -> bool {
+    let text = content.trim();
+    !text.is_empty()
+        && embeds.iter().any(|embed| {
+            embed_gif(embed).is_some()
+                && (embed.url.as_deref() == Some(text)
+                    || [
+                        embed.image.as_ref(),
+                        embed.thumbnail.as_ref(),
+                        embed.video.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|m| {
+                        m.url.as_deref() == Some(text) || m.proxy_url.as_deref() == Some(text)
+                    }))
+        })
+}
+impl Larpcord {
+    pub(super) fn send_gif(
+        &mut self,
+        gif: &crate::expressions::Gif,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.home_page
+            || self.reaction_target.is_some()
+            || self.sending.is_some()
+            || self.failed_send.is_some()
+            || self.settings_tab.is_some()
+            || self.login_open
+            || self.profile_is_modal()
+            || self.video.is_some()
+            || !crate::expressions::gif_url(&gif.url)
+        {
+            return;
+        }
+        let Some(channel) = self.selected_channel.clone() else {
+            return;
+        };
+        if !self.preview && self.status != "Connected" {
+            self.error = Some("Waiting for the connection to return. The GIF was not sent.".into());
+            cx.notify();
+            return;
+        }
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros()
+            .to_string();
+        let reply = self
+            .reply_to
+            .as_ref()
+            .filter(|r| r.channel == channel)
+            .map(|r| r.id.clone());
+        if self.preview {
+            self.store.insert(Message {
+                id: nonce,
+                channel_id: channel,
+                content: gif.url.clone(),
+                author: self.store.user.clone(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                message_reference: reply.map(|id| serde_json::json!({"message_id":id})),
+                ..Message::default()
+            });
+            self.reply_to = None;
+            self.scrolled_away = false;
+            self.refresh_messages();
+        } else {
+            if let Err(error) = self.backend.command(Command::Send {
+                channel: channel.clone(),
+                content: gif.url.clone(),
+                nonce: nonce.clone(),
+                reply,
+                sticker: None,
+            }) {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+            self.pending_reply = self.reply_to.take();
+            self.pending_sticker = None;
+            self.sending = Some((nonce, channel, gif.url.clone()));
+        }
+        self.settings.recent_gifs.retain(|g| g.url != gif.url);
+        self.settings.recent_gifs.insert(0, gif.clone());
+        self.settings.sanitize_recents();
+        self.persist(cx);
+        self.close_picker();
+        window.focus(&self.composer.focus_handle(cx));
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Larpcord, Message, embed_gif, gif_only};
+    use gpui::{AppContext, Modifiers, TestAppContext, point, px, size};
+
+    fn choice() -> crate::expressions::Gif {
+        crate::expressions::Gif {
+            title: "cat".into(),
+            url: "https://klipy.com/gifs/cat".into(),
+            preview: None,
+            width: 400,
+            height: 240,
+        }
+    }
+    #[::core::prelude::v1::test]
+    fn only_hide_a_standalone_link_with_an_actual_gif_tile() {
+        let mut message: Message = serde_json::from_value(serde_json::json!({"id":"5","channel_id":"campfire","author":{"id":"x"},"content":"https://cdn.discordapp.com/a.gif","embeds":[{"type":"image","url":"https://cdn.discordapp.com/a.gif","image":{"url":"https://cdn.discordapp.com/a.gif","width":400,"height":240}}]})).unwrap();
+        assert!(gif_only(&message));
+        assert!(embed_gif(&message.embeds[0]).is_some());
+        message.content.insert_str(0, "look at this ");
+        assert!(!gif_only(&message));
+        message.content = "https://cdn.discordapp.com/a.gif".into();
+        message.flags = 4;
+        assert!(!gif_only(&message));
+        message.flags = 0;
+        message.embeds[0].description = Some("important bot help".into());
+        assert!(embed_gif(&message.embeds[0]).is_none());
+        assert!(!gif_only(&message));
+        message.embeds.clear();
+        assert!(!gif_only(&message));
+    }
+    #[gpui::test]
+    fn clicking_a_gif_sends_only_the_gif_and_preserves_the_composer(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx, |v, cx| {
+            v.settings.animations = false;
+            v.composer
+                .update(cx, |input, cx| input.set("keep writing this", cx));
+            v.emoji_open = true;
+            v.picker.tab = crate::expressions::Tab::Gifs;
+            v.picker.gifs = vec![choice()];
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        let tile = cx.debug_bounds("gif-choice-0").unwrap();
+        cx.simulate_click(tile.center(), Modifiers::default());
+        cx.update(|_, cx| {
+            let v = view.read(cx);
+            assert!(!v.emoji_open);
+            assert_eq!(v.composer.read(cx).content.as_ref(), "keep writing this");
+            assert!(
+                v.store
+                    .channel_messages("campfire")
+                    .iter()
+                    .any(|m| m.content == choice().url)
+            );
+            assert_eq!(v.settings.recent_gifs[0].url, choice().url);
+        });
+    }
+    #[gpui::test]
+    fn a_favorite_star_does_not_send_the_gif(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx, |v, cx| {
+            v.settings.animations = false;
+            v.emoji_open = true;
+            v.picker.tab = crate::expressions::Tab::Gifs;
+            v.picker.gifs = vec![choice()];
+            v.picker.favorites.clear();
+            v.picker.favorites_loading = false;
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        let tile = cx.debug_bounds("gif-choice-0").unwrap();
+        cx.simulate_click(
+            point(tile.right() - px(20.), tile.top() + px(20.)),
+            Modifiers::default(),
+        );
+        cx.update(|_, cx| {
+            let v = view.read(cx);
+            assert!(v.emoji_open);
+            assert!(v.sending.is_none());
+            assert_eq!(v.picker.favorites.len(), 1);
+            assert!(
+                !v.store
+                    .channel_messages("campfire")
+                    .iter()
+                    .any(|m| m.content == choice().url)
+            );
+        });
+    }
+    #[gpui::test]
+    fn paused_image_loops_stop_requesting_frames(cx: &mut TestAppContext) {
+        let (requests, received) = std::sync::mpsc::sync_channel(1);
+        let (results, frames) = async_channel::bounded(1);
+        let image = std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+            image::RgbaImage::new(8, 8),
+        )]));
+        results
+            .try_send(Some(crate::media::animation::AnimatedFrame {
+                image,
+                delay: std::time::Duration::from_millis(100),
+            }))
+            .unwrap();
+        let view = cx.new(|_| super::ImageLoop {
+            stream: crate::media::animation::Stream { requests, frames },
+            image: None,
+            retired: vec![],
+            active: false,
+            failed: false,
+            task: None,
+        });
+        view.update(cx, |v, cx| v.set_active(true, cx));
+        cx.run_until_parked();
+        assert!(received.try_recv().is_ok());
+        view.update(cx, |v, cx| v.set_active(false, cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(received.try_recv().is_err());
+        view.update(cx, |v, cx| v.set_active(true, cx));
+        cx.run_until_parked();
+        assert!(received.try_recv().is_ok());
+    }
+    #[gpui::test]
+    fn disconnected_gif_clicks_do_not_modify_the_draft_or_queue_a_send(cx: &mut TestAppContext) {
+        let window = cx.add_window(|window, cx| Larpcord::with_preview(window, cx, true));
+        window
+            .update(cx, |v, window, cx| {
+                v.preview = false;
+                v.status = "Reconnecting".into();
+                v.emoji_open = true;
+                v.composer.update(cx, |input, cx| input.set("safe", cx));
+                v.send_gif(&choice(), window, cx);
+                assert!(v.sending.is_none());
+                assert!(v.emoji_open);
+                assert_eq!(v.composer.read(cx).content.as_ref(), "safe");
+            })
+            .unwrap();
+    }
+    #[gpui::test]
+    fn gif_acknowledgement_does_not_consume_a_staged_sticker_or_text(cx: &mut TestAppContext) {
+        let window = cx.add_window(|window, cx| Larpcord::with_preview(window, cx, true));
+        window
+            .update(cx, |v, window, cx| {
+                v.preview = false;
+                v.status = "Connected".into();
+                v.composer.update(cx, |input, cx| input.set("text", cx));
+                v.selected_sticker = Some(crate::expressions::Sticker {
+                    id: "123".into(),
+                    name: "sticker".into(),
+                    format_type: 1,
+                    ..Default::default()
+                });
+                v.send_gif(&choice(), window, cx);
+                let nonce = v.sending.as_ref().unwrap().0.clone();
+                assert_eq!(v.sending.as_ref().unwrap().2, choice().url);
+                v.send_gif(&choice(), window, cx);
+                assert_eq!(v.sending.as_ref().unwrap().0, nonce);
+                v.receive(
+                    crate::network::Envelope {
+                        generation: 0,
+                        event: crate::network::Event::Sent {
+                            nonce,
+                            result: Ok(Box::new(Message {
+                                id: "999".into(),
+                                channel_id: "campfire".into(),
+                                content: choice().url,
+                                ..Default::default()
+                            })),
+                        },
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(v.composer.read(cx).content.as_ref(), "text");
+                assert_eq!(v.selected_sticker.as_ref().unwrap().id, "123");
+                assert!(v.sending.is_none());
+            })
+            .unwrap();
     }
 }

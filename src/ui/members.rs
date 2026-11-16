@@ -201,23 +201,23 @@ impl Larpcord {
                                 div()
                                     .relative()
                                     .size(px(32.))
-                                    .child(self.decorated_avatar(
-                                        &user,
-                                        Some(&member),
-                                        self.selected_guild.as_deref(),
-                                        32.,
-                                        self.hovered_name.as_deref() == Some(&hover_key),
-                                    ))
+                                    .flex_shrink_0()
+                                    .debug_selector(move || format!("member-avatar-{}", index))
                                     .child(
-                                        div().absolute().right(px(-1.)).bottom(px(-1.)).child(
-                                            chrome::presence_badge(
+                                        self.avatar_with_status(
+                                            &user,
+                                            Some(&member),
+                                            self.selected_guild.as_deref(),
+                                            32.,
+                                            self.hovered_name.as_deref() == Some(&hover_key),
+                                            Some((
                                                 status,
-                                                14.,
                                                 self.settings
                                                     .theme
                                                     .tokens(self.settings.custom_theme)
                                                     .sidebar,
-                                            ),
+                                                14.,
+                                            )),
                                         ),
                                     ),
                             )
@@ -258,7 +258,7 @@ impl Larpcord {
 fn member_placeholder() -> AnyElement {
     row()
         .h(px(40.))
-        .px_2()
+        .px_4()
         .gap_3()
         .child(div().size(px(32.)).rounded_full().bg(rgb(0x222329)))
         .child(
@@ -268,4 +268,29 @@ fn member_placeholder() -> AnyElement {
                 .child(div().w(px(60.)).h(px(7.)).rounded_sm().bg(rgb(0x1c1d22))),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Larpcord;
+    use gpui::{TestAppContext, point, px, size};
+    #[gpui::test]
+    fn member_portraits_align_with_and_without_nameplates(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx,|v,cx|{
+            v.settings.animations=false;v.members_open=true;v.members.received=true;v.members.total=2;v.members.rows.clear();
+            for (n,plate) in [(0,serde_json::Value::Null),(1,serde_json::json!({"nameplate":{"palette":"violet"}}))] {
+                let member: crate::model::Member=serde_json::from_value(serde_json::json!({"user":{"id":format!("{}",100+n),"username":"member","collectibles":plate}})).unwrap();
+                v.members.rows.insert(n,crate::members::Row::Member(Box::new(member),"online".into(),None));
+            }
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        let a = cx.debug_bounds("member-avatar-0").unwrap();
+        let b = cx.debug_bounds("member-avatar-1").unwrap();
+        assert_eq!(a.origin.x, b.origin.x);
+        assert_eq!(a.size, b.size);
+    }
 }

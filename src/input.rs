@@ -30,6 +30,74 @@ actions!(
     ]
 );
 
+#[derive(Clone, Default)]
+struct Projection {
+    text: String,
+    atoms: Vec<(Range<usize>, Range<usize>, String)>,
+}
+impl Projection {
+    fn new(text: &str, enabled: bool) -> Self {
+        let mut value = Self::default();
+        if !enabled {
+            value.text = text.to_string();
+            return value;
+        }
+        let mut raw = 0;
+        for part in crate::content::parts(text) {
+            match part {
+                crate::content::Part::Text(text) => {
+                    value.text.push_str(text);
+                    raw += text.len();
+                }
+                crate::content::Part::Emoji { id, .. } => {
+                    let end = raw + text[raw..].find('>').unwrap() + 1;
+                    let start = value.text.len();
+                    value.text.push_str("\u{2001}\u{2001}");
+                    value
+                        .atoms
+                        .push((raw..end, start..value.text.len(), id.to_string()));
+                    raw = end;
+                }
+            }
+        }
+        value
+    }
+    fn display(&self, raw: usize) -> usize {
+        let mut removed = 0;
+        for (r, d, _) in &self.atoms {
+            if raw <= r.start {
+                break;
+            }
+            if raw < r.end {
+                return if raw - r.start < (r.len() / 2) {
+                    d.start
+                } else {
+                    d.end
+                };
+            }
+            removed += r.len() - d.len();
+        }
+        raw.saturating_sub(removed)
+    }
+    fn raw(&self, display: usize) -> usize {
+        let mut added = 0;
+        for (r, d, _) in &self.atoms {
+            if display <= d.start {
+                break;
+            }
+            if display < d.end {
+                return if display - d.start < d.len() / 2 {
+                    r.start
+                } else {
+                    r.end
+                };
+            }
+            added += r.len() - d.len();
+        }
+        display + added
+    }
+}
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     pub content: SharedString,
@@ -39,6 +107,9 @@ pub struct TextInput {
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
     last_layout: Option<ShapedLine>,
+    last_projection: Projection,
+    pub inline_emojis: bool,
+    pub emoji_images: std::collections::HashMap<String, std::sync::Arc<gpui::RenderImage>>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
 }
@@ -59,6 +130,9 @@ impl TextInput {
             selection_reversed: false,
             marked_range: None,
             last_layout: None,
+            last_projection: Projection::default(),
+            inline_emojis: false,
+            emoji_images: std::collections::HashMap::new(),
             last_bounds: None,
             is_selecting: false,
         }
@@ -230,7 +304,8 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        self.last_projection
+            .raw(line.closest_index_for_x(position.x - bounds.left()))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -285,6 +360,14 @@ impl TextInput {
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
+        if self.inline_emojis
+            && let Some((r, _, _)) = Projection::new(&self.content, true)
+                .atoms
+                .into_iter()
+                .find(|(r, _, _)| r.start < offset && offset <= r.end)
+        {
+            return r.start;
+        }
         self.content
             .grapheme_indices(true)
             .rev()
@@ -293,6 +376,14 @@ impl TextInput {
     }
 
     fn next_boundary(&self, offset: usize) -> usize {
+        if self.inline_emojis
+            && let Some((r, _, _)) = Projection::new(&self.content, true)
+                .atoms
+                .into_iter()
+                .find(|(r, _, _)| r.start <= offset && offset < r.end)
+        {
+            return r.end;
+        }
         self.content
             .grapheme_indices(true)
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
@@ -429,11 +520,11 @@ impl EntityInputHandler for TextInput {
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(range.start),
+                bounds.left() + last_layout.x_for_index(self.last_projection.display(range.start)),
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(range.end),
+                bounds.left() + last_layout.x_for_index(self.last_projection.display(range.end)),
                 bounds.bottom(),
             ),
         ))
@@ -449,7 +540,7 @@ impl EntityInputHandler for TextInput {
         let last_layout = self.last_layout.as_ref()?;
 
         let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
-        Some(self.offset_to_utf16(utf8_index))
+        Some(self.offset_to_utf16(self.last_projection.raw(utf8_index)))
     }
 }
 
@@ -459,6 +550,7 @@ struct TextElement {
 
 struct PrepaintState {
     line: Option<ShapedLine>,
+    projection: Projection,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
 }
@@ -507,8 +599,10 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
+        let projection = Projection::new(&content, input.inline_emojis && !input.secret);
+        let selected_range = projection.display(input.selected_range.start)
+            ..projection.display(input.selected_range.end);
+        let cursor = projection.display(input.cursor_offset());
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
@@ -518,7 +612,7 @@ impl Element for TextElement {
                 if input.secret {
                     "*".repeat(content.len()).into()
                 } else {
-                    content
+                    projection.text.clone().into()
                 },
                 style.color,
             )
@@ -533,6 +627,8 @@ impl Element for TextElement {
             strikethrough: None,
         };
         let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+            let marked_range =
+                projection.display(marked_range.start)..projection.display(marked_range.end);
             vec![
                 TextRun {
                     len: marked_range.start,
@@ -596,6 +692,7 @@ impl Element for TextElement {
         };
         PrepaintState {
             line: Some(line),
+            projection,
             cursor,
             selection,
         }
@@ -624,6 +721,21 @@ impl Element for TextElement {
         line.paint(bounds.origin, window.line_height(), window, cx)
             .unwrap();
 
+        for (_, display, id) in &prepaint.projection.atoms {
+            if let Some(image) = self.input.read(cx).emoji_images.get(id).cloned() {
+                let x = line.x_for_index(display.start);
+                let end = line.x_for_index(display.end);
+                let edge = px(22.).min(bounds.size.height);
+                let image_bounds = Bounds::new(
+                    point(
+                        bounds.left() + x + (end - x - edge) / 2.,
+                        bounds.top() + (bounds.size.height - edge) / 2.,
+                    ),
+                    size(edge, edge),
+                );
+                let _ = window.paint_image(image_bounds, Default::default(), image, 0, false);
+            }
+        }
         if focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
         {
@@ -632,6 +744,7 @@ impl Element for TextElement {
 
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
+            input.last_projection = prepaint.projection.clone();
             input.last_bounds = Some(bounds);
         });
     }
@@ -706,4 +819,45 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(&format!("{modifier}-c"), Copy, Some("TextInput")),
         KeyBinding::new(&format!("{modifier}-x"), Cut, Some("TextInput")),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Backspace, Projection, TextInput};
+    use gpui::TestAppContext;
+    #[test]
+    fn emoji_projection_preserves_raw_offsets_and_unicode() {
+        let raw = "hi <:blob:123> 🦊 <a:wave:456>!";
+        let projection = Projection::new(raw, true);
+        assert!(!projection.text.contains("blob"));
+        assert_eq!(projection.atoms.len(), 2);
+        for (raw, display, _) in &projection.atoms {
+            assert_eq!(projection.raw(display.start), raw.start);
+            assert_eq!(projection.raw(display.end), raw.end);
+            assert_eq!(projection.display(raw.start), display.start);
+            assert_eq!(projection.display(raw.end), display.end);
+        }
+        assert_eq!(projection.raw(projection.text.len()), raw.len());
+        assert_eq!(Projection::new(raw, false).text, raw);
+    }
+    #[gpui::test]
+    fn backspace_removes_a_whole_custom_emoji_without_changing_neighboring_text(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|_, cx| {
+            let mut input = TextInput::new("", false, cx);
+            input.inline_emojis = true;
+            input
+        });
+        window
+            .update(cx, |input, window, cx| {
+                input.set("hi <:blob:123>!", cx);
+                let end = "hi <:blob:123>".len();
+                input.selected_range = end..end;
+                input.backspace(&Backspace, window, cx);
+                assert_eq!(input.content.as_ref(), "hi !");
+                assert_eq!(input.selected_range, 3..3);
+            })
+            .unwrap();
+    }
 }

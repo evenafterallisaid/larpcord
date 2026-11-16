@@ -1,103 +1,5 @@
 use super::*;
 
-pub(super) const EMOJIS: &[(&str, &str)] = &[
-    ("😀", "grinning happy"),
-    ("😃", "smile happy"),
-    ("😄", "smile"),
-    ("😁", "grin"),
-    ("😆", "laugh"),
-    ("😂", "joy laugh"),
-    ("🤣", "rofl laugh"),
-    ("🥹", "happy tears"),
-    ("😊", "blush happy"),
-    ("🙂", "smile"),
-    ("🙃", "upside down"),
-    ("😉", "wink"),
-    ("😍", "heart eyes love"),
-    ("🥰", "love hearts"),
-    ("😘", "kiss"),
-    ("😋", "yum"),
-    ("😎", "cool sunglasses"),
-    ("🤓", "nerd"),
-    ("🧐", "monocle"),
-    ("🤔", "thinking"),
-    ("🫡", "salute"),
-    ("🤨", "raised eyebrow"),
-    ("😐", "neutral"),
-    ("😶", "speechless"),
-    ("😔", "sad"),
-    ("🥺", "pleading"),
-    ("😢", "cry"),
-    ("😭", "sob cry"),
-    ("😤", "triumph"),
-    ("😠", "angry"),
-    ("🤬", "angry swear"),
-    ("💀", "skull dead"),
-    ("🤡", "clown"),
-    ("👻", "ghost"),
-    ("👽", "alien"),
-    ("🤖", "robot"),
-    ("😺", "cat"),
-    ("😸", "cat grin"),
-    ("😻", "cat love"),
-    ("🙀", "cat scream"),
-    ("👋", "wave hello"),
-    ("🤚", "hand"),
-    ("✋", "stop hand"),
-    ("🖖", "vulcan"),
-    ("👌", "okay"),
-    ("🤌", "pinch"),
-    ("✌️", "peace"),
-    ("🤞", "crossed fingers"),
-    ("👍", "thumbs up yes"),
-    ("👎", "thumbs down no"),
-    ("👏", "clap"),
-    ("🙌", "raised hands"),
-    ("🫶", "heart hands"),
-    ("🤝", "handshake"),
-    ("🙏", "pray thanks"),
-    ("💪", "strong muscle"),
-    ("❤️", "red heart love"),
-    ("🧡", "orange heart"),
-    ("💛", "yellow heart"),
-    ("💚", "green heart"),
-    ("💙", "blue heart"),
-    ("💜", "purple heart"),
-    ("🖤", "black heart"),
-    ("🤍", "white heart"),
-    ("✨", "sparkles"),
-    ("⭐", "star"),
-    ("🌙", "moon night"),
-    ("☀️", "sun"),
-    ("🔥", "fire"),
-    ("💯", "hundred"),
-    ("🎉", "party celebrate"),
-    ("🎊", "confetti"),
-    ("🐈", "cat animal"),
-    ("🐕", "dog animal"),
-    ("🐇", "rabbit bunny"),
-    ("🦊", "fox"),
-    ("🐻", "bear"),
-    ("🐼", "panda"),
-    ("🐸", "frog"),
-    ("🦋", "butterfly"),
-    ("🍕", "pizza food"),
-    ("🍔", "burger"),
-    ("🍟", "fries"),
-    ("🍜", "ramen"),
-    ("🍰", "cake"),
-    ("🍩", "donut"),
-    ("☕", "coffee"),
-    ("🧋", "boba tea"),
-    ("🎮", "game controller"),
-    ("🎧", "headphones music"),
-    ("🎵", "music note"),
-    ("🎨", "art"),
-    ("📚", "books study"),
-    ("💻", "computer"),
-    ("✅", "check yes"),
-    ("❌", "cross no"),
-];
 #[derive(Clone)]
 pub(super) struct Reply {
     pub id: String,
@@ -116,7 +18,11 @@ impl Larpcord {
             id: message.id.clone(),
             channel: message.channel_id.clone(),
             name: message.name().to_string(),
-            text: message.content.chars().take(100).collect(),
+            text: if super::gif::gif_only(message) {
+                "GIF".into()
+            } else {
+                message.content.chars().take(100).collect()
+            },
         });
         window.focus(&self.composer.focus_handle(cx));
         cx.notify();
@@ -152,46 +58,186 @@ impl Larpcord {
             )
             .into_any_element()
     }
+    pub(super) fn react_to(&mut self, message: &Message, text: &str, cx: &mut Context<Self>) {
+        let key = (message.channel_id.clone(), message.id.clone());
+        if self.reaction_pending.contains(&key) || self.reaction_pending.len() >= 16 {
+            return;
+        }
+        let (emoji, payload) = match crate::content::parts(text).as_slice() {
+            [crate::content::Part::Emoji { name, id }] => (
+                format!("{name}:{id}"),
+                serde_json::json!({"name":name,"id":id}),
+            ),
+            _ => (text.to_string(), serde_json::json!({"name":text,"id":null})),
+        };
+        let remove = self
+            .store
+            .channel_messages(&message.channel_id)
+            .iter()
+            .find(|m| m.id == message.id)
+            .is_some_and(|m| {
+                m.reactions.iter().any(|r| {
+                    r.me && match payload["id"].as_str() {
+                        Some(id) => r.emoji.id.as_deref() == Some(id),
+                        None => {
+                            r.emoji.id.is_none()
+                                && r.emoji.name.as_deref() == payload["name"].as_str()
+                        }
+                    }
+                })
+            });
+        if self.preview {
+            self.store.reaction(if remove {"MESSAGE_REACTION_REMOVE"} else {"MESSAGE_REACTION_ADD"},&serde_json::json!({"channel_id":message.channel_id,"message_id":message.id,"emoji":payload,"user_id":self.store.user.id}));
+        } else if self.status != "Connected" {
+            self.error = Some("Waiting for the connection to return. No reaction was sent.".into());
+        } else {
+            match self.backend.command(Command::React {
+                channel: message.channel_id.clone(),
+                message: message.id.clone(),
+                emoji,
+                remove,
+            }) {
+                Ok(()) => {
+                    self.reaction_pending.insert(key);
+                }
+                Err(error) => self.error = Some(error),
+            }
+        }
+        cx.notify();
+    }
+    pub(super) fn open_reaction_picker(
+        &mut self,
+        message: Message,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.message_menu = None;
+        self.close_picker();
+        self.toggle_picker(crate::expressions::Tab::Emoji, window, cx);
+        self.reaction_target = Some(message);
+        self.picker_catalog_ready(cx);
+        cx.notify();
+    }
+    fn quick_reactions(&self, message: &Message, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let keys = if self.picker.reaction_recent.is_empty() {
+            vec!["❤️".into(), "😂".into(), "👍".into()]
+        } else {
+            self.picker
+                .reaction_recent
+                .iter()
+                .take(3)
+                .cloned()
+                .collect()
+        };
+        keys.into_iter()
+            .enumerate()
+            .map(|(n, key)| {
+                let (text, image) = if crate::expressions::id(&key)
+                    && crate::expressions::unicode_alias(&key).is_none()
+                {
+                    let emoji = self
+                        .store
+                        .guilds
+                        .iter()
+                        .flat_map(|g| g.emojis.iter().flatten())
+                        .find(|e| e.id == key)
+                        .cloned()
+                        .unwrap_or(crate::expressions::Emoji {
+                            id: key.clone(),
+                            name: "emoji".into(),
+                            ..Default::default()
+                        });
+                    let image = self.media.get(&emoji.image(false));
+                    (emoji.markup(), image)
+                } else {
+                    (
+                        crate::expressions::unicode_alias(&key)
+                            .unwrap_or(&key)
+                            .to_string(),
+                        None,
+                    )
+                };
+                let message = message.clone();
+                row()
+                    .id(("quick-reaction", n))
+                    .size(px(32.))
+                    .justify_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(self.color(PANEL)))
+                    .active(|s| s.bg(self.color(LINE)))
+                    .child(
+                        image
+                            .map(|image| img(image).size(px(21.)).into_any_element())
+                            .unwrap_or_else(|| {
+                                div()
+                                    .text_size(px(19.))
+                                    .child(
+                                        if crate::content::parts(&text).iter().any(|p| {
+                                            matches!(p, crate::content::Part::Emoji { .. })
+                                        }) {
+                                            "◌".to_string()
+                                        } else {
+                                            text.clone()
+                                        },
+                                    )
+                                    .into_any_element()
+                            }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.react_to(&message, &text, cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect()
+    }
     pub(super) fn message_tools(&self, message: &Message, cx: &mut Context<Self>) -> AnyElement {
         let reply = message.clone();
         let content = message.content.clone();
+        let add_reaction = message.clone();
         let menu = message.clone();
         row()
             .absolute()
             .right(px(16.))
-            .top_0()
-            .h(px(28.))
-            .rounded_md()
+            .top(self.message_tools_top)
+            .h(px(34.))
+            .rounded_lg()
             .border_1()
             .border_color(self.color(LINE))
             .bg(self.color(SURFACE))
             .shadow_md()
-            .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .children(self.quick_reactions(message, cx))
+            .child(
+                toolbar_button("add-message-reaction", "reaction", "Add reaction")
+                    .size(px(32.))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_reaction_picker(add_reaction.clone(), window, cx)
+                    })),
+            )
+            .child(div().w(px(1.)).h(px(20.)).mx_1().bg(self.color(LINE)))
             .child(
                 toolbar_button("reply-message", "reply", "Reply")
-                    .size(px(26.))
+                    .size(px(32.))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.reply_to_message(&reply, window, cx)
                     })),
             )
             .child(
                 toolbar_button("copy-message", "copy", "Copy text")
-                    .size(px(26.))
+                    .size(px(32.))
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(content.clone()))
                     }),
             )
             .child(
                 toolbar_button("message-more", "more", "More options")
-                    .size(px(26.))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            this.open_message_menu(menu.clone(), event.position, window, cx);
-                        }),
-                    ),
+                    .size(px(32.))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_message_menu(menu.clone(), event.position(), window, cx);
+                    })),
             )
             .into_any_element()
     }
@@ -239,6 +285,7 @@ impl Larpcord {
             (2, "Copy Message Link", "external-link"),
             (3, "Copy Message ID", "hash"),
             (4, "View Profile", "user"),
+            (5, "Add Reaction…", "reaction"),
         ] {
             let message = message.clone();
             let guild = self.selected_guild.clone().unwrap_or_else(|| "@me".into());
@@ -271,6 +318,7 @@ impl Larpcord {
                             3 => {
                                 cx.write_to_clipboard(ClipboardItem::new_string(message.id.clone()))
                             }
+                            5 => this.open_reaction_picker(message.clone(), window, cx),
                             _ => this.open_profile(message.author.clone(), window, cx),
                         };
                         cx.notify();
