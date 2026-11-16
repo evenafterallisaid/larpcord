@@ -185,6 +185,6 @@ impl Larpcord {
                     )
                     .when_some(self.video.clone(), |s, video| s.child(video)),
             )
-            .map(|element| fade_in(element, "video-enter", self.settings.animations))
+            .map(|element| fade_in(element, "video-enter", self.motion()))
     }
 }

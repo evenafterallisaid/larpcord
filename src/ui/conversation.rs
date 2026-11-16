@@ -85,11 +85,8 @@ impl Larpcord {
                     .take(3)
                     .enumerate()
                     .map(|(index, sticker)| {
-                        let url = crate::media::sticker(
-                            &sticker.id,
-                            sticker.format_type,
-                            self.settings.animations,
-                        );
+                        let url =
+                            crate::media::sticker(&sticker.id, sticker.format_type, self.motion());
                         let image = url.as_deref().and_then(|url| self.media.get(url));
                         let name = sticker.name.clone();
                         div()
@@ -183,7 +180,7 @@ impl Larpcord {
                 let replay = self.reaction_replays.get(&replay_key).copied().unwrap_or(0);
                 let animation_key =
                     SharedString::from(format!("burst-{replay_key}-{count}-{replay}"));
-                let animate = burst && self.settings.animations;
+                let animate = burst && self.motion();
                 let emoji_key = SharedString::from(format!("emoji-{animation_key}"));
                 chips.push(
                     row()
@@ -245,7 +242,7 @@ impl Larpcord {
                         .child(count.to_string())
                         .tooltip(move |_, cx| cx.new(|_| Hint(tooltip.clone())).into())
                         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                            if *hovered && burst && this.settings.animations {
+                            if *hovered && burst && this.motion() {
                                 if this.reaction_replays.len() >= 128
                                     && !this.reaction_replays.contains_key(&hover_key)
                                     && let Some(old) = this.reaction_replays.keys().next().cloned()

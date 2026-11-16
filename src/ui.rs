@@ -2402,7 +2402,7 @@ impl Larpcord {
                         .rounded_full()
                         .bg(self.color(TEXT))
                         .map(|element| {
-                            if self.settings.animations {
+                            if self.motion() {
                                 element
                                     .with_animation(
                                         ("selected-server", index),
@@ -2998,7 +2998,7 @@ impl Larpcord {
             .clamp(0.25, 8.);
         let w = 400_f32.min(280. * ratio);
         let h = w / ratio;
-        let moving = self.settings.animations
+        let moving = self.motion()
             && reqwest::Url::parse(url).ok().is_some_and(|u| {
                 [".gif", ".apng"]
                     .iter()
@@ -4112,7 +4112,7 @@ impl Larpcord {
                             ),
                     ),
             )
-            .map(|element| fade_in(element, "settings-enter", self.settings.animations))
+            .map(|element| fade_in(element, "settings-enter", self.motion()))
     }
 }
 

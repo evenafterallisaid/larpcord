@@ -153,35 +153,41 @@ impl Larpcord {
         member: Option<&Member>,
         height: f32,
     ) -> AnyElement {
-        let palette = member
+        let Some(plate) = member
             .and_then(|m| m.collectibles.as_ref())
             .or(user.collectibles.as_ref())
             .and_then(|c| c.nameplate.as_ref())
-            .and_then(|p| p.palette.as_deref());
+        else {
+            return div().into_any_element();
+        };
+        let palette = plate.palette.as_deref();
         let tint = match palette {
-            Some("crimson") => 0x900007,
-            Some("berry") => 0x893a99,
-            Some("sky") => 0x0080b7,
-            Some("teal") => 0x086460,
-            Some("forest") => 0x2d5401,
-            Some("bubble_gum") => 0xdc3e97,
-            Some("violet") => 0x730bc8,
-            Some("cobalt") => 0x0131c2,
-            Some("clover") => 0x047b20,
-            Some("lemon") => 0xf6cd12,
-            Some("white") => 0xffffff,
-            _ => 0,
+            Some("crimson") => Some(0x900007),
+            Some("berry") => Some(0x893a99),
+            Some("sky") => Some(0x0080b7),
+            Some("teal") => Some(0x086460),
+            Some("forest") => Some(0x2d5401),
+            Some("bubble_gum") => Some(0xdc3e97),
+            Some("violet") => Some(0x730bc8),
+            Some("cobalt") => Some(0x0131c2),
+            Some("clover") => Some(0x047b20),
+            Some("lemon") => Some(0xf6cd12),
+            Some("white") => Some(0xffffff),
+            Some("black") => Some(0),
+            _ => None,
         };
         div()
             .absolute()
             .inset_0()
             .rounded_md()
             .overflow_hidden()
-            .bg(linear_gradient(
-                90.,
-                linear_color_stop(rgba(tint << 8), 0.),
-                linear_color_stop(rgba((tint << 8) | 0x4d), 1.),
-            ))
+            .when_some(tint, |s, tint| {
+                s.bg(linear_gradient(
+                    90.,
+                    linear_color_stop(rgba(tint << 8), 0.),
+                    linear_color_stop(rgba((tint << 8) | 0x4d), 1.),
+                ))
+            })
             .when_some(self.nameplate(user, member), |s, image| {
                 let ratio = image.size(0).width.0 as f32 / image.size(0).height.0.max(1) as f32;
                 s.child(

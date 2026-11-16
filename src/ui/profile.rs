@@ -588,7 +588,6 @@ impl Larpcord {
                                         s.child(
                                             column()
                                                 .gap_4()
-                                                .child(div().h(px(1.)).bg(self.color(LINE)))
                                                 .when_some(
                                                     profile
                                                         .bio()

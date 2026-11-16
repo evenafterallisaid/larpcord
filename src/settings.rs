@@ -53,7 +53,9 @@ impl Settings {
         settings.recent_emoji.truncate(32);
         settings.sanitize_recents();
         settings.custom_theme = Self::path()
-            .and_then(|p| std::fs::read(p.with_file_name("theme.json")).ok())
+            .map(|p| p.with_file_name("theme.json"))
+            .filter(|p| fs::metadata(p).is_ok_and(|m| m.len() <= 16384))
+            .and_then(|p| fs::read(p).ok())
             .filter(|bytes| bytes.len() <= 16384)
             .and_then(|bytes| serde_json::from_slice::<crate::theme::Tokens>(&bytes).ok())
             .filter(crate::theme::Tokens::valid);
@@ -67,17 +69,15 @@ impl Settings {
         self.recent_stickers.truncate(32);
         seen.clear();
         self.recent_gifs.retain(|g| {
-            crate::expressions::gif_url(&g.url)
+            (crate::expressions::gif_url(&g.url) || crate::media::cdn_url(&g.url))
                 && g.title.len() <= 480
                 && seen.insert(g.url.clone())
         });
         self.recent_gifs.truncate(32);
         for gif in &mut self.recent_gifs {
-            if gif
-                .preview
-                .as_deref()
-                .is_some_and(|url| !crate::expressions::gif_preview(url))
-            {
+            if gif.preview.as_deref().is_some_and(|url| {
+                !crate::expressions::gif_preview(url) && !crate::media::cdn_url(url)
+            }) {
                 gif.preview = None;
             }
         }
