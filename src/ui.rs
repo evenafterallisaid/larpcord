@@ -85,6 +85,7 @@ pub struct Larpcord {
     reply_to: Option<composer::Reply>,
     pending_reply: Option<composer::Reply>,
     hovered_message: Option<String>,
+    message_tools_top: Pixels,
     reaction_target: Option<Message>,
     reaction_pending: HashSet<(String, String)>,
     message_menu: Option<(Message, Point<Pixels>)>,
@@ -538,6 +539,7 @@ impl Larpcord {
             reply_to: None,
             pending_reply: None,
             hovered_message: None,
+            message_tools_top: px(0.),
             reaction_target: None,
             reaction_pending: HashSet::new(),
             message_menu: None,
@@ -4281,6 +4283,17 @@ impl Larpcord {
 
 impl Render for Larpcord {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tools_message = self
+            .hovered_message
+            .as_deref()
+            .or_else(|| self.message_menu.as_ref().map(|(m, _)| m.id.as_str()))
+            .or_else(|| self.reaction_target.as_ref().map(|m| m.id.as_str()));
+        self.message_tools_top = tools_message
+            .and_then(|id| self.rendered_ids.iter().position(|m| m == id))
+            .and_then(|index| self.messages.bounds_for_item(index))
+            .map_or(px(0.), |bounds| {
+                (self.messages.viewport_bounds().top() - bounds.top()).max(px(0.))
+            });
         self.media.begin_frame();
         let emoji_images = crate::content::parts(&self.composer.read(cx).content)
             .into_iter()
@@ -4556,6 +4569,17 @@ mod tests {
         });
         let row = cx.debug_bounds("message-row-11").unwrap();
         cx.simulate_mouse_move(row.center(), None, Modifiers::default());
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        cx.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).hovered_message.as_deref(),
+                Some("11"),
+                "hovered row {:?}",
+                row
+            )
+        });
         let action = cx.debug_bounds("reply-message").unwrap();
         cx.simulate_mouse_move(action.center(), None, Modifiers::default());
         cx.simulate_click(action.center(), Modifiers::default());

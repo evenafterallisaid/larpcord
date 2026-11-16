@@ -191,18 +191,10 @@ impl Larpcord {
         let content = message.content.clone();
         let add_reaction = message.clone();
         let menu = message.clone();
-        let top = self
-            .rendered_ids
-            .iter()
-            .position(|id| id == &message.id)
-            .and_then(|index| self.messages.bounds_for_item(index))
-            .map_or(px(0.), |bounds| {
-                (self.messages.viewport_bounds().top() - bounds.top()).max(px(0.))
-            });
         row()
             .absolute()
             .right(px(16.))
-            .top(top)
+            .top(self.message_tools_top)
             .h(px(34.))
             .rounded_lg()
             .border_1()
