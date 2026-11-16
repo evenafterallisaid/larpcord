@@ -18,7 +18,11 @@ impl Larpcord {
             id: message.id.clone(),
             channel: message.channel_id.clone(),
             name: message.name().to_string(),
-            text: message.content.chars().take(100).collect(),
+            text: if super::gif::gif_only(message) {
+                "GIF".into()
+            } else {
+                message.content.chars().take(100).collect()
+            },
         });
         window.focus(&self.composer.focus_handle(cx));
         cx.notify();

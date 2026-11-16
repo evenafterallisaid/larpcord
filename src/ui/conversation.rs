@@ -330,7 +330,7 @@ impl Larpcord {
             .text_color(rgb(0xffffff))
             .shadow_lg()
             .hover(|s| s.bg(rgba(0x666ad9e8)))
-            .on_click(cx.listener(|this, _, _, cx| this.jump_latest(cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.jump_latest(window, cx)))
             .into_any_element()
     }
 }

@@ -107,6 +107,7 @@ pub struct Larpcord {
     scrolled_away: bool,
     jump_task: Option<Task<()>>,
     jumping: bool,
+    jump_after_latest: Option<String>,
     scroll_rebound: f32,
     rebound_task: Option<Task<()>>,
     latest_opacity: f32,
@@ -561,6 +562,7 @@ impl Larpcord {
             scrolled_away: false,
             jump_task: None,
             jumping: false,
+            jump_after_latest: None,
             scroll_rebound: 0.,
             rebound_task: None,
             latest_opacity: 0.,
@@ -799,6 +801,7 @@ impl Larpcord {
     fn choose_channel(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.jump_task = None;
         self.jumping = false;
+        self.jump_after_latest = None;
         self.latest_fade = None;
         self.latest_opacity = 0.;
         self.latest_target = false;
@@ -1053,7 +1056,7 @@ impl Larpcord {
         }
     }
 
-    fn jump_latest(&mut self, cx: &mut Context<Self>) {
+    fn jump_latest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.jumping {
             return;
         }
@@ -1069,19 +1072,26 @@ impl Larpcord {
             .is_some_and(|id| self.loading.contains_key(id));
         if newer || pending {
             self.load_history(Page::Latest);
+            if self.motion() {
+                self.jump_after_latest = self.selected_channel.clone();
+                self.jumping = true;
+                self.scrolled_away = true;
+                cx.notify();
+                return;
+            }
         }
         if self.motion() && !newer && !pending {
             let start = -self.messages.scroll_px_offset_for_scrollbar().y;
             self.scrolled_away = true;
             self.jumping = true;
             let channel = self.selected_channel.clone();
-            self.jump_task = Some(cx.spawn(async move |view, cx| {
+            self.jump_task = Some(cx.spawn_in(window, async move |view, cx| {
                 for step in 1..=24 {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(12))
                         .await;
                     let keep = view
-                        .update(cx, |this, cx| {
+                        .update_in(cx, |this, window, cx| {
                             if this.selected_channel != channel || !this.jumping {
                                 return false;
                             }
@@ -1096,6 +1106,7 @@ impl Larpcord {
                                 this.scrolled_away = false;
                                 this.jumping = false;
                                 this.messages.reset(this.rendered_ids.len());
+                                this.mark_view_read(window, cx);
                             }
                             cx.notify();
                             true
@@ -1108,6 +1119,7 @@ impl Larpcord {
             }));
         } else {
             self.messages.reset(self.rendered_ids.len());
+            self.mark_view_read(window, cx);
         }
         cx.notify();
     }
@@ -1522,10 +1534,39 @@ impl Larpcord {
                                 self.scrolled_away = false;
                             }
                             self.refresh_messages();
+                            if page == Page::Latest
+                                && self.jump_after_latest.as_ref() == Some(&channel)
+                            {
+                                self.jump_after_latest = None;
+                                self.jumping = false;
+                                if self.motion() {
+                                    self.scrolled_away = true;
+                                    self.messages.scroll_to(ListOffset {
+                                        item_ix: self.rendered_ids.len().saturating_sub(8),
+                                        offset_in_item: px(0.),
+                                    });
+                                    let weak = cx.weak_entity();
+                                    let selected = channel.clone();
+                                    window.on_next_frame(move |window, cx| {
+                                        if let Some(view) = weak.upgrade() {
+                                            view.update(cx, |this, cx| {
+                                                if this.selected_channel.as_ref() == Some(&selected)
+                                                {
+                                                    this.jump_latest(window, cx);
+                                                }
+                                            });
+                                        }
+                                    });
+                                }
+                            }
                             self.mark_view_read(window, cx);
                         }
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => {
+                        self.jump_after_latest = None;
+                        self.jumping = false;
+                        self.error = Some(error);
+                    }
                 }
             }
             Event::Profile {
@@ -3287,7 +3328,8 @@ impl Larpcord {
                 }
             }
             body = body.child(
-                button(("attachment", index), "↗")
+                button(("attachment", index), "")
+                    .child(icon("external-link", 16.))
                     .max_w_full()
                     .text_size(px(11.))
                     .py_1()
@@ -4330,6 +4372,7 @@ impl Render for Larpcord {
             if self.jumping {
                 self.jump_task = None;
                 self.jumping = false;
+                self.jump_after_latest = None;
             }
         }
         self.update_latest_visibility(cx);
@@ -4550,7 +4593,7 @@ mod tests {
             v.settings.animations = false;
             v.store.clear_history();
             v.store.insert(Message {
-                id: "11".into(),
+                id: "98765".into(),
                 channel_id: "campfire".into(),
                 content: "hover here".into(),
                 author: User {
@@ -4562,12 +4605,16 @@ mod tests {
                 ..Default::default()
             });
             v.refresh_messages();
+            v.messages.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
             cx.notify();
         });
         cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
             view.clone()
         });
-        let row = cx.debug_bounds("message-row-11").unwrap();
+        let row = cx.debug_bounds("message-row-98765").unwrap();
         cx.simulate_mouse_move(row.center(), None, Modifiers::default());
         cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
             view.clone()
@@ -4575,7 +4622,7 @@ mod tests {
         cx.update(|_, cx| {
             assert_eq!(
                 view.read(cx).hovered_message.as_deref(),
-                Some("11"),
+                Some("98765"),
                 "hovered row {:?}",
                 row
             )
@@ -4583,7 +4630,7 @@ mod tests {
         let action = cx.debug_bounds("reply-message").unwrap();
         cx.simulate_mouse_move(action.center(), None, Modifiers::default());
         cx.simulate_click(action.center(), Modifiers::default());
-        cx.update(|_, cx| assert_eq!(view.read(cx).reply_to.as_ref().unwrap().id, "11"));
+        cx.update(|_, cx| assert_eq!(view.read(cx).reply_to.as_ref().unwrap().id, "98765"));
     }
     #[gpui::test]
     fn gifv_uses_a_silent_inline_tile_instead_of_video_controls(cx: &mut TestAppContext) {
@@ -5113,7 +5160,7 @@ mod tests {
                 assert!(!view.pages["campfire"].no_older);
                 view.load_history(Page::Before);
                 let stale = view.loading["campfire"].0;
-                view.jump_latest(cx);
+                view.jump_latest(window, cx);
                 assert_eq!(view.loading["campfire"].1, Page::Latest);
                 assert_ne!(view.loading["campfire"].0, stale);
                 view.receive(
