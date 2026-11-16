@@ -3285,19 +3285,23 @@ impl Larpcord {
             content: &message.content,
         });
         if !decorations.is_empty() {
-            body = body.child(row().gap_2().children(decorations.into_iter().map(|label| {
-                let hint = format!("Added by {}", label.module);
-                div()
-                    .id(SharedString::from(format!("module-label-{}", label.module)))
-                    .px_2()
-                    .rounded_md()
-                    .text_size(px(10.))
-                    .text_color(rgb(label.color))
-                    .border_1()
-                    .border_color(rgba((label.color << 8) | 0x66))
-                    .child(label.text.to_string())
-                    .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
-            })));
+            body = body.child(
+                row()
+                    .gap_2()
+                    .children(decorations.into_iter().enumerate().map(|(index, label)| {
+                        let hint = format!("Added by {}", label.module);
+                        div()
+                            .id(("module-label", index))
+                            .px_2()
+                            .rounded_md()
+                            .text_size(px(10.))
+                            .text_color(rgb(label.color))
+                            .border_1()
+                            .border_color(rgba((label.color << 8) | 0x66))
+                            .child(label.text.to_string())
+                            .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
+                    })),
+            );
         }
         if !content.is_empty() && !gif::media_only(message) {
             body = body.child(

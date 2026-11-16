@@ -254,6 +254,9 @@ impl Registry {
         if let Some(module) = self.modules.iter_mut().find(|m| m.id() == id) {
             grants.retain(|g| g.id != id);
             if enabled {
+                if grants.len() >= 32 {
+                    grants.remove(0);
+                }
                 grants.push(Grant {
                     id: id.into(),
                     digest: module.digest.clone(),
@@ -349,6 +352,18 @@ mod tests {
         );
         r.set_enabled("media-labels", false, &mut grants);
         assert!(r.decorate(event()).is_empty());
+        grants = (0..32)
+            .map(|n| Grant {
+                id: format!("removed-{n}"),
+                digest: "a".repeat(64),
+            })
+            .collect();
+        r.set_enabled("media-labels", true, &mut grants);
+        assert_eq!(grants.len(), 32);
+        assert!(
+            Registry::load(None, &grants).modules[0].enabled,
+            "a full grant list must retain the newly approved module"
+        );
         let bad = bytes.replace("\"has_attachments\": true", "\"contains\": \"secret\"");
         assert!(
             Manifest::parse(bad.as_bytes()).is_err(),
