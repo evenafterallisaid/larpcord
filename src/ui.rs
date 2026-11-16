@@ -85,6 +85,8 @@ pub struct Larpcord {
     reply_to: Option<composer::Reply>,
     pending_reply: Option<composer::Reply>,
     hovered_message: Option<String>,
+    reaction_target: Option<Message>,
+    reaction_pending: HashSet<(String, String)>,
     message_menu: Option<(Message, Point<Pixels>)>,
     search: Entity<TextInput>,
     token: Entity<TextInput>,
@@ -102,6 +104,13 @@ pub struct Larpcord {
     read_task: Option<Task<()>>,
     typing_sent: Option<(String, std::time::Instant)>,
     scrolled_away: bool,
+    jump_task: Option<Task<()>>,
+    jumping: bool,
+    scroll_rebound: f32,
+    rebound_task: Option<Task<()>>,
+    latest_opacity: f32,
+    latest_target: bool,
+    latest_fade: Option<Task<()>>,
     unread_marker: Option<(String, String)>,
     gif_pool: gif::SharedPool,
     media: crate::media::Media,
@@ -391,7 +400,11 @@ impl Larpcord {
                 });
             }
         });
-        let composer = cx.new(|cx| TextInput::new("Message the campfire", false, cx));
+        let composer = cx.new(|cx| {
+            let mut input = TextInput::new("Message the campfire", false, cx);
+            input.inline_emojis = true;
+            input
+        });
         let emoji_search = cx.new(|cx| TextInput::new("Find the perfect emoji", false, cx));
         let search = cx.new(|cx| TextInput::new("Find a conversation", false, cx));
         let token = cx.new(|cx| TextInput::new("Paste a session token", true, cx));
@@ -415,6 +428,13 @@ impl Larpcord {
             cx.subscribe(&search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe(&friend_search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe_in(&composer, window, |this, _, _: &Changed, window, cx| {
+                let input = this.composer.read(cx);
+                if input.content.contains("<:")
+                    || input.content.contains("<a:")
+                    || !input.emoji_images.is_empty()
+                {
+                    cx.notify();
+                }
                 if this.composer.read(cx).content.is_empty()
                     || this.home_page
                     || this.preview
@@ -518,6 +538,8 @@ impl Larpcord {
             reply_to: None,
             pending_reply: None,
             hovered_message: None,
+            reaction_target: None,
+            reaction_pending: HashSet::new(),
             message_menu: None,
             search,
             token,
@@ -535,6 +557,13 @@ impl Larpcord {
             read_task: None,
             typing_sent: None,
             scrolled_away: false,
+            jump_task: None,
+            jumping: false,
+            scroll_rebound: 0.,
+            rebound_task: None,
+            latest_opacity: 0.,
+            latest_target: false,
+            latest_fade: None,
             unread_marker: None,
             gif_pool: Default::default(),
             media,
@@ -645,6 +674,8 @@ impl Larpcord {
         self.failed_sticker = None;
         self.sticker_drafts.clear();
         self.expression_attempts.clear();
+        self.reaction_target = None;
+        self.reaction_pending.clear();
         self.generation += 1;
         self.home_page = false;
         self.profile_inspector = false;
@@ -707,6 +738,8 @@ impl Larpcord {
         self.failed_sticker = None;
         self.sticker_drafts.clear();
         self.expression_attempts.clear();
+        self.reaction_target = None;
+        self.reaction_pending.clear();
         self.generation += 1;
         self.home_page = false;
         self.profile_inspector = false;
@@ -762,6 +795,13 @@ impl Larpcord {
     }
 
     fn choose_channel(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.jump_task = None;
+        self.jumping = false;
+        self.latest_fade = None;
+        self.latest_opacity = 0.;
+        self.latest_target = false;
+        self.rebound_task = None;
+        self.scroll_rebound = 0.;
         if let Some(channel) = self.store.channels.get(&id)
             && !channel.readable()
         {
@@ -1012,6 +1052,9 @@ impl Larpcord {
     }
 
     fn jump_latest(&mut self, cx: &mut Context<Self>) {
+        if self.jumping {
+            return;
+        }
         self.scrolled_away = false;
         let newer = self
             .selected_channel
@@ -1025,8 +1068,78 @@ impl Larpcord {
         if newer || pending {
             self.load_history(Page::Latest);
         }
-        self.messages.reset(self.rendered_ids.len());
+        if self.motion() && !newer && !pending {
+            let start = -self.messages.scroll_px_offset_for_scrollbar().y;
+            self.scrolled_away = true;
+            self.jumping = true;
+            let channel = self.selected_channel.clone();
+            self.jump_task = Some(cx.spawn(async move |view, cx| {
+                for step in 1..=24 {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(12))
+                        .await;
+                    let keep = view
+                        .update(cx, |this, cx| {
+                            if this.selected_channel != channel || !this.jumping {
+                                return false;
+                            }
+                            let t = step as f32 / 24.;
+                            let eased = 1. - (1. - t).powi(4);
+                            let target = this.messages.max_offset_for_scrollbar().height;
+                            this.messages.set_offset_from_scrollbar(point(
+                                px(0.),
+                                -(start + (target - start) * eased),
+                            ));
+                            if step == 24 {
+                                this.scrolled_away = false;
+                                this.jumping = false;
+                                this.messages.reset(this.rendered_ids.len());
+                            }
+                            cx.notify();
+                            true
+                        })
+                        .unwrap_or(false);
+                    if !keep {
+                        break;
+                    }
+                }
+            }));
+        } else {
+            self.messages.reset(self.rendered_ids.len());
+        }
         cx.notify();
+    }
+    fn update_latest_visibility(&mut self, cx: &mut Context<Self>) {
+        let target = !self.jumping
+            && (self.scrolled_away
+                || self
+                    .selected_channel
+                    .as_ref()
+                    .and_then(|id| self.pages.get(id))
+                    .is_some_and(|p| p.newer));
+        if target == self.latest_target {
+            return;
+        }
+        self.latest_target = target;
+        self.latest_fade = None;
+        let end = if target { 1. } else { 0. };
+        if !self.motion() {
+            self.latest_opacity = end;
+            return;
+        }
+        let start = self.latest_opacity;
+        self.latest_fade = Some(cx.spawn(async move |view, cx| {
+            for step in 1..=9 {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(14))
+                    .await;
+                let _ = view.update(cx, |this, cx| {
+                    let t = step as f32 / 9.;
+                    this.latest_opacity = start + (end - start) * (1. - (1. - t).powi(3));
+                    cx.notify();
+                });
+            }
+        }));
     }
 
     fn send(&mut self, _: &mut Window, cx: &mut Context<Self>) {
@@ -1172,6 +1285,28 @@ impl Larpcord {
                 if let Some((profile, _)) = self.profiles.get_mut(&(id, guild)) {
                     enrich(profile);
                 }
+            }
+            Event::Reacted {
+                channel,
+                message,
+                result,
+            } => {
+                self.reaction_pending.remove(&(channel, message));
+                if let Err(error) = result {
+                    self.error = Some(error);
+                }
+            }
+            Event::EmojiRecents(result) => {
+                self.picker.recents_loading = false;
+                match result {
+                    Ok((messages, reactions)) => {
+                        self.picker.account_recent = messages;
+                        self.picker.reaction_recent = reactions;
+                        self.picker.recents_error = None;
+                    }
+                    Err(error) => self.picker.recents_error = Some(error),
+                }
+                self.picker_catalog_ready(cx);
             }
             Event::GifFavorites(result) => {
                 self.picker.favorites_loading = false;
@@ -1783,6 +1918,7 @@ impl Larpcord {
                 }
             }
             "USER_SETTINGS_UPDATE" | "USER_SETTINGS_PROTO_UPDATE" => {
+                self.picker.recents_checked = None;
                 if let Some(mut layout) = crate::navigation::Layout::parse(&data) {
                     if data.get("guild_folders").is_none() && data.get("guild_positions").is_some()
                     {
@@ -3083,8 +3219,12 @@ impl Larpcord {
                     .child(label(time.clone()).text_size(px(12.))),
             );
         }
-        if !content.is_empty() {
-            body = body.child(self.rich_text_at(&content, 16.));
+        if !content.is_empty() && !gif::gif_only(message) {
+            body = body.child(
+                div()
+                    .debug_selector(|| "message-content".into())
+                    .child(self.rich_text_at(&content, 16.)),
+            );
         }
         if message.edited_timestamp.is_some() {
             body = body.child(label("edited").text_size(px(10.)));
@@ -3126,7 +3266,23 @@ impl Larpcord {
                 && crate::media::cdn_url(source)
                 && !attachment.filename.starts_with("SPOILER_")
             {
-                body = body.child(self.media_image(source, attachment.width, attachment.height));
+                if crate::media::animation::image_url(source) {
+                    let poster = crate::model::EmbedMedia {
+                        url: Some(source.to_string()),
+                        width: attachment.width,
+                        height: attachment.height,
+                        ..Default::default()
+                    };
+                    body = body.child(self.gif_card(
+                        source,
+                        Some(&poster),
+                        attachment.width.zip(attachment.height),
+                        cx,
+                    ));
+                } else {
+                    body =
+                        body.child(self.media_image(source, attachment.width, attachment.height));
+                }
             }
             body = body.child(
                 button(("attachment", index), "↗")
@@ -3153,15 +3309,8 @@ impl Larpcord {
                     .filter(|url| crate::video::source(url).is_some())
                     .map(|url| (url, video))
             });
-            if let Some((url, video)) = playable
-                && embed.kind == "gifv"
-            {
-                body = body.child(self.gif_card(
-                    url,
-                    embed.thumbnail.as_ref().or(embed.image.as_ref()),
-                    video.width.zip(video.height),
-                    cx,
-                ));
+            if let Some((url, poster, dimensions)) = gif::embed_gif(embed) {
+                body = body.child(self.gif_card(url, poster, dimensions, cx));
                 continue;
             }
             if let Some((url, video)) = playable
@@ -3292,7 +3441,7 @@ impl Larpcord {
                 let id = message.id.clone();
                 move || format!("message-row-{id}")
             })
-            .min_h(px(28.))
+            .min_h(px(34.))
             .on_mouse_down(MouseButton::Right, {
                 let message = message.clone();
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -3304,7 +3453,11 @@ impl Larpcord {
             .on_hover({
                 let id = message.id.clone();
                 cx.listener(move |this, hovered: &bool, _, cx| {
-                    this.hovered_message = hovered.then(|| id.clone());
+                    if *hovered {
+                        this.hovered_message = Some(id.clone());
+                    } else if this.hovered_message.as_deref() == Some(&id) {
+                        this.hovered_message = None;
+                    }
                     cx.notify();
                 })
             })
@@ -3351,9 +3504,18 @@ impl Larpcord {
                     }),
             )
             .child(body)
-            .when(self.hovered_message.as_deref() == Some(&message.id), |s| {
-                s.child(self.message_tools(message, cx))
-            })
+            .when(
+                self.hovered_message.as_deref() == Some(&message.id)
+                    || self
+                        .message_menu
+                        .as_ref()
+                        .is_some_and(|(m, _)| m.id == message.id)
+                    || self
+                        .reaction_target
+                        .as_ref()
+                        .is_some_and(|m| m.id == message.id),
+                |s| s.child(self.message_tools(message, cx)),
+            )
             .into_any_element()
     }
 
@@ -3527,10 +3689,11 @@ impl Larpcord {
                             )
                         })
                     })
+                    .relative().top(px(self.scroll_rebound))
                     .flex_1()
                     .min_h_0(),
                 )
-                    .when(self.scrolled_away || selected.as_ref().and_then(|id|self.pages.get(id)).is_some_and(|p|p.newer),|s|s.child(self.latest_button(cx)))
+                    .when(self.latest_opacity>0.,|s|s.child(self.latest_button(cx)))
                 )
                 .when(
                     selected
@@ -4118,8 +4281,45 @@ impl Larpcord {
 
 impl Render for Larpcord {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.window_active = window.is_window_active();
         self.media.begin_frame();
+        let emoji_images = crate::content::parts(&self.composer.read(cx).content)
+            .into_iter()
+            .filter_map(|part| {
+                if let crate::content::Part::Emoji { id, .. } = part {
+                    self.media
+                        .get(&format!(
+                            "https://cdn.discordapp.com/emojis/{id}.webp?size=64"
+                        ))
+                        .map(|image| (id.to_string(), image))
+                } else {
+                    None
+                }
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        self.composer.update(cx, |input, cx| {
+            if input.emoji_images.len() != emoji_images.len()
+                || emoji_images.iter().any(|(id, image)| {
+                    input
+                        .emoji_images
+                        .get(id)
+                        .is_none_or(|old| old.id != image.id)
+                })
+            {
+                input.emoji_images = emoji_images;
+                cx.notify();
+            }
+        });
+
+        self.window_active = window.is_window_active();
+        if !self.motion() {
+            self.rebound_task = None;
+            self.scroll_rebound = 0.;
+            if self.jumping {
+                self.jump_task = None;
+                self.jumping = false;
+            }
+        }
+        self.update_latest_visibility(cx);
         gif::Pool::frame(
             &self.gif_pool,
             window,
@@ -4133,6 +4333,51 @@ impl Render for Larpcord {
         column()
             .relative()
             .track_focus(&self.root_focus)
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                if this.jumping {
+                    this.jumping = false;
+                    this.jump_task = None;
+                }
+                if this.motion()
+                    && this.rebound_task.is_none()
+                    && this.settings_tab.is_none()
+                    && !this.profile_is_modal()
+                    && !this.emoji_open
+                    && this.messages.viewport_bounds().contains(&event.position)
+                {
+                    let y = -this.messages.scroll_px_offset_for_scrollbar().y;
+                    let max = this.messages.max_offset_for_scrollbar().height;
+                    let delta = event.delta.pixel_delta(px(22.)).y;
+                    let impulse = if y <= px(0.) && delta > px(0.) {
+                        5.
+                    } else if y >= max && delta < px(0.) {
+                        -5.
+                    } else {
+                        0.
+                    };
+                    if impulse != 0. {
+                        this.scroll_rebound = impulse;
+                        this.rebound_task = Some(cx.spawn(async move |view, cx| {
+                            for step in 1..=14 {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(12))
+                                    .await;
+                                let _ = view.update(cx, |this, cx| {
+                                    let t = step as f32 / 14.;
+                                    this.scroll_rebound = impulse
+                                        * (1. - t).powi(2)
+                                        * (t * std::f32::consts::TAU).cos();
+                                    if step == 14 {
+                                        this.rebound_task = None;
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        }));
+                        cx.notify();
+                    }
+                }
+            }))
             .size_full()
             .bg(self.color(BG))
             .text_color(self.color(TEXT))
@@ -4228,6 +4473,95 @@ mod tests {
     use gpui::{Modifiers, MouseButton, point, px, size};
 
     #[gpui::test]
+    fn quick_reactions_toggle_only_the_selected_message_and_keep_the_draft(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|window, cx| Larpcord::with_preview(window, cx, true));
+        window
+            .update(cx, |v, _, cx| {
+                let message = v
+                    .store
+                    .channel_messages("campfire")
+                    .iter()
+                    .find(|m| m.id == "11")
+                    .unwrap()
+                    .clone();
+                v.composer.update(cx, |i, cx| i.set("draft", cx));
+                v.react_to(&message, "👍", cx);
+                assert!(
+                    v.store
+                        .channel_messages("campfire")
+                        .iter()
+                        .find(|m| m.id == "11")
+                        .unwrap()
+                        .reactions
+                        .iter()
+                        .any(|r| r.me && r.emoji.name.as_deref() == Some("👍"))
+                );
+                v.react_to(&message, "👍", cx);
+                assert!(
+                    !v.store
+                        .channel_messages("campfire")
+                        .iter()
+                        .find(|m| m.id == "11")
+                        .unwrap()
+                        .reactions
+                        .iter()
+                        .any(|r| r.me && r.emoji.name.as_deref() == Some("👍"))
+                );
+                assert_eq!(v.composer.read(cx).content.as_ref(), "draft");
+            })
+            .unwrap();
+    }
+    #[gpui::test]
+    fn own_profile_does_not_offer_mutual_tabs(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx, |v, cx| {
+            v.settings.animations = false;
+            v.profile = Some(Profile {
+                user: v.store.user.clone(),
+                mutual_friends_count: Some(42),
+                ..Default::default()
+            });
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        assert!(cx.debug_bounds("profile-tab-1").is_none());
+    }
+    #[gpui::test]
+    fn hovering_from_message_body_into_reply_keeps_the_action_clickable(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx, |v, cx| {
+            v.settings.animations = false;
+            v.store.clear_history();
+            v.store.insert(Message {
+                id: "11".into(),
+                channel_id: "campfire".into(),
+                content: "hover here".into(),
+                author: User {
+                    id: "friend".into(),
+                    username: "friend".into(),
+                    ..Default::default()
+                },
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                ..Default::default()
+            });
+            v.refresh_messages();
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        let row = cx.debug_bounds("message-row-11").unwrap();
+        cx.simulate_mouse_move(row.center(), None, Modifiers::default());
+        let action = cx.debug_bounds("reply-message").unwrap();
+        cx.simulate_mouse_move(action.center(), None, Modifiers::default());
+        cx.simulate_click(action.center(), Modifiers::default());
+        cx.update(|_, cx| assert_eq!(view.read(cx).reply_to.as_ref().unwrap().id, "11"));
+    }
+    #[gpui::test]
     fn gifv_uses_a_silent_inline_tile_instead_of_video_controls(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
         view.update(cx,|v,cx|{v.store.clear_history();v.store.insert(serde_json::from_value(serde_json::json!({"id":"55","channel_id":"campfire","author":{"id":"x","username":"friend"},"embeds":[{"type":"gifv","video":{"url":"https://cdn.discordapp.com/test.gif.mp4","width":300,"height":200},"thumbnail":{"url":"https://cdn.discordapp.com/test.png","width":300,"height":200}}]})).unwrap());v.refresh_messages();cx.notify();});
@@ -4290,12 +4624,16 @@ mod tests {
         cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
             view.clone()
         });
+        let identity = cx.debug_bounds("profile-identity").unwrap();
+        let card = cx.debug_bounds("profile-card").unwrap();
         let tab = cx.debug_bounds("profile-tab-1").unwrap();
         cx.simulate_click(tab.center(), Modifiers::default());
         cx.update(|_, cx| assert_eq!(view.read(cx).profile_tab, 1));
         let tab = cx.debug_bounds("profile-tab-2").unwrap();
         cx.simulate_click(tab.center(), Modifiers::default());
         cx.update(|_, cx| assert_eq!(view.read(cx).profile_tab, 2));
+        assert_eq!(cx.debug_bounds("profile-card").unwrap(), card);
+        assert_eq!(cx.debug_bounds("profile-identity").unwrap(), identity);
     }
 
     #[gpui::test]

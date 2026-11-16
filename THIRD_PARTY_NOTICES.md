@@ -15,3 +15,11 @@ alhazen-gpui and alhazen-core 0.7.2 by mohamed a. provide native video playback 
 gpui 0.2.2 is vendored under apache-2.0 with graphics atlas reclamation fixes described in `vendor/gpui/LARPCORD-PATCH.md`. its original license is retained.
 
 Inter and the bundled display-name fonts are distributed under the SIL Open Font License 1.1. Source: https://github.com/google/fonts (ofl/inter, bangers, biorhyme, cherrybombone, chicle, museomoderno, pixelifysans, zillaslab, playpensans, orbitron, newrocker, kalam). Copyright notices and the full license for each family are in `licenses/fonts/`. Unavailable display-name families fall back to Inter.
+
+## gemoji emoji aliases
+
+Unicode emoji names and aliases in assets/emoji-aliases.tsv are derived from github/gemoji db/emoji.json under MIT. The full notice is in licenses/GEMOJI-MIT.txt. No artwork from that project is bundled.
+
+## resvg
+
+Remote Discord badge SVGs are rasterized with resvg 0.45.1 under MIT. Its notice is in licenses/RESVG-MIT.txt. External image and file resolution is disabled.

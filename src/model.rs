@@ -121,14 +121,7 @@ pub struct MutualGuild {
 
 impl ProfileBadge {
     pub fn image(&self) -> Option<String> {
-        if crate::media::cdn_url(&self.icon)
-            && self.icon.len() <= 2048
-            && !self
-                .icon
-                .split('?')
-                .next()
-                .is_some_and(|p| p.ends_with(".svg"))
-        {
+        if crate::media::cdn_url(&self.icon) && self.icon.len() <= 2048 {
             return Some(self.icon.clone());
         }
         (!self.icon.is_empty()

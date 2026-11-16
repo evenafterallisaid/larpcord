@@ -68,7 +68,16 @@ impl Larpcord {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(format!("@{}", original.name())),
                     )
-                    .child(label(original.excerpt()).truncate().flex_1().min_w_0()),
+                    .child(
+                        label(if gif::gif_link(&original.content, &original.embeds) {
+                            "GIF".into()
+                        } else {
+                            original.excerpt()
+                        })
+                        .truncate()
+                        .flex_1()
+                        .min_w_0(),
+                    ),
                 None => s.child(label("Original message unavailable").italic()),
             })
             .into_any_element()
@@ -182,6 +191,18 @@ impl Larpcord {
                     SharedString::from(format!("burst-{replay_key}-{count}-{replay}"));
                 let animate = burst && self.motion();
                 let emoji_key = SharedString::from(format!("emoji-{animation_key}"));
+                let clicked_message = message.clone();
+                let clicked_emoji = reaction
+                    .emoji
+                    .id
+                    .as_ref()
+                    .map(|id| {
+                        format!(
+                            "<:{}:{id}>",
+                            reaction.emoji.name.as_deref().unwrap_or("emoji")
+                        )
+                    })
+                    .unwrap_or_else(|| reaction.emoji.name.clone().unwrap_or_default());
                 chips.push(
                     row()
                         .relative()
@@ -240,6 +261,12 @@ impl Larpcord {
                                 }),
                         )
                         .child(count.to_string())
+                        .when(!burst, |s| {
+                            s.cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.react_to(&clicked_message, &clicked_emoji, cx)
+                                }))
+                        })
                         .tooltip(move |_, cx| cx.new(|_| Hint(tooltip.clone())).into())
                         .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                             if *hovered && burst && this.motion() {
@@ -286,8 +313,9 @@ impl Larpcord {
             .child(icon("arrow-down", 18.))
             .child("Jump to latest")
             .debug_selector(|| "jump-latest".into())
+            .opacity(self.latest_opacity)
             .absolute()
-            .bottom(px(6.))
+            .bottom(px(6. - (1. - self.latest_opacity) * 5.))
             .right(px(16.))
             .rounded_full()
             .px_4()

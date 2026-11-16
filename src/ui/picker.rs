@@ -156,6 +156,7 @@ impl Larpcord {
         self.picker.request += 1;
         self.picker.loading = false;
         self.picker.hovered = None;
+        self.reaction_target = None;
         let _ = self.backend.command(Command::CancelGifs);
     }
     pub(super) fn toggle_picker(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
@@ -186,6 +187,20 @@ impl Larpcord {
     fn load_picker_scope(&mut self, cx: &mut Context<Self>) {
         if self.preview {
             return;
+        }
+        if self.picker.tab == Tab::Emoji
+            && !self.picker.recents_loading
+            && self
+                .picker
+                .recents_checked
+                .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(60))
+        {
+            self.picker.recents_loading = true;
+            self.picker.recents_checked = Some(std::time::Instant::now());
+            if let Err(error) = self.backend.command(Command::EmojiRecents) {
+                self.picker.recents_loading = false;
+                self.picker.recents_error = Some(error);
+            }
         }
         if self.picker.tab == Tab::Gifs
             && !self.picker.favorites_loaded
@@ -336,7 +351,7 @@ impl Larpcord {
             }
         }
         choices.extend(
-            composer::EMOJIS
+            crate::expressions::unicode_catalog()
                 .iter()
                 .filter(|(e, n)| query.is_empty() || n.contains(&query) || e.contains(&query))
                 .map(|(e, n)| EmojiChoice {
@@ -348,11 +363,64 @@ impl Larpcord {
                     locked: None,
                 }),
         );
+        let mut seen = std::collections::HashSet::new();
         let mut recent = self
             .picker
-            .recent
+            .session_recent
             .iter()
-            .filter_map(|key| choices.iter().find(|c| &c.text == key).cloned())
+            .chain(if self.reaction_target.is_some() {
+                &self.picker.reaction_recent
+            } else {
+                &self.picker.account_recent
+            })
+            .chain(&self.picker.recent)
+            .filter_map(|key| {
+                let unicode = crate::expressions::unicode_alias(key);
+                let found = choices
+                    .iter()
+                    .find(|c| {
+                        c.text == *key
+                            || unicode.is_some_and(|u| u == c.text)
+                            || c.emoji.as_ref().is_some_and(|e| &e.id == key)
+                    })
+                    .cloned();
+                let choice = found.or_else(|| {
+                    if crate::expressions::id(key) {
+                        let emoji = self
+                            .store
+                            .guilds
+                            .iter()
+                            .flat_map(|g| g.emojis.iter().flatten())
+                            .find(|e| &e.id == key)
+                            .cloned()
+                            .unwrap_or(Emoji {
+                                id: key.clone(),
+                                name: "emoji".into(),
+                                ..Default::default()
+                            });
+                        Some(EmojiChoice {
+                            text: emoji.markup(),
+                            name: emoji.name.clone(),
+                            source: "Discord recent".into(),
+                            scope: "recent".into(),
+                            emoji: Some(emoji),
+                            locked: None,
+                        })
+                    } else {
+                        None
+                    }
+                })?;
+                if (!query.is_empty()
+                    && !choice.name.to_lowercase().contains(&query)
+                    && !choice.text.contains(&query))
+                    || !seen.insert(choice.text.clone())
+                {
+                    None
+                } else {
+                    Some(choice)
+                }
+            })
+            .take(64)
             .collect::<Vec<_>>();
         for choice in &mut recent {
             choice.source = "Recently used".into();
@@ -615,7 +683,13 @@ impl Larpcord {
                             this.picker.remember(choice.text.clone());
                             this.settings.recent_emoji = this.picker.recent.clone();
                             this.persist(cx);
-                            this.insert_expression(&choice.text, window, cx);
+                            if let Some(message) = this.reaction_target.clone() {
+                                this.react_to(&message, &choice.text, cx);
+                                this.close_picker();
+                                window.focus(&this.composer.focus_handle(cx));
+                            } else {
+                                this.insert_expression(&choice.text, window, cx);
+                            }
                         }
                     }))
             }))
@@ -745,33 +819,40 @@ impl Larpcord {
                                 |(n, gif)| {
                                     let gif = gif.clone();
                                     let hint = gif.title.clone();
-                                    let image = gif.preview.as_deref().and_then(|url| {
-                                        let moving = if this.motion() {
-                                            format!("{url}#motion")
-                                        } else {
-                                            url.to_string()
-                                        };
-                                        this.media.get(&moving).or_else(|| this.media.get(url))
-                                    });
+                                    let image =
+                                        gif.preview.as_deref().and_then(|url| this.media.get(url));
+                                    let player = gif
+                                        .preview
+                                        .as_deref()
+                                        .filter(|url| crate::media::animation::image_url(url))
+                                        .and_then(|url| this.gif_player(url, image.clone(), cx));
                                     let favorite = gif.clone();
                                     let saved =
                                         this.picker.favorites.iter().any(|g| g.url == gif.url);
                                     div()
                                         .id(("gif-choice", index * 2 + n))
+                                        .debug_selector(move || {
+                                            format!("gif-choice-{}", index * 2 + n)
+                                        })
                                         .relative()
                                         .w(px(196.))
                                         .h(px(124.))
                                         .rounded_lg()
                                         .overflow_hidden()
                                         .bg(this.color(SURFACE))
+                                        .border_2()
+                                        .border_color(gpui::transparent_black())
+                                        .hover(|s| s.border_color(this.color(0x5865f2)))
                                         .cursor_pointer()
                                         .child(
-                                            image
-                                                .map(|image| {
-                                                    img(image)
-                                                        .size_full()
-                                                        .object_fit(ObjectFit::Cover)
-                                                        .into_any_element()
+                                            player
+                                                .or_else(|| {
+                                                    image.map(|image| {
+                                                        img(image)
+                                                            .size_full()
+                                                            .object_fit(ObjectFit::Cover)
+                                                            .into_any_element()
+                                                    })
                                                 })
                                                 .unwrap_or_else(|| {
                                                     row()
@@ -799,17 +880,7 @@ impl Larpcord {
                                         .child(this.gif_favorite_button(favorite, saved, cx))
                                         .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
                                         .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.settings.recent_gifs.retain(|g| g.url != gif.url);
-                                            this.settings.recent_gifs.insert(0, gif.clone());
-                                            this.settings.sanitize_recents();
-                                            this.persist(cx);
-                                            let text = if this.composer.read(cx).content.is_empty()
-                                            {
-                                                gif.url.clone()
-                                            } else {
-                                                format!(" {} ", gif.url)
-                                            };
-                                            this.insert_expression(&text, window, cx);
+                                            this.send_gif(&gif, window, cx);
                                         }))
                                 },
                             ))
@@ -967,6 +1038,9 @@ impl Larpcord {
                                     (Tab::Emoji, "Emoji"),
                                 ]
                                 .into_iter()
+                                .filter(|(kind, _)| {
+                                    self.reaction_target.is_none() || *kind == Tab::Emoji
+                                })
                                 .map(|(kind, title)| {
                                     button(SharedString::from(format!("picker-{title}")), title)
                                         .h(px(28.))
@@ -1095,10 +1169,16 @@ impl Larpcord {
                             .border_color(self.color(LINE))
                             .child(
                                 label(match tab {
-                                    Tab::Emoji => "Choose an emoji to insert at your cursor",
+                                    Tab::Emoji => {
+                                        if self.reaction_target.is_some() {
+                                            "Choose an emoji to react to this message"
+                                        } else {
+                                            "Choose an emoji to insert at your cursor"
+                                        }
+                                    }
                                     Tab::Stickers => "Add a sticker, then send when you’re ready",
                                     Tab::Gifs => {
-                                        "GIFs by KLIPY · choose one to add to your message"
+                                        "GIFs by KLIPY · click to send · your text draft stays"
                                     }
                                 })
                                 .text_size(px(10.)),
@@ -1174,6 +1254,28 @@ mod tests {
     use crate::network::{Envelope, Event};
     use gpui::{Modifiers, TestAppContext, point, px, size};
 
+    #[gpui::test]
+    fn account_recents_resolve_unicode_and_custom_ids_before_guild_catalogs_load(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|window, cx| Larpcord::with_preview(window, cx, true));
+        window
+            .update(cx, |v, _, cx| {
+                v.picker.account_recent = vec!["123".into(), "sob".into()];
+                for guild in &mut v.store.guilds {
+                    guild.emojis = None;
+                }
+                let recent = v
+                    .emoji_choices(cx)
+                    .into_iter()
+                    .filter(|c| c.scope == "recent")
+                    .collect::<Vec<_>>();
+                assert_eq!(recent.len(), 2);
+                assert_eq!(recent[0].emoji.as_ref().unwrap().id, "123");
+                assert_eq!(recent[1].text, "😭");
+            })
+            .unwrap();
+    }
     #[gpui::test]
     fn picker_sections_follow_scrolling_and_keep_recent_groups_separate(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));

@@ -142,7 +142,7 @@ pub fn gifs(value: Value) -> Vec<Gif> {
         .take(50)
         .filter_map(|v| {
             let url = v["url"].as_str().filter(|u| gif_url(u))?.to_string();
-            let preview = ["preview", "gif_src"]
+            let preview = ["gif_src", "preview"]
                 .iter()
                 .filter_map(|k| v[*k].as_str())
                 .find(|u| gif_preview(u))
@@ -173,6 +173,12 @@ pub enum Tab {
 
 #[derive(Default)]
 pub struct Picker {
+    pub account_recent: Vec<String>,
+    pub reaction_recent: Vec<String>,
+    pub session_recent: Vec<String>,
+    pub recents_checked: Option<std::time::Instant>,
+    pub recents_loading: bool,
+    pub recents_error: Option<String>,
     pub favorites: Vec<Gif>,
     pub favorites_loaded: bool,
     pub favorites_loading: bool,
@@ -194,10 +200,33 @@ pub struct Picker {
 }
 impl Picker {
     pub fn remember(&mut self, text: String) {
+        self.session_recent.retain(|old| old != &text);
+        self.session_recent.insert(0, text.clone());
+        self.session_recent.truncate(32);
         self.recent.retain(|old| old != &text);
         self.recent.insert(0, text);
         self.recent.truncate(32);
     }
+}
+
+pub fn unicode_alias(key: &str) -> Option<&'static str> {
+    include_str!("../assets/emoji-aliases.tsv")
+        .lines()
+        .filter_map(|l| l.split_once('\t'))
+        .find(|(name, _)| *name == key.trim_matches(':'))
+        .map(|(_, emoji)| emoji)
+}
+pub fn unicode_catalog() -> &'static Vec<(&'static str, &'static str)> {
+    static CATALOG: std::sync::OnceLock<Vec<(&str, &str)>> = std::sync::OnceLock::new();
+    CATALOG.get_or_init(|| {
+        let mut seen = std::collections::HashSet::new();
+        include_str!("../assets/emoji-aliases.tsv")
+            .lines()
+            .filter_map(|l| l.split_once('\t'))
+            .filter(|(_, emoji)| seen.insert(*emoji))
+            .map(|(name, emoji)| (emoji, name))
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -206,13 +235,16 @@ mod tests {
     #[test]
     fn gif_results_keep_only_provider_links_and_credential_free_image_previews() {
         let page = gifs(serde_json::json!([
-            {"url":"https://klipy.com/gifs/cat","preview":"https://static.klipy.com/cat.gif","title":"cat"},
+            {"url":"https://klipy.com/gifs/cat","preview":"https://static.klipy.com/cat.gif","title":"cat","gif_src":"https://static.klipy.com/full-cat.gif"},
             {"url":"https://klipy.com/gifs/video","preview":"https://evil.invalid/x.gif"},
             {"url":"https://klipy.com.evil.invalid/gifs/x","preview":"https://static.klipy.com/x.gif"},
             {"url":"https://user:password@klipy.com/gifs/x"}
         ]));
         assert_eq!(page.len(), 2);
-        assert!(page[0].preview.is_some());
+        assert_eq!(
+            page[0].preview.as_deref(),
+            Some("https://static.klipy.com/full-cat.gif")
+        );
         assert!(page[1].preview.is_none());
         assert!(!gif_preview("https://static.klipy.com/x.mp4"));
     }

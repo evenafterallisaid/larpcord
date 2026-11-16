@@ -73,6 +73,7 @@ fn toolbar_button_hover(
         .cursor_pointer()
         .text_color(rgb(MUTED))
         .hover(move |s| s.bg(rgb(hover_color)).text_color(rgb(TEXT)))
+        .active(|s| s.bg(rgb(0x404249)).text_color(rgb(0xffffff)))
         .child(icon(name, 20.))
         .tooltip(move |_, cx| cx.new(|_| Hint(hint.into())).into())
 }
@@ -93,6 +94,7 @@ impl Larpcord {
                         .map(|image| {
                             img(image)
                                 .size_full()
+                                .rounded_full()
                                 .object_fit(ObjectFit::Cover)
                                 .into_any_element()
                         })
@@ -108,29 +110,25 @@ impl Larpcord {
         }
     }
     pub(super) fn presence_avatar(&self, user: &User, size: f32) -> AnyElement {
-        div()
-            .relative()
-            .size(px(size))
-            .flex_shrink_0()
-            .child(self.avatar(user, size))
-            .when_some(self.store.presences.get(&user.id), |s, p| {
-                s.child(
-                    div()
-                        .absolute()
-                        .right(px(-1.))
-                        .bottom(px(-1.))
-                        .child(presence_badge(
-                            &p.status,
-                            if size < 30. { 11. } else { 14. },
-                            self.settings
-                                .theme
-                                .tokens(self.settings.custom_theme)
-                                .sidebar,
-                        )),
+        self.avatar_with_status(
+            user,
+            None,
+            None,
+            size,
+            false,
+            self.store.presences.get(&user.id).map(|p| {
+                (
+                    p.status.as_str(),
+                    self.settings
+                        .theme
+                        .tokens(self.settings.custom_theme)
+                        .sidebar,
+                    if size < 30. { 11. } else { 14. },
                 )
-            })
-            .into_any_element()
+            }),
+        )
     }
+
     pub(super) fn titlebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let title = self
             .selected_guild

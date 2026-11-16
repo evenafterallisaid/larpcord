@@ -2,11 +2,19 @@ use super::*;
 
 impl Larpcord {
     fn profile_tabs(&self, profile: &Profile, cx: &mut Context<Self>) -> AnyElement {
+        if profile.user.id == self.store.user.id {
+            return div()
+                .h(px(1.))
+                .w_full()
+                .bg(self.color(LINE))
+                .into_any_element();
+        }
         let friends = profile
             .mutual_friends_count
             .unwrap_or(profile.mutual_friends.len() as u32);
         let servers = profile.mutual_guilds.as_ref().map_or(0, Vec::len);
         column()
+            .flex_shrink_0()
             .gap_2()
             .child(
                 row()
@@ -112,7 +120,8 @@ impl Larpcord {
                         .collect::<Vec<_>>()
                 }),
             )
-            .h(px(288.))
+            .flex_1()
+            .min_h_0()
             .into_any_element()
         } else {
             let servers = profile
@@ -212,7 +221,8 @@ impl Larpcord {
                         .collect::<Vec<_>>()
                 }),
             )
-            .h(px(288.))
+            .flex_1()
+            .min_h_0()
             .into_any_element()
         }
     }
@@ -457,13 +467,13 @@ impl Larpcord {
                                     .id("profile-content")
                                     .flex_1()
                                     .min_h_0()
-                                    .overflow_y_scroll()
                                     .p(px(if inspector { 16. } else { 20. }))
                                     .pt(px(if inspector { 52. } else { 64. }))
                                     .gap_4()
                                     .child(
                                         column()
                                             .debug_selector(|| "profile-identity".into())
+                                            .flex_shrink_0()
                                             .gap_1()
                                             .child(
                                                 row()
@@ -522,27 +532,6 @@ impl Larpcord {
                                                         },
                                                     ),
                                             )
-                                            .when_some(presence, |s, p| {
-                                                s.child(
-                                                    row()
-                                                        .gap_2()
-                                                        .mt_1()
-                                                        .child(chrome::presence_badge(
-                                                            &p.status,
-                                                            12.,
-                                                            u32::from(top) >> 8,
-                                                        ))
-                                                        .child(
-                                                            label(match p.status.as_str() {
-                                                                "online" => "Online",
-                                                                "idle" => "Idle",
-                                                                "dnd" => "Do Not Disturb",
-                                                                _ => "Offline",
-                                                            })
-                                                            .text_size(px(11.)),
-                                                        ),
-                                                )
-                                            })
                                             .when_some(
                                                 presence.and_then(|p| p.activity.as_ref()),
                                                 |s, activity| {
@@ -554,9 +543,9 @@ impl Larpcord {
                                     )
                                     .when(user.bot, |s| s.child(badge("APP")))
                                     .when(!profile.badges.is_empty(), |s| {
-                                        s.child(row().gap_2().min_h(px(24.)).flex_wrap().children(
+                                        s.child(row().gap_2().min_h(px(24.)).flex_shrink_0().flex_wrap().children(
                                             profile.badges.iter().take(40).filter_map(|b| {
-                                                let image = self.media.get(&b.image()?)?;
+                                                let image = self.media.get(&b.image()?);
                                                 let hint = b
                                                     .description
                                                     .chars()
@@ -569,9 +558,7 @@ impl Larpcord {
                                                             b.icon
                                                         )))
                                                         .child(
-                                                            img(image)
-                                                                .size(px(20.))
-                                                                .object_fit(ObjectFit::Contain),
+                                                            div().size(px(20.)).when_some(image, |s,image|s.child(img(image).size_full().object_fit(ObjectFit::Contain))),
                                                         )
                                                         .tooltip(move |_, cx| {
                                                             cx.new(|_| Hint(hint.clone())).into()
@@ -581,12 +568,14 @@ impl Larpcord {
                                         ))
                                     })
                                     .child(self.profile_tabs(profile, cx))
-                                    .when(self.profile_tab != 0, |s| {
+                                    .when(self.profile_tab != 0 && user.id != self.store.user.id, |s| {
                                         s.child(self.profile_mutuals(profile, cx))
                                     })
-                                    .when(self.profile_tab == 0, |s| {
+                                    .when(self.profile_tab == 0 || user.id == self.store.user.id, |s| {
                                         s.child(
                                             column()
+                                                .id("profile-about-scroll")
+                                                .flex_1().min_h_0().overflow_y_scroll()
                                                 .gap_4()
                                                 .when_some(
                                                     profile
@@ -714,22 +703,11 @@ impl Larpcord {
                                     .rounded_full()
                                     .border_4()
                                     .border_color(top)
-                                    .child(self.decorated_avatar(
-                                        user,
-                                        member,
-                                        self.profile_guild.as_deref(),
-                                        if inspector { 72. } else { 88. },
-                                        true,
-                                    ))
-                                    .when_some(presence, |s, p| {
-                                        s.child(div().absolute().right_0().bottom_0().child(
-                                            chrome::presence_badge(
-                                                &p.status,
-                                                if inspector { 16. } else { 20. },
-                                                u32::from(top) >> 8,
-                                            ),
-                                        ))
-                                    }),
+                                    .child(self.avatar_with_status(
+                                        user, member, self.profile_guild.as_deref(),
+                                        if inspector {72.} else {88.}, true,
+                                        presence.map(|p|(p.status.as_str(),u32::from(top)>>8,if inspector {16.} else {20.})),
+                                    )),
                             )
                             .child(
                                 toolbar_button("copy-user-id", "copy", "Copy user ID")

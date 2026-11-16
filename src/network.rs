@@ -19,6 +19,12 @@ use zeroize::Zeroizing;
 use crate::model::{Channel, Guild, Member, Message, Page, Profile, User};
 
 pub enum Event {
+    Reacted {
+        channel: String,
+        message: String,
+        result: Result<(), String>,
+    },
+    EmojiRecents(Result<(Vec<String>, Vec<String>), String>),
     ProfileBadges {
         id: String,
         guild: Option<String>,
@@ -90,6 +96,13 @@ pub struct Envelope {
 }
 
 pub enum Command {
+    React {
+        channel: String,
+        message: String,
+        emoji: String,
+        remove: bool,
+    },
+    EmojiRecents,
     GifFavorites(Option<(crate::expressions::Gif, bool)>),
     CancelGifs,
     Gifs {
@@ -367,8 +380,31 @@ impl Api {
         }
         Ok(current.gifs())
     }
+    async fn react(
+        &self,
+        channel: &str,
+        message: &str,
+        emoji: &str,
+        remove: bool,
+    ) -> Result<(), String> {
+        if !snowflake(channel) || !snowflake(message) || emoji.is_empty() || emoji.len() > 128 {
+            return Err("Invalid reaction".into());
+        }
+        let mut url = reqwest::Url::parse("https://discord.com/").unwrap();
+        url.path_segments_mut().unwrap().push(emoji);
+        self.request::<Value>(
+            if remove { Method::DELETE } else { Method::PUT },
+            &format!(
+                "/channels/{channel}/messages/{message}/reactions/{}/@me?type=0",
+                url.path().trim_start_matches('/')
+            ),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
     async fn gifs(&self, query: &str) -> Result<Vec<crate::expressions::Gif>, String> {
-        let options = "media_format=tinygif&provider=klipy&locale=en-US&limit=50";
+        let options = "media_format=gif&provider=klipy&locale=en-US&limit=50";
         let path = if query.is_empty() {
             format!("/gifs/trending-gifs?{options}")
         } else {
@@ -665,6 +701,15 @@ impl Backend {
                                     let Some(client)=api.clone() else {continue;};let events=events.clone();
                                     requests.spawn(async move {let result=client.request(Method::GET,"/users/@me/settings-proto/1",None).await;emit(&events,generation,Event::Layout(result)).await;});
                                 }
+                                Command::React {channel,message,emoji,remove} => {
+                                    let Some(client)=api.clone() else {continue;};let events=events.clone();
+                                    requests.spawn(async move {let result=client.react(&channel,&message,&emoji,remove).await;emit(&events,generation,Event::Reacted{channel,message,result}).await;});
+                                }
+                                Command::EmojiRecents => {
+                                    let events=events.clone();
+                                    let Some(client)=api.as_ref().map(Api::discovery) else {continue;};
+                                    requests.spawn(async move {let result=client.request::<Value>(Method::GET,"/users/@me/settings-proto/2",None).await.and_then(|v|crate::gif_favorites::emoji_recents(&v));emit(&events,generation,Event::EmojiRecents(result)).await;});
+                                }
                                 Command::GifFavorites(change) => {
                                     let Some(client)=api.as_ref().map(Api::discovery) else {continue;};let events=events.clone();
                                     requests.spawn(async move {let result=client.gif_favorites(change).await;emit(&events,generation,Event::GifFavorites(result)).await;});
@@ -728,7 +773,7 @@ impl Backend {
                                         emit(&events, generation, Event::Profile {id:id.clone(), guild:guild.clone(), request, result:result.map(Box::new)}).await;
                                         let badges=async {
                                             let client=client.discovery();
-                                            if let Ok(Ok(value))=tokio::time::timeout(Duration::from_millis(1500),client.request::<Value>(Method::GET,&format!("/users/{id}/badges"),None)).await {
+                                            if let Ok(Ok(value))=tokio::time::timeout(Duration::from_secs(5),client.request::<Value>(Method::GET,&format!("/users/{id}/badges"),None)).await {
                                                 let badges=profile_badges(&value);
                                                 emit(&events,generation,Event::ProfileBadges{id:id.clone(),guild:guild.clone(),request,badges}).await;
                                             }
@@ -1215,10 +1260,7 @@ fn profile_badges(value: &Value) -> Vec<crate::model::ProfileBadge> {
             ]
             .iter()
             .filter_map(|key| art[*key].as_str().or(badge[*key].as_str()))
-            .find(|url| {
-                crate::media::cdn_url(url)
-                    && !url.split('?').next().is_some_and(|p| p.ends_with(".svg"))
-            })?
+            .find(|url| crate::media::cdn_url(url))?
             .to_string();
             let description = badge["name"]
                 .as_str()
@@ -1227,6 +1269,16 @@ fn profile_badges(value: &Value) -> Vec<crate::model::ProfileBadge> {
                 .chars()
                 .take(160)
                 .collect();
+            let mut description: String = description;
+            if let Some(tier) = art["name"].as_str().filter(|n| !description.contains(n)) {
+                description.push_str(" · ");
+                description.push_str(tier);
+            }
+            if let Some(info) = badge["info_label"].as_str() {
+                description.push_str(" · ");
+                description.push_str(info);
+            }
+            description = description.chars().take(240).collect();
             Some(crate::model::ProfileBadge { icon, description })
         })
         .take(40)
@@ -1236,6 +1288,31 @@ fn profile_badges(value: &Value) -> Vec<crate::model::ProfileBadge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn reaction_requests_encode_emoji_and_accept_discord_empty_responses() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut api = Api::new(Zeroizing::new("synthetic-session".into())).unwrap();
+        api.endpoint = Some(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            for method in ["PUT", "DELETE"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = vec![0; 4096];
+                let n = socket.read(&mut bytes).await.unwrap();
+                let request = String::from_utf8_lossy(&bytes[..n]);
+                assert!(request.starts_with(&format!(
+                    "{method} /channels/1/messages/2/reactions/%F0%9F%91%8D/@me?type=0 "
+                )));
+                socket
+                    .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+        api.react("1", "2", "👍", false).await.unwrap();
+        api.react("1", "2", "👍", true).await.unwrap();
+        server.await.unwrap();
+    }
     #[tokio::test]
     async fn reading_gif_favorites_never_writes_settings() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1299,6 +1376,13 @@ mod tests {
                 .unwrap();
             let url = reqwest::Url::parse(&format!("http://localhost{path}")).unwrap();
             assert_eq!(url.path(), "/gifs/search");
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(k, _)| k == "media_format")
+                    .unwrap()
+                    .1,
+                "gif"
+            );
             assert_eq!(
                 url.query_pairs().find(|(k, _)| k == "q").unwrap().1,
                 "cats & 犬"
