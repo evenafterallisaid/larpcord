@@ -6,6 +6,7 @@ struct EmojiChoice {
     text: String,
     name: String,
     source: String,
+    scope: String,
     emoji: Option<Emoji>,
     locked: Option<&'static str>,
 }
@@ -13,9 +14,142 @@ struct EmojiChoice {
 struct StickerChoice {
     sticker: Sticker,
     source: String,
+    scope: String,
+}
+
+enum PickerRow {
+    Heading(String, String),
+    Emoji(String, Vec<EmojiChoice>),
+    Stickers(String, Vec<StickerChoice>),
+}
+impl PickerRow {
+    fn scope(&self) -> &str {
+        match self {
+            Self::Heading(scope, _) | Self::Emoji(scope, _) | Self::Stickers(scope, _) => scope,
+        }
+    }
 }
 
 impl Larpcord {
+    fn picker_rows(&self, cx: &Context<Self>) -> Vec<PickerRow> {
+        let mut rows = Vec::new();
+        if self.picker.tab == Tab::Emoji {
+            let choices = self.emoji_choices(cx);
+            let mut start = 0;
+            while start < choices.len() {
+                let scope = choices[start].scope.clone();
+                let end = start
+                    + choices[start..]
+                        .iter()
+                        .take_while(|c| c.scope == scope)
+                        .count();
+                rows.push(PickerRow::Heading(
+                    scope.clone(),
+                    choices[start].source.clone(),
+                ));
+                for chunk in choices[start..end].chunks(8) {
+                    rows.push(PickerRow::Emoji(scope.clone(), chunk.to_vec()));
+                }
+                start = end;
+            }
+        } else {
+            let choices = self.sticker_choices(cx);
+            let mut start = 0;
+            while start < choices.len() {
+                let scope = choices[start].scope.clone();
+                let end = start
+                    + choices[start..]
+                        .iter()
+                        .take_while(|c| c.scope == scope)
+                        .count();
+                rows.push(PickerRow::Heading(
+                    scope.clone(),
+                    choices[start].source.clone(),
+                ));
+                for chunk in choices[start..end].chunks(3) {
+                    rows.push(PickerRow::Stickers(scope.clone(), chunk.to_vec()));
+                }
+                start = end;
+            }
+        }
+        rows
+    }
+
+    fn expression_grid(&self, cx: &mut Context<Self>) -> AnyElement {
+        let rows = self.picker_rows(cx);
+        if rows.is_empty() {
+            return self.picker_empty(
+                if self.picker.packs_loading {
+                    "Loading stickers…"
+                } else {
+                    "Nothing here yet"
+                },
+                self.picker
+                    .packs_error
+                    .as_deref()
+                    .unwrap_or("Try another search. Your recent selections will appear here too."),
+            );
+        }
+        if self.picker_sections.item_count() != rows.len() {
+            self.picker_sections.reset(rows.len());
+        }
+        let scopes = rows
+            .iter()
+            .map(|row| row.scope().to_string())
+            .collect::<Vec<_>>();
+        let weak = cx.weak_entity();
+        self.picker_sections
+            .set_scroll_handler(move |event, _, cx| {
+                if let Some(view) = weak.upgrade() {
+                    view.update(cx, |this, cx| {
+                        let scope = scopes.get(event.visible_range.start).cloned();
+                        if this.picker.scope != scope {
+                            this.picker.scope = scope;
+                            cx.notify();
+                        }
+                    });
+                }
+            });
+        let weak = cx.weak_entity();
+        list(self.picker_sections.clone(), move |index, _, cx| {
+            let Some(view) = weak.upgrade() else {
+                return div().into_any_element();
+            };
+            view.update(cx, |this, cx| match &rows[index] {
+                PickerRow::Heading(_, title) => row()
+                    .id(("expression-heading", index))
+                    .debug_selector(move || format!("expression-heading-{index}"))
+                    .h(px(28.))
+                    .px_2()
+                    .text_color(this.color(MUTED))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title.clone())
+                    .into_any_element(),
+                PickerRow::Emoji(_, choices) => {
+                    this.emoji_row(choices, index.saturating_sub(1), cx)
+                }
+                PickerRow::Stickers(_, choices) => this.sticker_row(choices, index, cx),
+            })
+        })
+        .size_full()
+        .into_any_element()
+    }
+    pub(super) fn picker_catalog_ready(&mut self, cx: &mut Context<Self>) {
+        if self.emoji_open && self.picker.tab != Tab::Gifs {
+            let rows = self.picker_rows(cx);
+            self.picker_sections.reset(rows.len());
+            if let Some(scope) = self.picker.pending_scope.as_ref()
+                && let Some(index) = rows.iter().position(|r| r.scope() == scope)
+            {
+                self.picker_sections.scroll_to(ListOffset {
+                    item_ix: index,
+                    offset_in_item: px(0.),
+                });
+                self.picker.pending_scope = None;
+            }
+        }
+    }
     pub(super) fn close_picker(&mut self) {
         self.emoji_open = false;
         self.picker_debounce = None;
@@ -32,6 +166,7 @@ impl Larpcord {
             self.emoji_open = true;
             self.picker.tab = tab;
             self.picker.scope = None;
+            self.picker_sections.reset(0);
             self.picker.hovered = None;
             self.emoji_search.update(cx, |input, cx| {
                 input.placeholder = match tab {
@@ -51,6 +186,16 @@ impl Larpcord {
     fn load_picker_scope(&mut self, cx: &mut Context<Self>) {
         if self.preview {
             return;
+        }
+        if self.picker.tab == Tab::Gifs
+            && !self.picker.favorites_loaded
+            && !self.picker.favorites_loading
+        {
+            self.picker.favorites_loading = true;
+            if let Err(error) = self.backend.command(Command::GifFavorites(None)) {
+                self.picker.favorites_loading = false;
+                self.picker.favorites_error = Some(error);
+            }
         }
         if self.picker.tab == Tab::Stickers
             && !self.picker.packs_loaded
@@ -84,6 +229,11 @@ impl Larpcord {
         cx.notify();
     }
     pub(super) fn picker_changed(&mut self, cx: &mut Context<Self>) {
+        self.picker_sections.reset(0);
+        self.picker.pending_scope = None;
+        if self.picker.tab != Tab::Gifs || !self.emoji_search.read(cx).content.trim().is_empty() {
+            self.picker.scope = None;
+        }
         self.picker_scroll
             .scroll_to_item_strict(0, ScrollStrategy::Top);
         self.picker_debounce = None;
@@ -104,6 +254,12 @@ impl Larpcord {
         self.picker.gifs.clear();
         self.picker.error = None;
         if self.preview {
+            self.picker.loading = false;
+            return;
+        }
+        if self.emoji_search.read(cx).content.trim().is_empty()
+            && matches!(self.picker.scope.as_deref(), Some("recent" | "favorites"))
+        {
             self.picker.loading = false;
             return;
         }
@@ -141,14 +297,6 @@ impl Larpcord {
             .to_lowercase();
         let mut choices = Vec::new();
         for guild in &self.store.guilds {
-            if self
-                .picker
-                .scope
-                .as_ref()
-                .is_some_and(|scope| scope != "recent" && scope != &guild.id)
-            {
-                continue;
-            }
             for emoji in guild.emojis.iter().flatten().take(1000) {
                 if choices.len() >= 4096 {
                     break;
@@ -181,53 +329,42 @@ impl Larpcord {
                     text: emoji.markup(),
                     name: emoji.name.clone(),
                     source: guild.name.clone(),
+                    scope: guild.id.clone(),
                     emoji: Some(emoji.clone()),
                     locked,
                 });
             }
         }
-        if self
+        choices.extend(
+            composer::EMOJIS
+                .iter()
+                .filter(|(e, n)| query.is_empty() || n.contains(&query) || e.contains(&query))
+                .map(|(e, n)| EmojiChoice {
+                    text: e.to_string(),
+                    name: n.to_string(),
+                    source: "Unicode".into(),
+                    scope: "unicode".into(),
+                    emoji: None,
+                    locked: None,
+                }),
+        );
+        let mut recent = self
             .picker
-            .scope
-            .as_ref()
-            .is_none_or(|s| s == "unicode" || s == "recent")
-        {
-            choices.extend(
-                composer::EMOJIS
-                    .iter()
-                    .filter(|(e, n)| query.is_empty() || n.contains(&query) || e.contains(&query))
-                    .map(|(e, n)| EmojiChoice {
-                        text: e.to_string(),
-                        name: n.to_string(),
-                        source: "Unicode".into(),
-                        emoji: None,
-                        locked: None,
-                    }),
-            );
+            .recent
+            .iter()
+            .filter_map(|key| choices.iter().find(|c| &c.text == key).cloned())
+            .collect::<Vec<_>>();
+        for choice in &mut recent {
+            choice.source = "Recently used".into();
+            choice.scope = "recent".into();
         }
-        choices.sort_by_cached_key(|c| {
-            (
-                self.picker
-                    .recent
-                    .iter()
-                    .position(|s| s == &c.text)
-                    .unwrap_or(usize::MAX),
-                c.source.clone(),
-                c.name.clone(),
-            )
-        });
-        if self.picker.scope.as_deref() == Some("recent") {
-            choices.retain(|c| self.picker.recent.contains(&c.text));
-        }
-        choices
+        recent.extend(choices);
+        recent
     }
     fn sticker_choices(&self, cx: &Context<Self>) -> Vec<StickerChoice> {
         let query = self.emoji_search.read(cx).content.to_lowercase();
         let mut choices = Vec::new();
         for guild in &self.store.guilds {
-            if self.picker.scope.as_ref().is_some_and(|id| id != &guild.id) {
-                continue;
-            }
             for sticker in guild.stickers.iter().flatten().take(500) {
                 if choices.len() >= 4096 {
                     break;
@@ -239,19 +376,12 @@ impl Larpcord {
                     choices.push(StickerChoice {
                         sticker: sticker.clone(),
                         source: guild.name.clone(),
+                        scope: guild.id.clone(),
                     });
                 }
             }
         }
         for pack in &self.picker.packs {
-            if self
-                .picker
-                .scope
-                .as_ref()
-                .is_some_and(|id| id != &format!("pack:{}", pack.id))
-            {
-                continue;
-            }
             for sticker in &pack.stickers {
                 if choices.len() >= 4096 {
                     break;
@@ -263,11 +393,32 @@ impl Larpcord {
                     choices.push(StickerChoice {
                         sticker: sticker.clone(),
                         source: pack.name.clone(),
+                        scope: format!("pack:{}", pack.id),
                     });
                 }
             }
         }
-        choices
+        let mut recent = self
+            .settings
+            .recent_stickers
+            .iter()
+            .filter(|s| {
+                query.is_empty()
+                    || s.name.to_lowercase().contains(&query)
+                    || s.tags.to_lowercase().contains(&query)
+            })
+            .map(|sticker| StickerChoice {
+                sticker: choices
+                    .iter()
+                    .find(|c| c.sticker.id == sticker.id)
+                    .map(|c| c.sticker.clone())
+                    .unwrap_or_else(|| sticker.clone()),
+                source: "Recently used".into(),
+                scope: "recent".into(),
+            })
+            .collect::<Vec<_>>();
+        recent.extend(choices);
+        recent
     }
     fn picker_scope(
         &self,
@@ -288,11 +439,11 @@ impl Larpcord {
             .rounded_lg()
             .cursor_pointer()
             .bg(if selected {
-                rgb(SURFACE)
+                self.color(SURFACE)
             } else {
                 rgba(0x00000000)
             })
-            .hover(|s| s.bg(rgb(SURFACE)))
+            .hover(|s| s.bg(self.color(SURFACE)))
             .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
             .child(
                 image
@@ -302,6 +453,7 @@ impl Larpcord {
                     .unwrap_or_else(|| match id.as_deref() {
                         None => icon("grid", 20.).into_any_element(),
                         Some("recent") => icon("clock", 20.).into_any_element(),
+                        Some("favorites") => icon("star", 20.).into_any_element(),
                         Some("unicode") => icon("smile", 20.).into_any_element(),
                         Some(scope) if scope.starts_with("pack:") => {
                             icon("sticker", 20.).into_any_element()
@@ -315,18 +467,37 @@ impl Larpcord {
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.picker.scope = id.clone();
-                this.picker_scroll
-                    .scroll_to_item_strict(0, ScrollStrategy::Top);
-                this.load_picker_scope(cx);
+                if this.picker.tab == Tab::Gifs {
+                    this.picker_scroll
+                        .scroll_to_item_strict(0, ScrollStrategy::Top);
+                    this.picker_changed(cx);
+                    this.picker.scope = id.clone();
+                } else {
+                    let rows = this.picker_rows(cx);
+                    this.picker.pending_scope = id
+                        .clone()
+                        .filter(|id| !rows.iter().any(|row| row.scope() == id));
+                    let target = id
+                        .as_ref()
+                        .and_then(|id| rows.iter().position(|row| row.scope() == id))
+                        .unwrap_or(0);
+                    this.picker_sections.scroll_to(ListOffset {
+                        item_ix: target,
+                        offset_in_item: px(0.),
+                    });
+                    this.load_picker_scope(cx);
+                }
                 cx.notify();
             }))
             .into_any_element()
     }
     fn picker_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut scopes = vec![(None, "All".to_string(), None)];
-        if self.picker.tab == Tab::Emoji {
+        if self.picker.tab != Tab::Gifs {
             scopes.push((Some("recent".into()), "Recent".into(), None));
-            scopes.push((Some("unicode".into()), "Unicode".into(), None));
+            if self.picker.tab == Tab::Emoji {
+                scopes.push((Some("unicode".into()), "Unicode".into(), None));
+            }
         }
         for guild in self.store.guilds.iter().take(250) {
             scopes.push((
@@ -350,7 +521,7 @@ impl Larpcord {
             .w(px(48.))
             .h_full()
             .flex_shrink_0()
-            .bg(rgb(PANEL))
+            .bg(self.color(PANEL))
             .child(
                 uniform_list(
                     "expression-scopes",
@@ -378,217 +549,174 @@ impl Larpcord {
             )
             .into_any_element()
     }
-    fn emoji_grid(&self, cx: &mut Context<Self>) -> AnyElement {
-        let choices = self.emoji_choices(cx);
-        if choices.is_empty() {
-            return self.picker_empty(
-                "No matching emoji",
-                "Try another search or choose a server.",
-            );
-        }
-        uniform_list(
-            "custom-emoji-grid",
-            choices.len().div_ceil(8),
-            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                range
-                    .map(|index| {
-                        row()
-                            .h(px(42.))
-                            .px(px(4.))
-                            .children(choices.iter().skip(index * 8).take(8).enumerate().map(
-                                |(n, c)| {
-                                    let choice = c.clone();
-                                    let hint = format!(
-                                        ":{}: · {}{}",
-                                        c.name,
-                                        c.source,
-                                        c.locked
-                                            .map(|reason| format!(" · {reason}"))
-                                            .unwrap_or_default()
-                                    );
-                                    let hover_key = c.text.clone();
-                                    let image = c.emoji.as_ref().and_then(|e| {
-                                        this.media.get(&e.image(
-                                            this.settings.animations
-                                                && this.picker.hovered.as_deref() == Some(&c.text),
-                                        ))
-                                    });
-                                    let image = image.or_else(|| {
-                                        c.emoji
-                                            .as_ref()
-                                            .and_then(|e| this.media.get(&e.image(false)))
-                                    });
-                                    row()
-                                        .id(("emoji-choice", index * 8 + n))
-                                        .debug_selector(move || {
-                                            format!("emoji-choice-{}", index * 8 + n)
-                                        })
-                                        .size(px(42.))
-                                        .justify_center()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .opacity(if c.locked.is_some() { 0.35 } else { 1. })
-                                        .hover(|s| s.bg(rgb(SURFACE)))
-                                        .child(if let Some(image) = image {
-                                            img(image.clone())
-                                                .id(("emoji-image", image.id.0))
-                                                .size(px(30.))
-                                                .object_fit(ObjectFit::Contain)
-                                                .into_any_element()
-                                        } else if c.emoji.is_some() {
-                                            label(format!(":{}:", c.name))
-                                                .truncate()
-                                                .text_size(px(9.))
-                                                .into_any_element()
-                                        } else {
-                                            div()
-                                                .text_size(px(25.))
-                                                .child(c.text.clone())
-                                                .into_any_element()
-                                        })
-                                        .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
-                                        .on_hover(cx.listener(
-                                            move |this, hovered: &bool, _, cx| {
-                                                this.picker.hovered =
-                                                    hovered.then(|| hover_key.clone());
-                                                cx.notify();
-                                            },
-                                        ))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            if choice.locked.is_none() {
-                                                this.picker.remember(choice.text.clone());
-                                                this.settings.recent_emoji =
-                                                    this.picker.recent.clone();
-                                                this.persist(cx);
-                                                this.insert_expression(&choice.text, window, cx);
-                                            }
-                                        }))
-                                },
-                            ))
+    fn emoji_row(
+        &self,
+        choices: &[EmojiChoice],
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        row()
+            .h(px(42.))
+            .px(px(4.))
+            .children(choices.iter().enumerate().map(|(n, c)| {
+                let choice = c.clone();
+                let hint = format!(
+                    ":{}: · {}{}",
+                    c.name,
+                    c.source,
+                    c.locked
+                        .map(|reason| format!(" · {reason}"))
+                        .unwrap_or_default()
+                );
+                let hover_key = c.text.clone();
+                let image = c.emoji.as_ref().and_then(|e| {
+                    self.media.get(
+                        &e.image(self.motion() && self.picker.hovered.as_deref() == Some(&c.text)),
+                    )
+                });
+                let image = image.or_else(|| {
+                    c.emoji
+                        .as_ref()
+                        .and_then(|e| self.media.get(&e.image(false)))
+                });
+                row()
+                    .id(("emoji-choice", index * 8 + n))
+                    .debug_selector(move || format!("emoji-choice-{}", index * 8 + n))
+                    .size(px(42.))
+                    .justify_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .opacity(if c.locked.is_some() { 0.35 } else { 1. })
+                    .hover(|s| s.bg(self.color(SURFACE)))
+                    .child(if let Some(image) = image {
+                        img(image.clone())
+                            .id(("emoji-image", image.id.0))
+                            .size(px(30.))
+                            .object_fit(ObjectFit::Contain)
+                            .into_any_element()
+                    } else if c.emoji.is_some() {
+                        label(format!(":{}:", c.name))
+                            .truncate()
+                            .text_size(px(9.))
+                            .into_any_element()
+                    } else {
+                        div()
+                            .text_size(px(25.))
+                            .child(c.text.clone())
                             .into_any_element()
                     })
-                    .collect::<Vec<_>>()
-            }),
-        )
-        .track_scroll(self.picker_scroll.clone())
-        .size_full()
-        .into_any_element()
+                    .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        this.picker.hovered = hovered.then(|| hover_key.clone());
+                        cx.notify();
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if choice.locked.is_none() {
+                            this.picker.remember(choice.text.clone());
+                            this.settings.recent_emoji = this.picker.recent.clone();
+                            this.persist(cx);
+                            this.insert_expression(&choice.text, window, cx);
+                        }
+                    }))
+            }))
+            .into_any_element()
     }
-    fn sticker_grid(&self, cx: &mut Context<Self>) -> AnyElement {
-        let choices = self.sticker_choices(cx);
-        if choices.is_empty() {
-            return self.picker_empty(
-                if self.picker.packs_loading {
-                    "Loading stickers…"
-                } else {
-                    "No matching stickers"
-                },
-                self.picker
-                    .packs_error
-                    .as_deref()
-                    .unwrap_or("Choose a server or try another search."),
-            );
-        }
-        uniform_list(
-            "sticker-picker-grid",
-            choices.len().div_ceil(3),
-            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                range
-                    .map(|index| {
-                        row()
-                            .h(px(112.))
-                            .px_1()
-                            .children(choices.iter().skip(index * 3).take(3).enumerate().map(
-                                |(n, c)| {
-                                    let sticker = c.sticker.clone();
-                                    let hint = format!("{} · {}", sticker.name, c.source);
-                                    let key = sticker.id.clone();
-                                    let source = crate::media::sticker(
-                                        &sticker.id,
-                                        sticker.format_type,
-                                        this.settings.animations
-                                            && this.picker.hovered.as_deref() == Some(&sticker.id),
-                                    );
-                                    let image =
-                                        source.as_deref().and_then(|url| this.media.get(url));
-                                    let image = image.or_else(|| {
-                                        crate::media::sticker(
-                                            &sticker.id,
-                                            sticker.format_type,
-                                            false,
-                                        )
-                                        .and_then(|url| this.media.get(&url))
-                                    });
-                                    column()
-                                        .id(("sticker-choice", index * 3 + n))
-                                        .w(px(112.))
-                                        .h(px(108.))
-                                        .p_1()
-                                        .gap_1()
-                                        .items_center()
-                                        .rounded_lg()
-                                        .cursor_pointer()
-                                        .opacity(if sticker.available == Some(false) {
-                                            0.35
-                                        } else {
-                                            1.
-                                        })
-                                        .hover(|s| s.bg(rgb(SURFACE)))
-                                        .child(
-                                            row().size(px(78.)).justify_center().child(
-                                                image
-                                                    .map(|image| {
-                                                        img(image.clone())
-                                                            .id(("sticker-preview", image.id.0))
-                                                            .size_full()
-                                                            .object_fit(ObjectFit::Contain)
-                                                            .into_any_element()
-                                                    })
-                                                    .unwrap_or_else(|| {
-                                                        icon("sticker", 32.).into_any_element()
-                                                    }),
-                                            ),
-                                        )
-                                        .child(
-                                            label(sticker.name.clone())
-                                                .max_w_full()
-                                                .truncate()
-                                                .text_size(px(10.)),
-                                        )
-                                        .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
-                                        .on_hover(cx.listener(
-                                            move |this, hovered: &bool, _, cx| {
-                                                this.picker.hovered = hovered.then(|| key.clone());
-                                                cx.notify();
-                                            },
-                                        ))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            if sticker.available != Some(false) {
-                                                this.selected_sticker = Some(sticker.clone());
-                                                this.close_picker();
-                                                window.focus(&this.composer.focus_handle(cx));
-                                                cx.notify();
-                                            }
-                                        }))
-                                },
-                            ))
-                            .into_any_element()
+    fn sticker_row(
+        &self,
+        choices: &[StickerChoice],
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        row()
+            .h(px(112.))
+            .px_1()
+            .children(choices.iter().enumerate().map(|(n, c)| {
+                let sticker = c.sticker.clone();
+                let hint = format!("{} · {}", sticker.name, c.source);
+                let key = sticker.id.clone();
+                let source = crate::media::sticker(
+                    &sticker.id,
+                    sticker.format_type,
+                    self.motion() && self.picker.hovered.as_deref() == Some(&sticker.id),
+                );
+                let image = source.as_deref().and_then(|url| self.media.get(url));
+                let image = image.or_else(|| {
+                    crate::media::sticker(&sticker.id, sticker.format_type, false)
+                        .and_then(|url| self.media.get(&url))
+                });
+                column()
+                    .id(("sticker-choice", index * 3 + n))
+                    .w(px(112.))
+                    .h(px(108.))
+                    .p_1()
+                    .gap_1()
+                    .items_center()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .opacity(if sticker.available == Some(false) {
+                        0.35
+                    } else {
+                        1.
                     })
-                    .collect::<Vec<_>>()
-            }),
-        )
-        .track_scroll(self.picker_scroll.clone())
-        .size_full()
-        .into_any_element()
+                    .hover(|s| s.bg(self.color(SURFACE)))
+                    .child(
+                        row().size(px(78.)).justify_center().child(
+                            image
+                                .map(|image| {
+                                    img(image.clone())
+                                        .id(("sticker-preview", image.id.0))
+                                        .size_full()
+                                        .object_fit(ObjectFit::Contain)
+                                        .into_any_element()
+                                })
+                                .unwrap_or_else(|| icon("sticker", 32.).into_any_element()),
+                        ),
+                    )
+                    .child(
+                        label(sticker.name.clone())
+                            .max_w_full()
+                            .truncate()
+                            .text_size(px(10.)),
+                    )
+                    .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        this.picker.hovered = hovered.then(|| key.clone());
+                        cx.notify();
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if sticker.available != Some(false) {
+                            this.settings.recent_stickers.retain(|s| s.id != sticker.id);
+                            this.settings.recent_stickers.insert(0, sticker.clone());
+                            this.settings.sanitize_recents();
+                            this.persist(cx);
+                            this.selected_sticker = Some(sticker.clone());
+                            this.close_picker();
+                            window.focus(&this.composer.focus_handle(cx));
+                            cx.notify();
+                        }
+                    }))
+            }))
+            .into_any_element()
     }
     fn gif_grid(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.picker.loading {
+        let recent = matches!(self.picker.scope.as_deref(), Some("recent" | "favorites"))
+            && self.emoji_search.read(cx).content.trim().is_empty();
+        if self.picker.loading && !recent {
             return self.picker_empty("Finding GIFs…", "Results appear here shortly.");
         }
-        if let Some(error) = &self.picker.error {
+        if let Some(error) = self.picker.error.as_ref().filter(|_| !recent) {
             return self.picker_empty("Couldn’t load GIFs", error);
         }
-        if self.picker.gifs.is_empty() {
+        let gifs = if self.picker.scope.as_deref() == Some("favorites")
+            && self.emoji_search.read(cx).content.trim().is_empty()
+        {
+            self.picker.favorites.clone()
+        } else if recent {
+            self.settings.recent_gifs.clone()
+        } else {
+            self.picker.gifs.clone()
+        };
+        if gifs.is_empty() {
             return self.picker_empty(
                 if self.preview {
                     "Find the right reaction"
@@ -602,7 +730,7 @@ impl Larpcord {
                 },
             );
         }
-        let gifs = self.picker.gifs.clone();
+
         uniform_list(
             "gif-picker-grid",
             gifs.len().div_ceil(2),
@@ -617,8 +745,17 @@ impl Larpcord {
                                 |(n, gif)| {
                                     let gif = gif.clone();
                                     let hint = gif.title.clone();
-                                    let image =
-                                        gif.preview.as_deref().and_then(|url| this.media.get(url));
+                                    let image = gif.preview.as_deref().and_then(|url| {
+                                        let moving = if this.motion() {
+                                            format!("{url}#motion")
+                                        } else {
+                                            url.to_string()
+                                        };
+                                        this.media.get(&moving).or_else(|| this.media.get(url))
+                                    });
+                                    let favorite = gif.clone();
+                                    let saved =
+                                        this.picker.favorites.iter().any(|g| g.url == gif.url);
                                     div()
                                         .id(("gif-choice", index * 2 + n))
                                         .relative()
@@ -626,7 +763,7 @@ impl Larpcord {
                                         .h(px(124.))
                                         .rounded_lg()
                                         .overflow_hidden()
-                                        .bg(rgb(SURFACE))
+                                        .bg(this.color(SURFACE))
                                         .cursor_pointer()
                                         .child(
                                             image
@@ -655,12 +792,17 @@ impl Larpcord {
                                                 .child(
                                                     label(gif.title.clone())
                                                         .truncate()
-                                                        .text_color(rgb(TEXT))
+                                                        .text_color(this.color(TEXT))
                                                         .text_size(px(10.)),
                                                 ),
                                         )
+                                        .child(this.gif_favorite_button(favorite, saved, cx))
                                         .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
                                         .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.settings.recent_gifs.retain(|g| g.url != gif.url);
+                                            this.settings.recent_gifs.insert(0, gif.clone());
+                                            this.settings.sanitize_recents();
+                                            this.persist(cx);
                                             let text = if this.composer.read(cx).content.is_empty()
                                             {
                                                 gif.url.clone()
@@ -680,6 +822,63 @@ impl Larpcord {
         .size_full()
         .into_any_element()
     }
+    fn gif_favorite_button(
+        &self,
+        gif: crate::expressions::Gif,
+        saved: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        row()
+            .id("favorite-gif")
+            .absolute()
+            .top(px(6.))
+            .right(px(6.))
+            .size(px(26.))
+            .rounded_full()
+            .justify_center()
+            .bg(rgba(0x111216d8))
+            .cursor_pointer()
+            .child(icon("star", 16.).text_color(self.color(if saved { 0xf0b232 } else { TEXT })))
+            .tooltip(move |_, cx| {
+                cx.new(|_| {
+                    Hint(
+                        if saved {
+                            "Remove favorite"
+                        } else {
+                            "Favorite GIF"
+                        }
+                        .into(),
+                    )
+                })
+                .into()
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                if this.picker.favorites_loading {
+                    return;
+                }
+                if this.preview {
+                    if saved {
+                        this.picker.favorites.retain(|g| g.url != gif.url);
+                    } else {
+                        this.picker.favorites.insert(0, gif.clone());
+                    }
+                } else {
+                    this.picker.favorites_loading = true;
+                    this.picker.favorites_error = None;
+                    if let Err(error) = this
+                        .backend
+                        .command(Command::GifFavorites(Some((gif.clone(), !saved))))
+                    {
+                        this.picker.favorites_loading = false;
+                        this.picker.favorites_error = Some(error);
+                    }
+                }
+                cx.notify();
+            }))
+            .into_any_element()
+    }
     fn picker_empty(&self, title: &str, detail: &str) -> AnyElement {
         column()
             .size_full()
@@ -696,7 +895,7 @@ impl Larpcord {
                     },
                     32.,
                 )
-                .text_color(rgb(MUTED)),
+                .text_color(self.color(MUTED)),
             )
             .child(
                 div()
@@ -748,8 +947,8 @@ impl Larpcord {
                     .max_h(relative(0.85))
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(LINE))
-                    .bg(rgb(SIDEBAR))
+                    .border_color(self.color(LINE))
+                    .bg(self.color(SIDEBAR))
                     .shadow_lg()
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -760,7 +959,7 @@ impl Larpcord {
                             .px_3()
                             .gap_2()
                             .border_b_1()
-                            .border_color(rgb(LINE))
+                            .border_color(self.color(LINE))
                             .children(
                                 [
                                     (Tab::Gifs, "GIFs"),
@@ -774,11 +973,15 @@ impl Larpcord {
                                         .py_0()
                                         .px_3()
                                         .bg(if kind == tab {
-                                            rgb(SURFACE)
+                                            self.color(SURFACE)
                                         } else {
                                             rgba(0x00000000)
                                         })
-                                        .text_color(rgb(if kind == tab { TEXT } else { MUTED }))
+                                        .text_color(self.color(if kind == tab {
+                                            TEXT
+                                        } else {
+                                            MUTED
+                                        }))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             if this.picker.tab != kind {
                                                 this.toggle_picker(kind, window, cx)
@@ -802,7 +1005,7 @@ impl Larpcord {
                             .mx_3()
                             .my_2()
                             .px_2()
-                            .bg(rgb(PANEL))
+                            .bg(self.color(PANEL))
                             .rounded_md()
                             .gap_2()
                             .child(icon("search", 16.))
@@ -817,7 +1020,14 @@ impl Larpcord {
                                     .on_click(cx.listener(
                                         |this, _, _, cx| {
                                             if this.picker.tab == Tab::Gifs {
-                                                this.picker_changed(cx);
+                                                if this.picker.scope.as_deref() == Some("favorites")
+                                                    && !this.picker.favorites_loading
+                                                {
+                                                    this.picker.favorites_loaded = false;
+                                                    this.load_picker_scope(cx);
+                                                } else {
+                                                    this.picker_changed(cx);
+                                                }
                                             } else {
                                                 this.picker.packs_loaded = false;
                                                 this.expression_attempts.clear();
@@ -829,6 +1039,27 @@ impl Larpcord {
                                 )
                             }),
                     )
+                    .when(tab == Tab::Gifs, |s| {
+                        s.child(
+                            row()
+                                .px_3()
+                                .pb_2()
+                                .gap_2()
+                                .child(self.picker_scope(None, "Trending".into(), None, cx))
+                                .child(self.picker_scope(
+                                    Some("recent".into()),
+                                    "Recently used".into(),
+                                    None,
+                                    cx,
+                                ))
+                                .child(self.picker_scope(
+                                    Some("favorites".into()),
+                                    "Favorites".into(),
+                                    None,
+                                    cx,
+                                )),
+                        )
+                    })
                     .child(
                         row()
                             .flex_1()
@@ -836,10 +1067,24 @@ impl Larpcord {
                             .items_start()
                             .when(tab != Tab::Gifs, |s| s.child(self.picker_rail(cx)))
                             .child(div().flex_1().min_w_0().h_full().child(match tab {
-                                Tab::Emoji => self.emoji_grid(cx),
-                                Tab::Stickers => self.sticker_grid(cx),
+                                Tab::Emoji | Tab::Stickers => self.expression_grid(cx),
                                 Tab::Gifs => self.gif_grid(cx),
                             })),
+                    )
+                    .when_some(
+                        self.picker
+                            .favorites_error
+                            .clone()
+                            .filter(|_| tab == Tab::Gifs),
+                        |s, error| {
+                            s.child(
+                                label(error)
+                                    .text_size(px(10.))
+                                    .px_3()
+                                    .py_1()
+                                    .text_color(rgb(0xf0b7c3)),
+                            )
+                        },
                     )
                     .child(
                         row()
@@ -847,7 +1092,7 @@ impl Larpcord {
                             .flex_shrink_0()
                             .px_3()
                             .border_t_1()
-                            .border_color(rgb(LINE))
+                            .border_color(self.color(LINE))
                             .child(
                                 label(match tab {
                                     Tab::Emoji => "Choose an emoji to insert at your cursor",
@@ -858,7 +1103,20 @@ impl Larpcord {
                                 })
                                 .text_size(px(10.)),
                             ),
-                    ),
+                    )
+                    .map(|s| {
+                        if self.motion() {
+                            s.with_animation(
+                                "picker-enter",
+                                Animation::new(std::time::Duration::from_millis(180))
+                                    .with_easing(ease_out_quint()),
+                                |s, t| s.bottom(px(76. - 8. * (1. - t))).opacity(t),
+                            )
+                            .into_any_element()
+                        } else {
+                            s.into_any_element()
+                        }
+                    }),
             )
             .into_any_element()
     }
@@ -871,7 +1129,7 @@ impl Larpcord {
             .gap_3()
             .p_2()
             .rounded_lg()
-            .bg(rgb(PANEL))
+            .bg(self.color(PANEL))
             .child(
                 row().size(px(64.)).justify_center().child(
                     crate::media::sticker(&sticker.id, sticker.format_type, false)
@@ -915,6 +1173,47 @@ mod tests {
     use super::{Emoji, Larpcord, Sticker, Tab};
     use crate::network::{Envelope, Event};
     use gpui::{Modifiers, TestAppContext, point, px, size};
+
+    #[gpui::test]
+    fn picker_sections_follow_scrolling_and_keep_recent_groups_separate(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx, |v, cx| {
+            v.settings.animations = false;
+            v.emoji_open = true;
+            v.store.user.premium_type = Some(2);
+            v.store.guilds[0].emojis = Some(
+                (1..=80)
+                    .map(|n| Emoji {
+                        id: n.to_string(),
+                        name: format!("cat_{n}"),
+                        ..Default::default()
+                    })
+                    .collect(),
+            );
+            v.picker.remember("<:cat_1:1>".into());
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
+            view.clone()
+        });
+        let first = cx.debug_bounds("expression-heading-0").unwrap();
+        view.update(cx, |v, cx| {
+            let rows = v.picker_rows(cx);
+            assert_eq!(rows[0].scope(), "recent");
+            assert_eq!(rows[2].scope(), v.store.guilds[0].id);
+        });
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: first.center() + point(px(50.), px(70.)),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-250.))),
+            modifiers: Modifiers::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.update(|_, cx| {
+            let v = view.read(cx);
+            assert_eq!(v.picker.scope.as_ref(), Some(&v.store.guilds[0].id));
+            assert!(v.picker_sections.logical_scroll_top().item_ix > 1);
+        });
+    }
 
     #[gpui::test]
     fn clicking_custom_emoji_inserts_at_the_cursor_without_sending(cx: &mut TestAppContext) {

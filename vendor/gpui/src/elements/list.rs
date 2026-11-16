@@ -521,7 +521,7 @@ impl StateInner {
         }
 
         if self.scroll_handler.is_some() {
-            let visible_range = self.visible_range(height, scroll_top);
+            let visible_range = self.visible_range(height, &self.logical_scroll_top());
             self.scroll_handler.as_mut().unwrap()(
                 &ListScrollEvent {
                     visible_range,

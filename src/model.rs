@@ -95,6 +95,8 @@ pub struct Profile {
     pub mutual_guilds: Option<Vec<MutualGuild>>,
     pub mutual_friends_count: Option<u32>,
     #[serde(default, deserialize_with = "nullable_vec")]
+    pub mutual_friends: Vec<User>,
+    #[serde(default, deserialize_with = "nullable_vec")]
     pub badges: Vec<ProfileBadge>,
     #[serde(skip)]
     pub effect_asset: Option<crate::effects::Effect>,
@@ -115,6 +117,28 @@ pub struct ProfileBadge {
 #[derive(Clone, Default, Deserialize)]
 pub struct MutualGuild {
     pub id: String,
+}
+
+impl ProfileBadge {
+    pub fn image(&self) -> Option<String> {
+        if crate::media::cdn_url(&self.icon)
+            && self.icon.len() <= 2048
+            && !self
+                .icon
+                .split('?')
+                .next()
+                .is_some_and(|p| p.ends_with(".svg"))
+        {
+            return Some(self.icon.clone());
+        }
+        (!self.icon.is_empty()
+            && self.icon.len() <= 128
+            && self
+                .icon
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+        .then(|| format!("https://cdn.discordapp.com/badge-icons/{}.png", self.icon))
+    }
 }
 
 impl Profile {
@@ -299,6 +323,8 @@ pub struct EmbedFooter {
 
 #[derive(Clone, Default, Deserialize)]
 pub struct Embed {
+    #[serde(rename = "type", default)]
+    pub kind: String,
     pub video: Option<EmbedMedia>,
     pub title: Option<String>,
     pub description: Option<String>,

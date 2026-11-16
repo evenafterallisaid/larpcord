@@ -13,7 +13,7 @@ mod disk;
 
 const BUDGET: usize = 12 * 1024 * 1024;
 const IDENTITY_BUDGET: usize = 8 * 1024 * 1024;
-const ENTRIES: usize = 128;
+const ENTRIES: usize = 384;
 
 pub fn cdn_url(value: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(value) else {
@@ -126,6 +126,12 @@ fn identity_asset(url: &str) -> bool {
 }
 
 fn decode_bounds(url: &str) -> (u32, u32) {
+    if url.contains("/avatar-decoration-presets/") {
+        return (192, 192);
+    }
+    if url.contains("/nameplates/") {
+        return (640, 128);
+    }
     if gif_preview(url) {
         return (224, 160);
     }
@@ -232,16 +238,23 @@ impl Media {
                         return;
                     };
                     let disk = Arc::new(disk::Disk::new());
-                    let decoders = Arc::new(tokio::sync::Semaphore::new(2));
+                    let identity_decoders = Arc::new(tokio::sync::Semaphore::new(1));
+                    let media_decoders = Arc::new(tokio::sync::Semaphore::new(1));
                     let mut workers = tokio::task::JoinSet::new();
-                    for (requests, count) in [(portrait_requests, 4), (requests, 2)] {
+                    for (requests, count, identity) in
+                        [(portrait_requests, 4, true), (requests, 2, false)]
+                    {
                         for _ in 0..count {
                             let (client, requests, results, disk, decoders) = (
                                 client.clone(),
                                 requests.clone(),
                                 results.clone(),
                                 disk.clone(),
-                                decoders.clone(),
+                                if identity {
+                                    identity_decoders.clone()
+                                } else {
+                                    media_decoders.clone()
+                                },
                             );
                             workers.spawn(async move {
                                 while let Ok(url) = requests.recv().await {
@@ -698,7 +711,7 @@ mod tests {
             portraits: tx,
             cache: RefCell::new(Cache::default()),
         };
-        for index in 0..160 {
+        for index in 0..ENTRIES + 32 {
             let pixels = image::RgbaImage::new(64, 64);
             media.receive(Loaded {
                 url: format!("https://cdn.discordapp.com/{index}.png"),

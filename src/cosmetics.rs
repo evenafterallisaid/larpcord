@@ -29,7 +29,7 @@ impl NameStyle {
             return fallback;
         }
         let colors = &self.colors[..self.colors.len().min(8)];
-        if colors.len() == 1 || self.effect_id == Some(1) {
+        if colors.len() == 1 || !matches!(self.effect_id, Some(2 | 7 | 8)) {
             return colors[0] & 0xffffff;
         }
         let t = position.clamp(0., 1.) * (colors.len() - 1) as f32;
@@ -53,7 +53,32 @@ pub struct Nameplate {
 }
 impl Nameplate {
     pub fn url(&self) -> Option<String> {
-        self.sku_id.as_deref().and_then(crate::media::collectible)
+        self.asset
+            .as_deref()
+            .and_then(|asset| {
+                if asset.len() > 512
+                    || !asset.starts_with("nameplates/")
+                    || !asset.ends_with('/')
+                    || asset.trim_end_matches('/').split('/').any(|s| {
+                        s.is_empty()
+                            || s == "."
+                            || s == ".."
+                            || s.chars()
+                                .any(|c| c.is_control() || matches!(c, '?' | '#' | '%' | '\\'))
+                    })
+                {
+                    return None;
+                }
+                let mut url =
+                    reqwest::Url::parse("https://cdn.discordapp.com/assets/collectibles/").ok()?;
+                url.path_segments_mut()
+                    .ok()?
+                    .pop_if_empty()
+                    .extend(asset.trim_end_matches('/').split('/'))
+                    .push("static.png");
+                Some(url.into())
+            })
+            .or_else(|| self.sku_id.as_deref().and_then(crate::media::collectible))
     }
 }
 #[derive(Clone, Default, Deserialize, Serialize)]

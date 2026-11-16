@@ -1,6 +1,222 @@
 use super::*;
 
 impl Larpcord {
+    fn profile_tabs(&self, profile: &Profile, cx: &mut Context<Self>) -> AnyElement {
+        let friends = profile
+            .mutual_friends_count
+            .unwrap_or(profile.mutual_friends.len() as u32);
+        let servers = profile.mutual_guilds.as_ref().map_or(0, Vec::len);
+        column()
+            .gap_2()
+            .child(
+                row()
+                    .gap_2()
+                    .children(
+                        profile
+                            .mutual_friends
+                            .iter()
+                            .take(3)
+                            .map(|user| self.avatar(user, 20.)),
+                    )
+                    .when(friends > 0, |s| {
+                        s.child(label(format!("{friends} mutual friends")).text_size(px(11.)))
+                    }),
+            )
+            .child(
+                row()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(self.color(LINE))
+                    .children(
+                        [
+                            (0, "About".to_string()),
+                            (1, format!("Friends · {friends}")),
+                            (2, format!("Servers · {servers}")),
+                        ]
+                        .into_iter()
+                        .map(|(tab, title)| {
+                            div()
+                                .id(("profile-tab", tab as usize))
+                                .debug_selector(move || format!("profile-tab-{tab}"))
+                                .min_w_0()
+                                .flex_1()
+                                .py_2()
+                                .text_center()
+                                .text_size(px(11.))
+                                .cursor_pointer()
+                                .border_b_2()
+                                .border_color(if self.profile_tab == tab {
+                                    self.color(TEXT)
+                                } else {
+                                    rgba(0xffffff00)
+                                })
+                                .text_color(self.color(if self.profile_tab == tab {
+                                    TEXT
+                                } else {
+                                    MUTED
+                                }))
+                                .hover(|s| s.text_color(self.color(TEXT)))
+                                .child(title)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.profile_tab = tab;
+                                    cx.notify();
+                                }))
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn profile_mutuals(&self, profile: &Profile, cx: &mut Context<Self>) -> AnyElement {
+        if self.profile_tab == 1 {
+            if profile.mutual_friends.is_empty() {
+                return label("No mutual friends to display.")
+                    .text_size(px(12.))
+                    .into_any_element();
+            }
+            let friends = profile
+                .mutual_friends
+                .iter()
+                .take(200)
+                .cloned()
+                .collect::<Vec<_>>();
+            uniform_list(
+                "profile-mutual-friends",
+                friends.len(),
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .map(|index| {
+                            let user = friends[index].clone();
+                            row()
+                                .id(("mutual-friend", index))
+                                .h(px(48.))
+                                .gap_3()
+                                .px_2()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgba(0xffffff10)))
+                                .child(this.presence_avatar(&user, 32.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(13.))
+                                        .child(user.name().to_string()),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_profile(user.clone(), window, cx)
+                                }))
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .h(px(288.))
+            .into_any_element()
+        } else {
+            let servers = profile
+                .mutual_guilds
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .take(200)
+                .filter_map(|g| {
+                    self.store
+                        .guilds
+                        .iter()
+                        .find(|known| known.id == g.id)
+                        .cloned()
+                })
+                .collect::<Vec<_>>();
+            if servers.is_empty() {
+                return label("No mutual servers to display.")
+                    .text_size(px(12.))
+                    .into_any_element();
+            }
+            uniform_list(
+                "profile-mutual-servers",
+                servers.len(),
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .map(|index| {
+                            let guild = servers[index].clone();
+                            let image = crate::media::guild_icon(&guild.id, guild.icon.as_deref())
+                                .and_then(|url| this.media.get(&url));
+                            row()
+                                .id(("mutual-server", index))
+                                .h(px(48.))
+                                .gap_3()
+                                .px_2()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgba(0xffffff10)))
+                                .child(
+                                    row()
+                                        .size(px(32.))
+                                        .rounded_lg()
+                                        .bg(this.color(SURFACE))
+                                        .justify_center()
+                                        .child(
+                                            image
+                                                .map(|i| {
+                                                    img(i)
+                                                        .size_full()
+                                                        .rounded_lg()
+                                                        .object_fit(ObjectFit::Cover)
+                                                        .into_any_element()
+                                                })
+                                                .unwrap_or_else(|| {
+                                                    div()
+                                                        .child(
+                                                            guild
+                                                                .name
+                                                                .chars()
+                                                                .take(2)
+                                                                .collect::<String>(),
+                                                        )
+                                                        .into_any_element()
+                                                }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(13.))
+                                        .child(guild.name.clone()),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    let channel =
+                                        this.last_channels.get(&guild.id).cloned().or_else(|| {
+                                            this.store
+                                                .channels
+                                                .values()
+                                                .filter(|c| {
+                                                    c.guild_id.as_ref() == Some(&guild.id)
+                                                        && c.kind == 0
+                                                })
+                                                .min_by_key(|c| c.position)
+                                                .map(|c| c.id.clone())
+                                        });
+                                    if let Some(channel) = channel {
+                                        this.profile = None;
+                                        this.profile_inspector = false;
+                                        this.selected_guild = Some(guild.id.clone());
+                                        this.choose_channel(channel, window, cx);
+                                    }
+                                }))
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .h(px(288.))
+            .into_any_element()
+        }
+    }
+
     pub(super) fn profile_panel(&self, profile: &Profile, cx: &mut Context<Self>) -> AnyElement {
         let inspector = self.profile_inspector;
         let frame = profile.frame_asset.as_ref().filter(|f| f.valid());
@@ -76,7 +292,7 @@ impl Larpcord {
             // reduced-motion assets remain the fallback; animated layers exist only while open.
             if let Some(url) = effect
                 .still()
-                .filter(|_| !self.settings.animations || effect.effects.is_empty())
+                .filter(|_| !self.motion() || effect.effects.is_empty())
             {
                 if let Some(image) = self.media.get(url) {
                     effect_layers.push(
@@ -92,7 +308,7 @@ impl Larpcord {
                 let mut layers = effect.effects.iter().take(8).collect::<Vec<_>>();
                 layers.sort_by_key(|layer| layer.z_index);
                 for layer in layers {
-                    let url = crate::media::motion_url(layer.src.clone(), self.settings.animations);
+                    let url = crate::media::motion_url(layer.src.clone(), self.motion());
                     if let Some(image) = self.media.get(&url) {
                         let (x, y) = layer.position.as_ref().map_or((0., 0.), |p| {
                             (p.x.clamp(-440., 440.), p.y.clamp(-600., 600.))
@@ -102,7 +318,7 @@ impl Larpcord {
                             * card_width;
                         let started = self.profile_started;
                         let layer = layer.clone();
-                        let animated = self.settings.animations;
+                        let animated = self.motion();
                         effect_layers.push(
                             canvas(
                                 move |_, _, _| (),
@@ -185,9 +401,9 @@ impl Larpcord {
                     .pt(px(12. + frame_top))
                     .pb(px(12. + frame_bottom))
                     .items_center()
-                    .bg(rgb(SIDEBAR))
+                    .bg(self.color(SIDEBAR))
                     .border_l_1()
-                    .border_color(rgb(LINE))
+                    .border_color(self.color(LINE))
             })
             .child(
                 column()
@@ -247,134 +463,176 @@ impl Larpcord {
                                     .gap_4()
                                     .child(
                                         column()
-                                            .debug_selector(||"profile-identity".into())
+                                            .debug_selector(|| "profile-identity".into())
                                             .gap_1()
                                             .child(
-                                                row().gap_2().child(div()
-                                                    .min_w_0().flex_1().truncate()
-                                                    .text_size(px(if inspector {
-                                                        22.
-                                                    } else {
-                                                        24.
-                                                    }))
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .child(
-                                                        self.display_name(name, user, member, true),
-                                                    ))
-                                                    .when(user.id!=self.store.user.id,|s|s.child(
-                                                        toolbar_button("profile-message","message","Open direct message")
-                                                            .on_click(cx.listener(move |this,_,window,cx| {
-                                                                this.profile=None;this.profile_inspector=false;this.previous_focus=None;
-                                                                window.focus(&this.root_focus);
-                                                                this.open_friend_dm(message_user.clone(),window,cx);
-                                                            }))
-                                                    )),
-                                            )
-                                            .child(row().gap_2().flex_wrap().child(label(format!("@{}", user.username))).when_some(
-                                                profile
-                                                    .pronouns()
-                                                    .filter(|s| !s.is_empty())
-                                                    .map(str::to_string),
-                                                |s, pronouns| s.child(label("·")).child(label(pronouns)),
-                                            ))
-                                            .when_some(presence,|s,p|s.child(
-                                                row().gap_2().mt_1().child(chrome::presence_badge(&p.status,12.,u32::from(top)>>8))
-                                                    .child(label(match p.status.as_str(){"online"=>"Online","idle"=>"Idle","dnd"=>"Do Not Disturb",_=>"Offline"}).text_size(px(11.)))
-                                            ))
-                                            .when_some(presence.and_then(|p|p.activity.as_ref()),|s,activity|s.child(label(activity.clone()).text_size(px(12.)))),
-                                    )
-                                    .when(user.bot, |s| s.child(badge("APP")))
-                                    .when(!profile.badges.is_empty(),|s|s.child(
-                                        row().gap_2().min_h(px(24.)).flex_wrap().children(profile.badges.iter().take(16).filter(|b|!b.icon.is_empty()&&b.icon.len()<=128&&b.icon.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'_'||c==b'-')).filter_map(|b| {
-                                            let image=self.media.get(&format!("https://cdn.discordapp.com/badge-icons/{}.png",b.icon))?;
-                                            let hint=b.description.chars().take(160).collect::<String>();
-                                            Some(div().id(SharedString::from(format!("profile-badge-{}",b.icon))).child(img(image).size(px(20.)).object_fit(ObjectFit::Contain)).tooltip(move |_,cx|cx.new(|_|Hint(hint.clone())).into()))
-                                        }))
-                                    ))
-                                    .when(
-                                        profile.mutual_guilds.as_ref().is_some_and(|g|!g.is_empty())
-                                            || profile.mutual_friends_count.is_some_and(|n|n>0),
-                                        |s| {
-                                            let mut counts = Vec::new();
-                                            if let Some(n) = profile.mutual_friends_count.filter(|n|*n>0) {
-                                                counts.push(format!("{n} mutual friends"));
-                                            }
-                                            if let Some(guilds) = profile.mutual_guilds.as_ref().filter(|g|!g.is_empty()) {
-                                                counts.push(format!(
-                                                    "{} mutual servers",
-                                                    guilds.len()
-                                                ));
-                                            }
-                                            let images = profile
-                                                .mutual_guilds
-                                                .as_ref()
-                                                .into_iter()
-                                                .flatten()
-                                                .take(2)
-                                                .filter_map(|g| {
-                                                    self.store
-                                                        .guilds
-                                                        .iter()
-                                                        .find(|known| known.id == g.id)
-                                                })
-                                                .filter_map(|g| {
-                                                    crate::media::guild_icon(
-                                                        &g.id,
-                                                        g.icon.as_deref(),
-                                                    )
-                                                })
-                                                .filter_map(|url| self.media.get(&url))
-                                                .map(|image| {
-                                                    img(image)
-                                                        .size(px(20.))
-                                                        .rounded_full()
-                                                        .into_any_element()
-                                                })
-                                                .collect::<Vec<_>>();
-                                            s.child(
-                                                row().gap_2().children(images).child(
-                                                    label(counts.join(" · "))
-                                                        .min_w_0()
-                                                        .flex_1()
-                                                        .text_size(px(11.)),
-                                                ),
-                                            )
-                                        },
-                                    )
-                                    .child(div().h(px(1.)).bg(rgb(LINE)))
-                                    .when_some(
-                                        profile.bio().filter(|s| !s.is_empty()).map(str::to_string),
-                                        |s, bio| {
-                                            s.child(
-                                                column().p_3().rounded_lg().bg(rgba(0x00000020))
+                                                row()
                                                     .gap_2()
                                                     .child(
-                                                        label("ABOUT ME")
-                                                            .text_size(px(10.))
-                                                            .font_weight(FontWeight::BOLD),
+                                                        div()
+                                                            .min_w_0()
+                                                            .flex_1()
+                                                            .truncate()
+                                                            .text_size(px(if inspector {
+                                                                22.
+                                                            } else {
+                                                                24.
+                                                            }))
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .child(self.display_name(
+                                                                name, user, member, true,
+                                                            )),
                                                     )
-                                                    .child(self.rich_text(&bio)),
+                                                    .when(user.id != self.store.user.id, |s| {
+                                                        s.child(
+                                                            toolbar_button(
+                                                                "profile-message",
+                                                                "message",
+                                                                "Open direct message",
+                                                            )
+                                                            .on_click(cx.listener(
+                                                                move |this, _, window, cx| {
+                                                                    this.profile = None;
+                                                                    this.profile_inspector = false;
+                                                                    this.previous_focus = None;
+                                                                    window.focus(&this.root_focus);
+                                                                    this.open_friend_dm(
+                                                                        message_user.clone(),
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            )),
+                                                        )
+                                                    }),
                                             )
-                                        },
-                                    )
-                                    .when(!roles.is_empty(), |s| {
-                                        s.child(
-                                            column().p_3().rounded_lg().bg(rgba(0x00000020))
-                                                .gap_2()
-                                                .child(
-                                                    label("ROLES")
-                                                        .text_size(px(10.))
-                                                        .font_weight(FontWeight::BOLD),
+                                            .child(
+                                                row()
+                                                    .gap_2()
+                                                    .flex_wrap()
+                                                    .child(label(format!("@{}", user.username)))
+                                                    .when_some(
+                                                        profile
+                                                            .pronouns()
+                                                            .filter(|s| !s.is_empty())
+                                                            .map(str::to_string),
+                                                        |s, pronouns| {
+                                                            s.child(label("·"))
+                                                                .child(label(pronouns))
+                                                        },
+                                                    ),
+                                            )
+                                            .when_some(presence, |s, p| {
+                                                s.child(
+                                                    row()
+                                                        .gap_2()
+                                                        .mt_1()
+                                                        .child(chrome::presence_badge(
+                                                            &p.status,
+                                                            12.,
+                                                            u32::from(top) >> 8,
+                                                        ))
+                                                        .child(
+                                                            label(match p.status.as_str() {
+                                                                "online" => "Online",
+                                                                "idle" => "Idle",
+                                                                "dnd" => "Do Not Disturb",
+                                                                _ => "Offline",
+                                                            })
+                                                            .text_size(px(11.)),
+                                                        ),
                                                 )
-                                                .child(row().gap_1().flex_wrap().children(
-                                                    roles.into_iter().map(|role| {
-                                                        row()
+                                            })
+                                            .when_some(
+                                                presence.and_then(|p| p.activity.as_ref()),
+                                                |s, activity| {
+                                                    s.child(
+                                                        label(activity.clone()).text_size(px(12.)),
+                                                    )
+                                                },
+                                            ),
+                                    )
+                                    .when(user.bot, |s| s.child(badge("APP")))
+                                    .when(!profile.badges.is_empty(), |s| {
+                                        s.child(row().gap_2().min_h(px(24.)).flex_wrap().children(
+                                            profile.badges.iter().take(40).filter_map(|b| {
+                                                let image = self.media.get(&b.image()?)?;
+                                                let hint = b
+                                                    .description
+                                                    .chars()
+                                                    .take(160)
+                                                    .collect::<String>();
+                                                Some(
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "profile-badge-{}",
+                                                            b.icon
+                                                        )))
+                                                        .child(
+                                                            img(image)
+                                                                .size(px(20.))
+                                                                .object_fit(ObjectFit::Contain),
+                                                        )
+                                                        .tooltip(move |_, cx| {
+                                                            cx.new(|_| Hint(hint.clone())).into()
+                                                        }),
+                                                )
+                                            }),
+                                        ))
+                                    })
+                                    .child(self.profile_tabs(profile, cx))
+                                    .when(self.profile_tab != 0, |s| {
+                                        s.child(self.profile_mutuals(profile, cx))
+                                    })
+                                    .when(self.profile_tab == 0, |s| {
+                                        s.child(
+                                            column()
+                                                .gap_4()
+                                                .when_some(
+                                                    profile
+                                                        .bio()
+                                                        .filter(|s| !s.is_empty())
+                                                        .map(str::to_string),
+                                                    |s, bio| {
+                                                        s.child(
+                                                            column()
+                                                                .p_3()
+                                                                .rounded_lg()
+                                                                .bg(rgba(0x00000020))
+                                                                .gap_2()
+                                                                .child(
+                                                                    label("ABOUT ME")
+                                                                        .text_size(px(10.))
+                                                                        .font_weight(
+                                                                            FontWeight::BOLD,
+                                                                        ),
+                                                                )
+                                                                .child(self.rich_text(&bio)),
+                                                        )
+                                                    },
+                                                )
+                                                .when(!roles.is_empty(), |s| {
+                                                    s.child(
+                                                        column()
+                                                            .p_3()
+                                                            .rounded_lg()
+                                                            .bg(rgba(0x00000020))
+                                                            .gap_2()
+                                                            .child(
+                                                                label("ROLES")
+                                                                    .text_size(px(10.))
+                                                                    .font_weight(FontWeight::BOLD),
+                                                            )
+                                                            .child(
+                                                                row().gap_1().flex_wrap().children(
+                                                                    roles.into_iter().map(|role| {
+                                                                        row()
                                                             .gap_1()
                                                             .px_2()
                                                             .py_1()
                                                             .rounded_md()
                                                             .border_1()
-                                                            .border_color(rgb(SURFACE))
+                                                            .border_color(self.color(SURFACE))
                                                             .bg(rgb(0x292b30))
                                                             .child(
                                                                 div()
@@ -394,32 +652,35 @@ impl Larpcord {
                                                                     .text_size(px(11.))
                                                                     .child(role.name.clone()),
                                                             )
-                                                    }),
-                                                )),
-                                        )
-                                    })
-                                    .when_some(created, |s, date| {
-                                        s.child(
-                                            column()
-                                                .gap_1()
-                                                .child(
-                                                    label("DISCORD MEMBER SINCE")
-                                                        .text_size(px(10.))
-                                                        .font_weight(FontWeight::BOLD),
-                                                )
-                                                .child(label(date)),
-                                        )
-                                    })
-                                    .when_some(joined, |s, date| {
-                                        s.child(
-                                            column()
-                                                .gap_1()
-                                                .child(
-                                                    label("SERVER MEMBER SINCE")
-                                                        .text_size(px(10.))
-                                                        .font_weight(FontWeight::BOLD),
-                                                )
-                                                .child(label(date)),
+                                                                    }),
+                                                                ),
+                                                            ),
+                                                    )
+                                                })
+                                                .when_some(created, |s, date| {
+                                                    s.child(
+                                                        column()
+                                                            .gap_1()
+                                                            .child(
+                                                                label("DISCORD MEMBER SINCE")
+                                                                    .text_size(px(10.))
+                                                                    .font_weight(FontWeight::BOLD),
+                                                            )
+                                                            .child(label(date)),
+                                                    )
+                                                })
+                                                .when_some(joined, |s, date| {
+                                                    s.child(
+                                                        column()
+                                                            .gap_1()
+                                                            .child(
+                                                                label("SERVER MEMBER SINCE")
+                                                                    .text_size(px(10.))
+                                                                    .font_weight(FontWeight::BOLD),
+                                                            )
+                                                            .child(label(date)),
+                                                    )
+                                                }),
                                         )
                                     })
                                     .when_some(effect_title, |s, title| {
@@ -460,7 +721,15 @@ impl Larpcord {
                                         if inspector { 72. } else { 88. },
                                         true,
                                     ))
-                                    .when_some(presence,|s,p|s.child(div().absolute().right_0().bottom_0().child(chrome::presence_badge(&p.status,if inspector {16.}else{20.},u32::from(top)>>8)))),
+                                    .when_some(presence, |s, p| {
+                                        s.child(div().absolute().right_0().bottom_0().child(
+                                            chrome::presence_badge(
+                                                &p.status,
+                                                if inspector { 16. } else { 20. },
+                                                u32::from(top) >> 8,
+                                            ),
+                                        ))
+                                    }),
                             )
                             .child(
                                 toolbar_button("copy-user-id", "copy", "Copy user ID")
@@ -490,7 +759,8 @@ impl Larpcord {
                                     })),
                             ),
                     )
-                    .children(front),
+                    .children(front)
+                    .map(|s| rise_in(s, "profile-card-rise", self.motion())),
             )
             .map(|element| {
                 fade_in(
@@ -500,7 +770,7 @@ impl Larpcord {
                     } else {
                         "profile-enter"
                     },
-                    self.settings.animations,
+                    self.motion(),
                 )
             })
     }
