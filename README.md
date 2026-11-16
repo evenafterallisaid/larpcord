@@ -3,9 +3,9 @@
 <p align="center">a little room to breathe.</p>
 <p align="center">a native discord client, written in rust with gpui.</p>
 
-this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the current published preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.2.0-dev.10).
+this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the current published preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.2.0-dev.11).
 
-**0.2.0-dev.11 is a development preview.** this branch contains the native details, themes and media follow-up. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
+**0.2.0-dev.11 is a development preview.** this release contains the native details, themes and media follow-up. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
 
 ## what works in this milestone
 
@@ -50,15 +50,15 @@ an account session token is a password. keep it private. larpcord is an independ
 ## keeping the footprint small
 
 - only visible messages, server icons and direct-message rows are laid out and painted
-- video decoders start only after a click, one viewer at a time, and are released when it closes; queues are bounded and software decoders use two threads
+- actual videos start after a click in one viewer and release when it closes, with bounded queues and two software decoder threads; silent gifv loops use at most four visible players, one decoder thread each, and release offscreen
 - at most 12 conversation histories, with 200 messages each, live in memory
 - switching conversations evicts the least recently used history while retaining the active one
-- public encoded images have a bounded 64 mib disk cache, reused after scrolling or restarting; portraits/icons have four dedicated download slots and content has two, with two decoders shared across both queues
+- public encoded images have a bounded 64 mib disk cache, reused after scrolling or restarting; portraits/icons have four dedicated download slots and content has two, with one decode permit reserved for each queue
 - recently viewed member lists are retained for up to 60 seconds, with at most two previous channel views
-- visible images decode off the ui thread; portraits and content have separate soft allowances of 8 mib and 12 mib, with 256 and 128 entries respectively; a visible working set can use up to three times its allowance to avoid repeated eviction, with hard entry ceilings of 512 and 256
+- visible images decode off the ui thread; portraits and content have separate soft allowances of 8 mib and 12 mib, with 768 and 384 soft entry allowances respectively; a visible working set can use up to three times its byte allowance, with artwork retention guarded at twice the entry allowance
 - media uses public discord cdn requests without account credentials; external links open only after a click
 - animated emoji use a still frame for now; super reactions have short native particle bursts and hover replay, with reduced-motion support
-- the network service runs on a two-worker rust runtime, independently of window rendering
+- interface motion pauses in inactive windows; the network service runs on a two-worker rust runtime, independently of window rendering
 - the ui waits for pushed events. it has no refresh loop or background game scanner
 - history merges preserve concurrent message edits, reaction changes, new messages and deletions
 - api requests share a rate limit lane, honor retry delays and bound response bodies
@@ -106,7 +106,7 @@ the chosen [glass mascot and wordmark](https://chatgpt.com/s/m_6af5e32be8808191b
 
 ## current rendering limits
 
-avatars, banners and message emoji use still artwork. decorations and supported effect layers animate only on hover or in the open profile, subject to reduced-motion settings and strict decoding limits. nameplates use still artwork in dm and account rows. frames render their own staple, rail and repeated border layers. bundled display-name fonts and color gradients render natively; unavailable font families fall back to inter, and discord’s exact neon/glow/prism/gummy shader treatments remain approximations. custom typing emojis, verbs and pulse/ring/wave treatments use the received user style; multiple typists use the normal combined indicator. embed titles, descriptions, fields, images and footers render natively. components v2 containers, sections, text displays, thumbnails, galleries, files and separators render natively too. buttons and string selectors can submit interactions; entity selectors, bot modal forms, premium purchase controls, stickers are still pending. extended profiles load only when opened, use the server identity where provided, and are cached for five minutes with at most 32 entries. the selected older history can retain up to 200 additional live messages while you browse; returning to latest merges that tail and keeps the normal bounded window.
+avatars, banners and message emoji use still artwork. decorations and supported effect layers animate only on hover or in the open profile, subject to reduced-motion settings and strict decoding limits. nameplates use still artwork in dm and account rows, with supported motion on hover. frames render their own staple, rail and repeated border layers. bundled display-name fonts and color gradients render natively; unavailable font families fall back to inter, and discord’s exact neon/glow/prism/gummy shader treatments remain approximations. custom typing emojis, verbs and pulse/ring/wave treatments use the received user style; multiple typists use the normal combined indicator. embed titles, descriptions, fields, images and footers render natively. components v2 containers, sections, text displays, thumbnails, galleries, files and separators render natively too. buttons and string selectors can submit interactions; entity selectors, bot modal forms and premium purchase controls are still pending. sticker sending and png/apng/gif artwork work; lottie artwork is pending. extended profiles load only when opened, use the server identity where provided, and are cached for five minutes with at most 32 entries. the selected older history can retain up to 200 additional live messages while you browse; returning to latest merges that tail and keeps the normal bounded window.
 
 message and cdn fields follow discord's [message schema](https://docs.discord.com/developers/resources/message), [user schema](https://docs.discord.com/developers/resources/user) and [image formatting reference](https://docs.discord.com/developers/reference#image-formatting).
 
