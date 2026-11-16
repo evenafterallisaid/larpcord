@@ -132,7 +132,9 @@ impl Larpcord {
         keys.into_iter()
             .enumerate()
             .map(|(n, key)| {
-                let (text, image) = if crate::expressions::id(&key) {
+                let (text, image) = if crate::expressions::id(&key)
+                    && crate::expressions::unicode_alias(&key).is_none()
+                {
                     let emoji = self
                         .store
                         .guilds
