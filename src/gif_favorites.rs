@@ -284,15 +284,21 @@ impl Favorites {
             && rest(self) == rest(old)
     }
 }
-/// Read the two normal-client emoji rankings. This path never writes settings.
-pub fn emoji_recents(value: &serde_json::Value) -> Result<(Vec<String>, Vec<String>), String> {
-    let read = || -> Option<(Vec<String>, Vec<String>)> {
+/// Read synced expression rankings without writing another client's settings.
+#[derive(Default)]
+pub struct Recents {
+    pub messages: Vec<String>,
+    pub reactions: Vec<String>,
+    pub stickers: Vec<String>,
+}
+pub fn emoji_recents(value: &serde_json::Value) -> Result<Recents, String> {
+    let read = || -> Option<Recents> {
         let encoded = value["settings"].as_str()?;
         if encoded.len() > 6 * 1024 * 1024 || value["out_of_date"].as_bool() == Some(true) {
             return None;
         }
         let root = fields(&STANDARD.decode(encoded).ok()?)?;
-        let rank = |tag| -> Option<Vec<String>> {
+        let rank = |tag, fixed: bool| -> Option<Vec<String>> {
             let Some(tree) = unique(&root, tag, 2)? else {
                 return Some(vec![]);
             };
@@ -308,13 +314,22 @@ pub fn emoji_recents(value: &serde_json::Value) -> Result<(Vec<String>, Vec<Stri
                 let Some(entry) = fields(&f.data) else {
                     continue;
                 };
-                let Some(Some(key)) = unique(&entry, 1, 2) else {
+                let Some(Some(key)) = unique(&entry, 1, if fixed { 1 } else { 2 }) else {
                     continue;
                 };
-                let Ok(key) = String::from_utf8(key.data.clone()) else {
-                    continue;
+                let key = if fixed {
+                    u64::from_le_bytes(key.data.as_slice().try_into().ok()?).to_string()
+                } else {
+                    let Ok(key) = String::from_utf8(key.data.clone()) else {
+                        continue;
+                    };
+                    key
                 };
-                if key.is_empty() || key.len() > 64 || key.chars().any(char::is_control) {
+                if key.is_empty()
+                    || key.len() > 64
+                    || key.chars().any(char::is_control)
+                    || (fixed && key == "0")
+                {
                     continue;
                 }
                 let Some(Some(item)) = unique(&entry, 2, 2) else {
@@ -331,10 +346,15 @@ pub fn emoji_recents(value: &serde_json::Value) -> Result<(Vec<String>, Vec<Stri
             ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
             Some(ranked.into_iter().take(64).map(|(k, _)| k).collect())
         };
-        Some((rank(6)?, rank(13)?))
+        Some(Recents {
+            messages: rank(6, false)?,
+            reactions: rank(13, false)?,
+            stickers: rank(4, true)?.into_iter().take(32).collect(),
+        })
     };
     read().ok_or_else(|| {
-        "Could not load Discord's recent emoji. Local recents are still available.".into()
+        "Could not load Discord's recent emoji and stickers. Local recents are still available."
+            .into()
     })
 }
 
@@ -369,10 +389,41 @@ mod tests {
         blob(13, &subtree(&[("heart", 8)]), &mut root);
         blob(99, b"unknown", &mut root);
         let value = serde_json::json!({"settings":STANDARD.encode(&root)});
-        let (messages, reactions) = emoji_recents(&value).unwrap();
+        let recents = emoji_recents(&value).unwrap();
+        let messages = recents.messages;
+        let reactions = recents.reactions;
         assert_eq!(messages, vec!["123", "sob"]);
         assert_eq!(reactions, vec!["heart"]);
         assert_eq!(value["settings"].as_str().unwrap(), STANDARD.encode(&root));
+    }
+    #[test]
+    fn sticker_rankings_use_fixed64_ids_and_keep_other_settings_untouched() {
+        let mut stickers = vec![];
+        for (id, score) in [(1560000000000000001u64, 1), (1560000000000000002, 9)] {
+            let mut entry = vec![];
+            put((1 << 3) | 1, &mut entry);
+            entry.extend_from_slice(&id.to_le_bytes());
+            let mut item = vec![];
+            integer(4, score, &mut item);
+            blob(2, &item, &mut entry);
+            blob(1, &entry, &mut stickers);
+        }
+        let mut root = vec![];
+        blob(4, &stickers, &mut root);
+        blob(99, b"future setting", &mut root);
+        let value = serde_json::json!({"settings":STANDARD.encode(&root)});
+        assert_eq!(
+            emoji_recents(&value).unwrap().stickers,
+            vec!["1560000000000000002", "1560000000000000001"]
+        );
+        assert_eq!(
+            STANDARD
+                .decode(value["settings"].as_str().unwrap())
+                .unwrap(),
+            root
+        );
+        let malformed = serde_json::json!({"settings":STANDARD.encode([0x22,0xff])});
+        assert!(emoji_recents(&malformed).is_err());
     }
     #[test]
     fn favorite_changes_preserve_unknown_entries_and_fail_closed() {

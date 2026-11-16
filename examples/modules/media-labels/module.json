@@ -1,0 +1,11 @@
+{
+  "api_version": 1,
+  "id": "media-labels",
+  "name": "Media labels",
+  "version": "1.0.0",
+  "description": "Adds a small label to messages with attachments. A first example of native message hooks.",
+  "permissions": ["message_metadata"],
+  "message_decorators": [
+    {"when": {"has_attachments": true}, "label": "Media", "color": 10206463}
+  ]
+}

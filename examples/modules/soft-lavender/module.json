@@ -1,0 +1,9 @@
+{
+  "api_version": 1,
+  "id": "soft-lavender",
+  "name": "Soft lavender",
+  "version": "1.0.0",
+  "description": "A small theme-token adapter that keeps the selected theme and softens its accent.",
+  "permissions": ["theme"],
+  "theme": {"accent": 12700141}
+}

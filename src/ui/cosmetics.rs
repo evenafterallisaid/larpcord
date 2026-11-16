@@ -8,7 +8,7 @@ impl Larpcord {
         name: &str,
         user: &User,
         member: Option<&Member>,
-        _full: bool,
+        full: bool,
     ) -> AnyElement {
         let style = member
             .and_then(|m| m.display_name_styles.as_ref())
@@ -28,60 +28,93 @@ impl Larpcord {
                     })
             })
             .map_or(TEXT, |r| r.display_color());
-        let count = name.graphemes(true).count().max(2) - 1;
-        let highlights = if !style.colors.is_empty() {
-            name.grapheme_indices(true)
-                .enumerate()
-                .map(|(n, (offset, g))| {
-                    (
-                        offset..offset + g.len(),
-                        HighlightStyle {
-                            color: Some(
-                                rgb(style.color_at(n as f32 / count as f32, role_color)).into(),
-                            ),
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect::<Vec<_>>()
+        let animated = full
+            && self.motion()
+            && self.settings_tab.is_none()
+            && self.video.is_none()
+            && style.animated();
+        let name = name.to_string();
+        let style = style.clone();
+        let draw = move |element: Div, phase: f32| {
+            let count = name.graphemes(true).count().max(2) - 1;
+            let highlights = if style.colors.is_empty() {
+                Vec::new()
+            } else {
+                name.grapheme_indices(true)
+                    .enumerate()
+                    .map(|(n, (offset, g))| {
+                        (
+                            offset..offset + g.len(),
+                            HighlightStyle {
+                                color: Some(
+                                    rgb(if animated {
+                                        style.color_at_time(
+                                            n as f32 / count as f32,
+                                            phase,
+                                            role_color,
+                                        )
+                                    } else {
+                                        style.color_at(n as f32 / count as f32, role_color)
+                                    })
+                                    .into(),
+                                ),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let effect = style.effect_id.unwrap_or(1);
+            let tint = style.color_at_time(0., phase, role_color);
+            let pulse = if animated {
+                0.65 + 0.35 * (phase * std::f32::consts::TAU).sin().abs()
+            } else {
+                1.
+            };
+            let copies: Vec<(f32, f32, u32, f32)> = match effect {
+                3 | 6 => vec![
+                    (-1.2, 0., tint, 0.22 * pulse),
+                    (1.2, 0., tint, 0.22 * pulse),
+                    (0., -1.2, tint, 0.22 * pulse),
+                    (0., 1.2, tint, 0.22 * pulse),
+                ],
+                4 => vec![
+                    (-1., 0., 0x08090b, 0.9),
+                    (1., 0., 0x08090b, 0.9),
+                    (0., -1., 0x08090b, 0.9),
+                    (0., 1., 0x08090b, 0.9),
+                ],
+                5 => vec![(1.3, 1.5, 0x08090b, 0.9)],
+                8 => vec![(0., 1.2, 0x08090b, 0.6)],
+                _ => vec![],
+            };
+            element
+                .relative()
+                .text_color(rgb(role_color))
+                .font_family(style.font())
+                .font_weight(FontWeight::SEMIBOLD)
+                .children(copies.into_iter().map(|(x, y, color, opacity)| {
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y))
+                        .opacity(opacity)
+                        .text_color(rgb(color))
+                        .child(name.clone())
+                }))
+                .child(StyledText::new(name.clone()).with_highlights(highlights))
+        };
+        if animated {
+            div()
+                .with_animation(
+                    "display-name-motion",
+                    Animation::new(std::time::Duration::from_secs(3)).repeat(),
+                    draw,
+                )
+                .into_any_element()
         } else {
-            Vec::new()
-        };
-        let effect = style.effect_id.unwrap_or(1);
-        let tint = style.color_at(0., role_color);
-        let copies: Vec<(f32, f32, u32, f32)> = match effect {
-            3 | 6 => vec![
-                (-1.2, 0., tint, 0.22),
-                (1.2, 0., tint, 0.22),
-                (0., -1.2, tint, 0.22),
-                (0., 1.2, tint, 0.22),
-            ],
-            4 => vec![
-                (-1., 0., 0x08090b, 0.9),
-                (1., 0., 0x08090b, 0.9),
-                (0., -1., 0x08090b, 0.9),
-                (0., 1., 0x08090b, 0.9),
-            ],
-            5 => vec![(1.3, 1.5, 0x08090b, 0.9)],
-            8 => vec![(0., 1.2, 0x08090b, 0.6)],
-            _ => Vec::new(),
-        };
-        div()
-            .relative()
-            .text_color(rgb(role_color))
-            .font_family(style.font())
-            .font_weight(FontWeight::SEMIBOLD)
-            .children(copies.into_iter().map(|(x, y, color, opacity)| {
-                div()
-                    .absolute()
-                    .left(px(x))
-                    .top(px(y))
-                    .opacity(opacity)
-                    .text_color(rgb(color))
-                    .child(name.to_string())
-            }))
-            .child(StyledText::new(name.to_string()).with_highlights(highlights))
-            .into_any_element()
+            draw(div(), 0.).into_any_element()
+        }
     }
 
     pub(super) fn decorated_avatar(
@@ -108,7 +141,10 @@ impl Larpcord {
             .zip(guild)
             .and_then(|(hash, guild)| crate::media::member_avatar(guild, &user.id, hash))
             .or_else(|| crate::media::avatar(&user.id, user.avatar.as_deref()));
-        let avatar = url.and_then(|url| self.media.get(&url));
+        let avatar = url.and_then(|url| {
+            self.media
+                .get(&crate::media::motion_url(url, motion && self.motion()))
+        });
         let decoration = member
             .and_then(|m| m.avatar_decoration_data.as_ref())
             .or(user.avatar_decoration_data.as_ref())
@@ -136,7 +172,8 @@ impl Larpcord {
                     .bg(rgb(0x4e5058))
                     .map(|s| match avatar {
                         Some(image) => s.child(
-                            img(image)
+                            img(image.clone())
+                                .id(("avatar-image", image.id.0))
                                 .size_full()
                                 .object_fit(ObjectFit::Cover)
                                 .rounded_full(),

@@ -174,6 +174,10 @@ pub enum Tab {
 #[derive(Default)]
 pub struct Picker {
     pub account_recent: Vec<String>,
+    pub account_stickers: Vec<String>,
+    pub session_stickers: Vec<String>,
+    pub sticker_details: std::collections::HashMap<String, Sticker>,
+    pub sticker_attempts: std::collections::HashMap<String, std::time::Instant>,
     pub reaction_recent: Vec<String>,
     pub session_recent: Vec<String>,
     pub recents_checked: Option<std::time::Instant>,

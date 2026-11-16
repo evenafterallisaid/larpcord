@@ -137,6 +137,9 @@ fn decode_bounds(url: &str) -> (u32, u32) {
     if gif_preview(url) {
         return (400, 264);
     }
+    if url.contains("/banners/") {
+        return (640, 256);
+    }
     if url.contains("#motion") {
         (128, 192)
     } else if url.contains("/media/v1/collectibles-shop/")
@@ -563,10 +566,21 @@ pub fn motion_url(url: String, enabled: bool) -> String {
         return url;
     }
     let mut url = url.replace("/static", "/animated");
+    let identity = reqwest::Url::parse(&url).ok().is_some_and(|u| {
+        u.path_segments().is_some_and(|mut p| {
+            p.any(|part| {
+                part.starts_with("a_") && (part.ends_with(".webp") || part.ends_with(".png"))
+            })
+        })
+    });
+    if identity {
+        url = url.replace(".webp", ".gif").replace(".png", ".gif");
+    }
     if url.contains("/avatar-decoration-presets/") {
         url = url.replace("passthrough=false", "passthrough=true");
     }
-    if url.contains("/assets/profile_effects/")
+    if identity
+        || url.contains("/assets/profile_effects/")
         || url.contains("/animated")
         || url.contains("passthrough=true")
     {
@@ -605,20 +619,52 @@ fn decode_motion(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>>
         }
         _ => return fallback(),
     };
-    let mut decoded = Vec::new();
+    let mut decoded: Vec<Frame> = Vec::new();
     let mut total = 0;
-    for frame in frames {
+    let mut bounds = bounds;
+    for frame in frames.take(2048) {
         let frame = frame.ok()?;
         let delay = frame.delay();
         let image = image::DynamicImage::ImageRgba8(frame.into_buffer());
         let pixels = image
             .thumbnail(bounds.0.min(image.width()), bounds.1.min(image.height()))
             .into_rgba8();
-        total += pixels.len();
-        if decoded.len() >= 120 || total > 4 * 1024 * 1024 {
-            return fallback();
-        }
+        // Keep the animation alive under the same budget by reducing resolution, not motion.
         let mut pixels = pixels;
+        while total + pixels.len() > 4 * 1024 * 1024 && bounds.0 > 16 && bounds.1 > 16 {
+            bounds = (bounds.0 / 2, bounds.1 / 2);
+            for frame in &mut decoded {
+                let delay = frame.delay();
+                let small = image::DynamicImage::ImageRgba8(frame.buffer().clone())
+                    .thumbnail(bounds.0, bounds.1)
+                    .into_rgba8();
+                *frame = Frame::from_parts(small, 0, 0, delay);
+            }
+            total = decoded.iter().map(|f| f.buffer().len()).sum();
+            pixels = image::DynamicImage::ImageRgba8(pixels)
+                .thumbnail(bounds.0, bounds.1)
+                .into_rgba8();
+        }
+        if decoded.len() >= 240 {
+            // Re-bin older frames with their complete delays instead of truncating the loop.
+            let mut frames = std::mem::take(&mut decoded).into_iter();
+            while let Some(first) = frames.next() {
+                let delay = std::time::Duration::from(first.delay())
+                    + frames.next().map_or(std::time::Duration::ZERO, |second| {
+                        std::time::Duration::from(second.delay())
+                    });
+                let delay = image::Delay::from_numer_denom_ms(
+                    delay.as_millis().min(u32::MAX as u128) as u32,
+                    1,
+                );
+                decoded.push(Frame::from_parts(first.into_buffer(), 0, 0, delay));
+            }
+            total = decoded.iter().map(|f| f.buffer().len()).sum();
+        }
+        if total + pixels.len() > 4 * 1024 * 1024 {
+            break;
+        }
+        total += pixels.len();
         for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
@@ -914,6 +960,79 @@ mod tests {
                 .map(|n| decoded.as_bytes(n).unwrap().len())
                 .sum::<usize>(),
             3 * 8 * 8 * 4
+        );
+    }
+
+    #[test]
+    fn identity_motion_is_requested_and_large_animations_keep_playing_under_budget() {
+        let still = avatar("123", Some("a_abc")).unwrap();
+        assert!(motion_url(still.clone(), true).ends_with(".gif?size=128#motion"));
+        assert_eq!(motion_url(still.clone(), false), still);
+        let still = banner("123", None, "a_abc").unwrap();
+        assert!(motion_url(still, true).ends_with(".gif?size=1024#motion"));
+        let mut bytes = vec![];
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            for index in 0..24 {
+                encoder
+                    .encode_frame(Frame::from_parts(
+                        image::RgbaImage::from_pixel(
+                            320,
+                            180,
+                            image::Rgba([index * 8, 20, 40, 255]),
+                        ),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(80, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        let image = decode_motion(bytes, (320, 180)).unwrap();
+        assert_eq!(
+            image.frame_count(),
+            24,
+            "budget pressure must not silently turn the whole asset into a still"
+        );
+        assert!(image.size(0).width.0 < 320);
+        assert!(
+            (0..image.frame_count())
+                .map(|n| image.as_bytes(n).unwrap().len())
+                .sum::<usize>()
+                <= 4 * 1024 * 1024
+        );
+        assert_eq!(image.delay(23).numer_denom_ms(), (80, 1));
+    }
+
+    #[test]
+    fn longer_identity_loops_rebin_frames_without_losing_the_end_or_timing() {
+        let mut bytes = vec![];
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+            for n in 0..300 {
+                encoder
+                    .encode_frame(Frame::from_parts(
+                        image::RgbaImage::from_pixel(
+                            8,
+                            8,
+                            image::Rgba([if n == 299 { 255 } else { 0 }, 0, 0, 255]),
+                        ),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(20, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        let image = decode_motion(bytes, (8, 8)).unwrap();
+        assert!(image.frame_count() <= 240);
+        let ms = (0..image.frame_count())
+            .map(|n| std::time::Duration::from(image.delay(n)).as_millis())
+            .sum::<u128>();
+        assert_eq!(ms, 6000);
+        assert_eq!(
+            &image.as_bytes(image.frame_count() - 1).unwrap()[..4],
+            &[0, 0, 255, 255]
         );
     }
 

@@ -12,6 +12,7 @@ mod input;
 mod media;
 mod members;
 mod model;
+mod modules;
 mod navigation;
 mod network;
 mod presence;

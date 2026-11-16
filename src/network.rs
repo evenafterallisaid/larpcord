@@ -24,7 +24,8 @@ pub enum Event {
         message: String,
         result: Result<(), String>,
     },
-    EmojiRecents(Result<(Vec<String>, Vec<String>), String>),
+    EmojiRecents(Result<crate::gif_favorites::Recents, String>),
+    StickerDetails(Vec<crate::expressions::Sticker>),
     ProfileBadges {
         id: String,
         guild: Option<String>,
@@ -103,6 +104,7 @@ pub enum Command {
         remove: bool,
     },
     EmojiRecents,
+    StickerDetails(Vec<String>),
     GifFavorites(Option<(crate::expressions::Gif, bool)>),
     CancelGifs,
     Gifs {
@@ -704,6 +706,18 @@ impl Backend {
                                 Command::React {channel,message,emoji,remove} => {
                                     let Some(client)=api.clone() else {continue;};let events=events.clone();
                                     requests.spawn(async move {let result=client.react(&channel,&message,&emoji,remove).await;emit(&events,generation,Event::Reacted{channel,message,result}).await;});
+                                }
+                                Command::StickerDetails(ids) => {
+                                    let Some(client)=api.as_ref().map(Api::discovery) else {continue;};
+                                    let events = events.clone();
+                                    requests.spawn(async move {
+                                        let stickers = futures_util::stream::iter(ids.into_iter().filter(|id| crate::expressions::id(id)).take(32))
+                                            .map(|id| {let client=client.clone(); async move {
+                                                client.request::<crate::expressions::Sticker>(Method::GET,&format!("/stickers/{id}"),None).await.ok().filter(crate::expressions::Sticker::valid)
+                                            }})
+                                            .buffer_unordered(2).filter_map(|s|async move{s}).collect().await;
+                                        emit(&events,generation,Event::StickerDetails(stickers)).await;
+                                    });
                                 }
                                 Command::EmojiRecents => {
                                     let events=events.clone();

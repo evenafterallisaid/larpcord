@@ -7,6 +7,7 @@ mod cosmetics;
 mod friends;
 mod gif;
 mod members;
+mod modules;
 mod picker;
 mod profile;
 mod text;
@@ -50,6 +51,9 @@ pub struct Larpcord {
     backend: Backend,
     store: Store,
     settings: Settings,
+    modules: crate::modules::Registry,
+    modules_loading: bool,
+    modules_task: Option<Task<()>>,
     generation: u64,
     preview: bool,
     preview_only: bool,
@@ -238,23 +242,6 @@ fn fade_in<E: IntoElement + Styled + 'static>(
     }
 }
 
-fn rise_in<E: IntoElement + Styled + 'static>(
-    element: E,
-    id: &'static str,
-    enabled: bool,
-) -> AnyElement {
-    if enabled {
-        element
-            .with_animation(
-                id,
-                Animation::new(std::time::Duration::from_millis(180)).with_easing(ease_out_quint()),
-                |s, t| s.top(px(8. * (1. - t))).opacity(t),
-            )
-            .into_any_element()
-    } else {
-        element.into_any_element()
-    }
-}
 fn snowflake_after(a: &str, b: &str) -> bool {
     a.len() > b.len() || (a.len() == b.len() && a > b)
 }
@@ -317,9 +304,8 @@ impl Larpcord {
     }
     fn color(&self, value: u32) -> Rgba {
         rgb(self
-            .settings
-            .theme
-            .tokens(self.settings.custom_theme)
+            .modules
+            .tokens(self.settings.theme.tokens(self.settings.custom_theme))
             .resolve(value))
     }
 
@@ -498,7 +484,19 @@ impl Larpcord {
             recent: settings.recent_emoji.clone(),
             ..Default::default()
         };
+        let modules = crate::modules::Registry::load(
+            if preview_only {
+                None
+            } else {
+                crate::modules::directory()
+            }
+            .as_deref(),
+            &settings.module_grants,
+        );
         Self {
+            modules,
+            modules_loading: false,
+            modules_task: None,
             root_focus,
             modal_focus: cx.focus_handle(),
             previous_focus: None,
@@ -1310,12 +1308,27 @@ impl Larpcord {
                     self.error = Some(error);
                 }
             }
+            Event::StickerDetails(stickers) => {
+                for sticker in stickers.into_iter().take(32) {
+                    if self.picker.account_stickers.contains(&sticker.id) && sticker.valid() {
+                        self.picker
+                            .sticker_details
+                            .insert(sticker.id.clone(), sticker);
+                    }
+                }
+                self.picker_catalog_ready(cx);
+            }
             Event::EmojiRecents(result) => {
                 self.picker.recents_loading = false;
                 match result {
-                    Ok((messages, reactions)) => {
-                        self.picker.account_recent = messages;
-                        self.picker.reaction_recent = reactions;
+                    Ok(recents) => {
+                        self.picker.account_recent = recents.messages;
+                        self.picker.reaction_recent = recents.reactions;
+                        self.picker.account_stickers = recents.stickers;
+                        self.picker
+                            .sticker_details
+                            .retain(|id, _| self.picker.account_stickers.contains(id));
+                        self.load_recent_stickers();
                         self.picker.recents_error = None;
                     }
                     Err(error) => self.picker.recents_error = Some(error),
@@ -2768,7 +2781,10 @@ impl Larpcord {
             .map_or("Direct Messages", |g| g.name.as_str())
             .to_string();
         let banner = guild.and_then(|g| crate::media::banner(&g.id, None, g.banner.as_deref()?));
-        let banner_image = banner.as_ref().and_then(|url| self.media.get(url));
+        let banner_image = banner.as_ref().and_then(|url| {
+            self.media
+                .get(&crate::media::motion_url(url.clone(), self.motion()))
+        });
         let query = self.search.read(cx).content.to_lowercase();
         let mut channels: Vec<_> = self
             .store
@@ -2976,7 +2992,8 @@ impl Larpcord {
                     .border_color(self.color(LINE))
                     .when_some(banner_image, |s, image| {
                         s.child(
-                            img(image)
+                            img(image.clone())
+                                .id(("guild-banner", image.id.0))
                                 .absolute()
                                 .inset_0()
                                 .size_full()
@@ -3262,7 +3279,27 @@ impl Larpcord {
                     .child(label(time.clone()).text_size(px(12.))),
             );
         }
-        if !content.is_empty() && !gif::gif_only(message) {
+        let decorations = self.modules.decorate(crate::modules::MessageView {
+            author_bot: message.author.bot,
+            has_attachments: !message.attachments.is_empty(),
+            content: &message.content,
+        });
+        if !decorations.is_empty() {
+            body = body.child(row().gap_2().children(decorations.into_iter().map(|label| {
+                let hint = format!("Added by {}", label.module);
+                div()
+                    .id(SharedString::from(format!("module-label-{}", label.module)))
+                    .px_2()
+                    .rounded_md()
+                    .text_size(px(10.))
+                    .text_color(rgb(label.color))
+                    .border_1()
+                    .border_color(rgba((label.color << 8) | 0x66))
+                    .child(label.text.to_string())
+                    .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
+            })));
+        }
+        if !content.is_empty() && !gif::media_only(message) {
             body = body.child(
                 div()
                     .debug_selector(|| "message-content".into())
@@ -3344,7 +3381,13 @@ impl Larpcord {
                     }),
             );
         }
-        for (index, embed) in message.embeds.iter().take(10).enumerate() {
+        for (index, embed) in message
+            .embeds
+            .iter()
+            .filter(|_| message.flags & 4 == 0)
+            .take(10)
+            .enumerate()
+        {
             let playable = embed.video.as_ref().and_then(|video| {
                 video
                     .proxy_url
@@ -3370,6 +3413,13 @@ impl Larpcord {
                     video.width.zip(video.height),
                     cx,
                 ));
+                continue;
+            }
+            if message.flags & 4 == 0
+                && let Some(image) = gif::embed_image(embed)
+                && let Some(url) = gif::image_source(image)
+            {
+                body = body.child(self.media_image(url, image.width, image.height));
                 continue;
             }
             let image_only = embed.title.is_none()
@@ -3539,7 +3589,7 @@ impl Larpcord {
                                     message.member.as_ref(),
                                     self.selected_guild.as_deref(),
                                     40.,
-                                    self.hovered_name.as_deref() == Some(&message.id),
+                                    self.hovered_message.as_deref() == Some(&message.id),
                                 ))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.open_profile(avatar_user.clone(), window, cx)
@@ -4209,6 +4259,9 @@ impl Larpcord {
                         })),
                     ).child(self.setting_toggle("animations","Interface animations","Short transitions for panels and selection. Turn off to reduce motion.",self.settings.animations).on_click(cx.listener(|this,_,_,cx|{this.settings.animations = !this.settings.animations;this.persist(cx);})));
             }
+            2 => {
+                body = body.child(self.modules_settings(cx));
+            }
             _ => {
                 body = body.child(img(ImageSource::Resource(Resource::Embedded("mascot.png".into()))).size(px(58.)).text_color(self.color(ACCENT)))
                     .child(div().text_size(px(30.)).child("larpcord"))
@@ -4220,7 +4273,7 @@ impl Larpcord {
                         .child(label("Up to 12 conversations and 200 messages per conversation. Images load as you scroll. The connection runs independently of rendering."))
                         .child(button("clear-cache", "Clear message cache").on_click(cx.listener(|this, _, _, cx| { this.store.clear_history(); this.refresh_messages(); cx.notify(); }))))
                     .child(button("github", "Open GitHub ↗").on_click(|_, _, cx| cx.open_url("https://github.com/evenafterallisaid/larpcord")))
-                    .child(label("Native voice and plugin adapters are future milestones. Video codec support depends on your platform and installed graphics drivers."));
+                    .child(label("Native voice and executable plugin adapters are future milestones. Video codec support depends on your platform and installed graphics drivers."));
                 if self.preview_only {
                     body = body.child(button("sample-video", "Try sample video").on_click(
                         cx.listener(|this, _, window, cx| this.sample_video(window, cx)),
@@ -4258,7 +4311,7 @@ impl Larpcord {
                             .bg(self.color(PANEL))
                             .child(label("LARPCORD").mt_2().mb_4().text_size(px(10.)))
                             .children(
-                                ["Account", "Preferences", "About"]
+                                ["Account", "Preferences", "Modules", "About"]
                                     .into_iter()
                                     .enumerate()
                                     .map(|(index, name)| {
@@ -4669,7 +4722,7 @@ mod tests {
     fn mutual_profile_tabs_show_their_own_lists(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
         view.update(cx, |v, cx| {
-            v.settings.animations = false;
+            v.settings.animations = true;
             let friend = User {
                 id: "123".into(),
                 username: "mutual friend".into(),
@@ -4689,19 +4742,38 @@ mod tests {
             });
             cx.notify();
         });
-        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
-            view.clone()
-        });
+        let viewport = cx.update(|window, _| window.viewport_size());
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
         let identity = cx.debug_bounds("profile-identity").unwrap();
         let card = cx.debug_bounds("profile-card").unwrap();
-        let tab = cx.debug_bounds("profile-tab-1").unwrap();
-        cx.simulate_click(tab.center(), Modifiers::default());
-        cx.update(|_, cx| assert_eq!(view.read(cx).profile_tab, 1));
-        let tab = cx.debug_bounds("profile-tab-2").unwrap();
-        cx.simulate_click(tab.center(), Modifiers::default());
-        cx.update(|_, cx| assert_eq!(view.read(cx).profile_tab, 2));
-        assert_eq!(cx.debug_bounds("profile-card").unwrap(), card);
-        assert_eq!(cx.debug_bounds("profile-identity").unwrap(), identity);
+        let tabs = cx.debug_bounds("profile-tabs").unwrap();
+        let body = cx.debug_bounds("profile-tab-body").unwrap();
+        for tab in [1, 2, 0, 2, 1, 0] {
+            let bounds = cx
+                .debug_bounds(match tab {
+                    0 => "profile-tab-0",
+                    1 => "profile-tab-1",
+                    _ => "profile-tab-2",
+                })
+                .unwrap();
+            cx.simulate_mouse_move(bounds.center(), None, Modifiers::default());
+            cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+            assert_eq!(
+                cx.debug_bounds("profile-tabs").unwrap(),
+                tabs,
+                "hover moved the tabs"
+            );
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+            cx.update(|_, cx| assert_eq!(view.read(cx).profile_tab, tab));
+            assert_eq!(
+                cx.debug_bounds("profile-tab-body").unwrap(),
+                body,
+                "tab contents resized the viewport"
+            );
+            assert_eq!(cx.debug_bounds("profile-card").unwrap(), card);
+            assert_eq!(cx.debug_bounds("profile-identity").unwrap(), identity);
+        }
     }
 
     #[gpui::test]
