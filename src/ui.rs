@@ -4234,8 +4234,9 @@ mod tests {
         cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
             view.clone()
         });
-        assert!(cx.debug_bounds("autoplay-gif").is_some());
-        assert!(cx.debug_bounds("video-tile").is_none());
+        let gif = cx.debug_bounds("autoplay-gif").unwrap();
+        cx.simulate_click(gif.center(), Modifiers::default());
+        cx.update(|_, cx| assert!(view.read(cx).video.is_none()));
     }
 
     #[gpui::test]
