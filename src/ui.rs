@@ -4611,14 +4611,11 @@ mod tests {
             });
             cx.notify();
         });
-        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
-            view.clone()
-        });
+        let viewport = cx.update(|window, _| window.viewport_size());
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
         let row = cx.debug_bounds("message-row-98765").unwrap();
         cx.simulate_mouse_move(row.center(), None, Modifiers::default());
-        cx.draw(point(px(0.), px(0.)), size(px(1100.), px(730.)), |_, _| {
-            view.clone()
-        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
         cx.update(|_, cx| {
             assert_eq!(
                 view.read(cx).hovered_message.as_deref(),
