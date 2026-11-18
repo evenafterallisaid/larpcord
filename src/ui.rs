@@ -4700,6 +4700,50 @@ mod tests {
     }
 
     #[gpui::test]
+    fn bot_section_with_button_stays_inside_its_message(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx, |v, cx| {
+            v.store.clear_history();
+            v.store.insert(serde_json::from_value(serde_json::json!({
+                "id": "101", "channel_id": "campfire", "flags": 32768,
+                "author": {"id": "bot", "username": ".fmbot", "bot": true},
+                "components": [{
+                    "type": 17, "accent_color": 16755249,
+                    "components": [{
+                        "type": 9,
+                        "components": [{"type": 10, "content": "Not enough scrobbled albums (0 of required 9) in the day time period. Try a smaller chart or a bigger time period."}],
+                        "accessory": {"type": 2, "style": 2, "label": "Edit", "custom_id": "edit"}
+                    }]
+                }]
+            })).unwrap());
+            v.store.insert(Message {
+                id: "102".into(),
+                channel_id: "campfire".into(),
+                content: "next message".into(),
+                author: User { id: "friend".into(), username: "friend".into(), ..Default::default() },
+                ..Default::default()
+            });
+            v.refresh_messages();
+            v.messages.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.) });
+            cx.notify();
+        });
+        for width in [1100., 860.] {
+            cx.draw(point(px(0.), px(0.)), size(px(width), px(730.)), |_, _| {
+                view.clone()
+            });
+            let message = cx.debug_bounds("message-row-101").unwrap();
+            let card = cx.debug_bounds("component-card-101").unwrap();
+            let next = cx.debug_bounds("message-row-102").unwrap();
+            assert!(card.size.width >= px(300.) && card.right() <= message.right());
+            assert!(
+                card.size.height >= px(64.) && card.size.height <= px(176.),
+                "{card:?}"
+            );
+            assert!(card.bottom() <= message.bottom() && message.bottom() <= next.top());
+        }
+    }
+
+    #[gpui::test]
     fn gifv_uses_a_silent_inline_tile_instead_of_video_controls(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
         view.update(cx,|v,cx|{v.store.clear_history();v.store.insert(serde_json::from_value(serde_json::json!({"id":"55","channel_id":"campfire","author":{"id":"x","username":"friend"},"embeds":[{"type":"gifv","video":{"url":"https://cdn.discordapp.com/test.gif.mp4","width":300,"height":200},"thumbnail":{"url":"https://cdn.discordapp.com/test.png","width":300,"height":200}}]})).unwrap());v.refresh_messages();cx.notify();});

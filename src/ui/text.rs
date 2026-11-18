@@ -58,7 +58,8 @@ impl Larpcord {
                         }
                     }
                 }
-                row().id(("rich-block",index)).w_full().min_w_0().flex_wrap().min_h(px(22.))
+                div().id(("rich-block",index)).w_full().min_w_0().min_h(px(22.))
+                    .when(has_emoji, |s| s.flex().items_center().flex_wrap())
                     .text_size(px(if block.heading>0 {22.-(block.heading.min(4)-1) as f32*2.}else if jumbo {30.} else{font_size})).line_height(px(if block.heading>0{28.}else if jumbo {36.} else{22.}))
                     .when(block.heading>0,|s|s.font_weight(FontWeight::BOLD).mt_1())
                     .when(block.code,|s|s.font_family("monospace").p_2().rounded_md().bg(self.color(PANEL)))
