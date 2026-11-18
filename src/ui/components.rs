@@ -231,17 +231,19 @@ impl Larpcord {
             .into_any_element(),
             9 => row()
                 .id(id)
+                .w_full()
+                .min_w_0()
                 .items_start()
                 .gap_3()
                 .child(column().flex_1().min_w_0().gap_2().children(children()))
                 .when_some(component.accessory.as_deref(), |s, accessory| {
-                    s.child(self.component(
+                    s.child(div().flex_shrink_0().child(self.component(
                         message,
                         accessory,
                         format!("{path}-accessory"),
                         depth + 1,
                         cx,
-                    ))
+                    )))
                 })
                 .into_any_element(),
             10 => div()
@@ -304,9 +306,14 @@ impl Larpcord {
                 .into_any_element(),
             17 => column()
                 .id(id)
+                .debug_selector({
+                    let id = message.id.clone();
+                    move || format!("component-card-{id}")
+                })
                 .w_full()
                 .max_w(px(520.))
                 .min_w_0()
+                .overflow_hidden()
                 .gap_3()
                 .p_4()
                 .rounded_lg()

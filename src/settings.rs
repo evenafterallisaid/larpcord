@@ -13,6 +13,7 @@ pub struct Settings {
     pub theme: crate::theme::Theme,
     #[serde(skip)]
     pub custom_theme: Option<crate::theme::Tokens>,
+    pub catalog_installed: Vec<crate::modules::CatalogEntry>,
     pub module_grants: Vec<crate::modules::Grant>,
     pub recent_emoji: Vec<String>,
     pub recent_stickers: Vec<crate::expressions::Sticker>,
@@ -30,6 +31,7 @@ impl Default for Settings {
             animations: true,
             theme: crate::theme::Theme::default(),
             custom_theme: None,
+            catalog_installed: Vec::new(),
             module_grants: Vec::new(),
             recent_emoji: Vec::new(),
             recent_stickers: Vec::new(),
@@ -54,6 +56,7 @@ impl Settings {
             .retain(|s| s.len() <= 128 && !s.chars().any(char::is_control));
         settings.recent_emoji.truncate(32);
         settings.sanitize_recents();
+        crate::modules::sanitize_catalog_entries(&mut settings.catalog_installed);
         crate::modules::sanitize_grants(&mut settings.module_grants);
         settings.custom_theme = Self::path()
             .map(|p| p.with_file_name("theme.json"))

@@ -98,6 +98,9 @@ pub struct Profile {
     pub mutual_friends: Vec<User>,
     #[serde(default, deserialize_with = "nullable_vec")]
     pub badges: Vec<ProfileBadge>,
+    #[serde(default, deserialize_with = "nullable_vec")]
+    pub guild_badges: Vec<ProfileBadge>,
+    pub premium_type: Option<u8>,
     #[serde(skip)]
     pub effect_asset: Option<crate::effects::Effect>,
     #[serde(skip)]
@@ -109,9 +112,13 @@ pub struct Profile {
 #[derive(Clone, Default, Deserialize)]
 pub struct ProfileBadge {
     #[serde(default)]
+    pub id: String,
+    #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub icon: String,
+    #[serde(default)]
+    pub fallback: Option<String>,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -120,6 +127,10 @@ pub struct MutualGuild {
 }
 
 impl ProfileBadge {
+    pub fn same_as(&self, other: &Self) -> bool {
+        (!self.id.is_empty() && self.id == other.id)
+            || (!self.icon.is_empty() && self.icon == other.icon)
+    }
     pub fn image(&self) -> Option<String> {
         if crate::media::cdn_url(&self.icon) && self.icon.len() <= 2048 {
             return Some(self.icon.clone());

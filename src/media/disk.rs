@@ -3,7 +3,7 @@ use std::{
     fs,
     io::Write,
     path::PathBuf,
-    sync::Mutex,
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, SystemTime},
 };
 
@@ -16,6 +16,10 @@ pub struct Disk {
     writer: Mutex<()>,
 }
 impl Disk {
+    pub fn shared() -> Arc<Self> {
+        static CACHE: OnceLock<Arc<Disk>> = OnceLock::new();
+        CACHE.get_or_init(|| Arc::new(Disk::new())).clone()
+    }
     pub fn new() -> Self {
         let root = directories::ProjectDirs::from("app", "larpcord", "Larpcord")
             .map(|d| d.cache_dir().join("media-v1"));

@@ -292,7 +292,7 @@ impl Element for Img {
                 })
             });
 
-            let frame_index = state.as_ref().map(|state| state.frame_index).unwrap_or(0);
+            let mut frame_index = state.as_ref().map(|state| state.frame_index).unwrap_or(0);
 
             let layout_id = self.interactivity.request_layout(
                 global_id,
@@ -314,7 +314,10 @@ impl Element for Img {
                                 let frame_count = data.frame_count();
                                 if frame_count > 1 {
                                     let current_time = Instant::now();
-                                    if let Some(last_frame_time) = state.last_frame_time {
+                                    state.frame_index %= frame_count;
+                                    if !window.is_window_active() {
+                                        state.last_frame_time = None;
+                                    } else if let Some(last_frame_time) = state.last_frame_time {
                                         let elapsed = current_time - last_frame_time;
                                         let frame_duration =
                                             Duration::from(data.delay(state.frame_index));
@@ -322,13 +325,20 @@ impl Element for Img {
                                         if elapsed >= frame_duration {
                                             state.frame_index =
                                                 (state.frame_index + 1) % frame_count;
-                                            state.last_frame_time =
-                                                Some(current_time - (elapsed - frame_duration));
+                                            let overrun = elapsed - frame_duration;
+                                            // discard idle time so a resumed image cannot race through its loop.
+                                            let carry = if overrun <= Duration::from_millis(17) {
+                                                overrun
+                                            } else {
+                                                Duration::ZERO
+                                            };
+                                            state.last_frame_time = Some(current_time - carry);
                                         }
                                     } else {
                                         state.last_frame_time = Some(current_time);
                                     }
                                 }
+                                frame_index = if frame_count > 1 { state.frame_index } else { 0 };
                                 state.started_loading = None;
                             }
 
@@ -363,7 +373,7 @@ impl Element for Img {
                                 };
                             }
 
-                            if global_id.is_some() && data.frame_count() > 1 {
+                            if global_id.is_some() && data.frame_count() > 1 && window.is_window_active() {
                                 window.request_animation_frame();
                             }
                         }

@@ -34,16 +34,18 @@ struct ImageLoop {
     image: Option<std::sync::Arc<RenderImage>>,
     retired: Vec<std::sync::Arc<RenderImage>>,
     active: bool,
+    cover: bool,
     failed: bool,
     task: Option<Task<()>>,
 }
 impl ImageLoop {
-    fn new(url: String, poster: Option<std::sync::Arc<RenderImage>>) -> Self {
+    fn new(url: String, poster: Option<std::sync::Arc<RenderImage>>, cover: bool) -> Self {
         Self {
             stream: crate::media::animation::start(url),
             image: poster,
             retired: Vec::new(),
             active: false,
+            cover,
             failed: false,
             task: None,
         }
@@ -61,7 +63,6 @@ impl ImageLoop {
         let requests = self.stream.requests.clone();
         let frames = self.stream.frames.clone();
         self.task = Some(cx.spawn(async move |view, cx| {
-            let started = std::time::Instant::now();
             match requests.try_send(()) {
                 Ok(()) | Err(std::sync::mpsc::TrySendError::Full(())) => {}
                 Err(std::sync::mpsc::TrySendError::Disconnected(())) => {
@@ -85,9 +86,7 @@ impl ImageLoop {
                 cx.notify();
             });
             if let Some(delay) = delay {
-                cx.background_executor()
-                    .timer(delay.saturating_sub(started.elapsed()))
-                    .await;
+                cx.background_executor().timer(delay).await;
                 let _ = view.update(cx, |this, cx| {
                     this.task = None;
                     if this.active {
@@ -103,7 +102,11 @@ impl Render for ImageLoop {
         self.set_active(window.is_window_active(), cx);
         crate::media::retire(std::mem::take(&mut self.retired), window, 3);
         div().size_full().when_some(self.image.clone(), |s, image| {
-            s.child(img(image).size_full().object_fit(ObjectFit::Contain))
+            s.child(img(image).size_full().object_fit(if self.cover {
+                ObjectFit::Cover
+            } else {
+                ObjectFit::ScaleDown
+            }))
         })
     }
 }
@@ -190,6 +193,47 @@ impl Pool {
     }
 }
 impl Larpcord {
+    pub(super) fn banner_media(
+        &self,
+        url: &str,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let poster = self.media.get(url);
+        if active
+            && self.motion()
+            && !self.preview_only
+            && self.settings_tab.is_none()
+            && self.video.is_none()
+        {
+            let moving = crate::media::motion_url(url.to_string(), true);
+            if moving != url && crate::media::animation::image_url(&moving) {
+                let mut pool = self.banner_pool.borrow_mut();
+                pool.visible.insert(moving.clone());
+                if !pool.items.contains_key(&moving) && pool.items.len() < 2 {
+                    let view = cx.new(|_| ImageLoop::new(moving.clone(), poster.clone(), true));
+                    pool.items.insert(moving.clone(), Player::Image(view));
+                }
+                if let Some(Player::Image(view)) = pool.items.get(&moving) {
+                    view.update(cx, |player, cx| {
+                        if player.image.is_none() && poster.is_some() {
+                            player.image = poster.clone();
+                            cx.notify();
+                        }
+                        player.set_active(true, cx);
+                    });
+                    return Some(view.clone().into_any_element());
+                }
+            }
+        }
+        poster.map(|image| {
+            img(image)
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .into_any_element()
+        })
+    }
+
     pub(super) fn gif_player(
         &self,
         url: &str,
@@ -209,7 +253,7 @@ impl Larpcord {
                 && (crate::media::animation::image_url(url) || crate::video::source(url).is_some())
             {
                 let player = if crate::media::animation::image_url(url) {
-                    Player::Image(cx.new(|_| ImageLoop::new(url.to_string(), still.clone())))
+                    Player::Image(cx.new(|_| ImageLoop::new(url.to_string(), still.clone(), false)))
                 } else {
                     Player::Video(cx.new(|cx| Loop::new(crate::video::source(url).unwrap(), cx)))
                 };
@@ -238,15 +282,20 @@ impl Larpcord {
         dimensions: Option<(u32, u32)>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (width, height) = media_size(
-            dimensions.or_else(|| poster.and_then(|p| p.width.zip(p.height))),
-            400.,
-            300.,
-        );
         let still = poster
             .and_then(|p| p.proxy_url.as_deref().or(p.url.as_deref()))
             .filter(|u| crate::media::cdn_url(u) || crate::media::gif_preview(u))
             .and_then(|u| self.media.get(u));
+        let dimensions = dimensions
+            .or_else(|| poster.and_then(|p| p.width.zip(p.height)))
+            .filter(|(w, h)| *w > 0 && *h > 0)
+            .or_else(|| {
+                still.as_ref().map(|image| {
+                    let size = image.size(0);
+                    (size.width.0 as u32, size.height.0 as u32)
+                })
+            });
+        let (width, height) = media_size(dimensions, 400., 300.);
         let player = if self.emoji_open && self.picker.tab == crate::expressions::Tab::Gifs {
             None
         } else {
@@ -603,6 +652,7 @@ mod tests {
             image: None,
             retired: vec![],
             active: false,
+            cover: false,
             failed: false,
             task: None,
         });

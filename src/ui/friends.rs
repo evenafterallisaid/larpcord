@@ -246,7 +246,7 @@ impl Larpcord {
             .store
             .presences
             .get(id)
-            .and_then(|p| p.activity.clone())
+            .and_then(|p| p.summary().cloned())
             .unwrap_or_else(|| {
                 match self.store.presences.get(id).map(|p| p.status.as_str()) {
                     Some("online") => "Online",
@@ -279,7 +279,7 @@ impl Larpcord {
                                 div()
                                     .truncate()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(self.display_name(user.name(), &user, None, false)),
+                                    .child(self.display_name(user.name(), &user, None, cx)),
                             )
                             .child(label(activity).text_size(px(12.)).truncate()),
                     )

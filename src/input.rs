@@ -39,7 +39,7 @@ impl Projection {
     fn new(text: &str, enabled: bool) -> Self {
         let mut value = Self::default();
         if !enabled {
-            value.text = text.to_string();
+            value.text = text.replace(['\r', '\n'], " ");
             return value;
         }
         let mut raw = 0;
@@ -109,6 +109,7 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_projection: Projection,
     pub inline_emojis: bool,
+    pub preserve_newlines: bool,
     pub emoji_images: std::collections::HashMap<String, std::sync::Arc<gpui::RenderImage>>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
@@ -132,6 +133,7 @@ impl TextInput {
             last_layout: None,
             last_projection: Projection::default(),
             inline_emojis: false,
+            preserve_newlines: false,
             emoji_images: std::collections::HashMap::new(),
             last_bounds: None,
             is_selecting: false,
@@ -159,7 +161,11 @@ impl TextInput {
 
     fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
         if self.marked_range.is_none() {
-            cx.emit(Submit);
+            if self.preserve_newlines {
+                self.insert("\n", cx);
+            } else {
+                cx.emit(Submit);
+            }
         }
     }
 
@@ -250,7 +256,12 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace("\n", " "), window, cx);
+            let text = if self.preserve_newlines {
+                text.replace("\r\n", "\n")
+            } else {
+                text.replace(['\r', '\n'], " ")
+            };
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 

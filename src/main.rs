@@ -16,6 +16,7 @@ mod modules;
 mod navigation;
 mod network;
 mod presence;
+mod profile_edit;
 mod reactions;
 mod settings;
 mod theme;

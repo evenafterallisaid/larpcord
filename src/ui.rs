@@ -10,6 +10,7 @@ mod members;
 mod modules;
 mod picker;
 mod profile;
+mod profile_edit;
 mod text;
 mod video;
 
@@ -54,6 +55,11 @@ pub struct Larpcord {
     modules: crate::modules::Registry,
     modules_loading: bool,
     modules_task: Option<Task<()>>,
+    catalog_task: Option<Task<()>>,
+    catalog: crate::modules::Catalog,
+    catalog_notice: Option<(String, bool)>,
+    catalog_discover: bool,
+    catalog_search: Entity<TextInput>,
     generation: u64,
     preview: bool,
     preview_only: bool,
@@ -98,6 +104,7 @@ pub struct Larpcord {
     messages: ListState,
     rendered_ids: Vec<String>,
     settings_tab: Option<usize>,
+    profile_editor: Option<profile_edit::Editor>,
     error: Option<String>,
     loading: HashMap<String, (u64, Page)>,
     pages: HashMap<String, Paging>,
@@ -106,19 +113,20 @@ pub struct Larpcord {
     typing_task: Option<Task<()>>,
     typing_styles: HashMap<String, crate::cosmetics::TypingStyle>,
     hovered_name: Option<String>,
+    name_motion_origin: std::time::Instant,
+    name_motion_task: std::cell::RefCell<Option<Task<()>>>,
     read_task: Option<Task<()>>,
     typing_sent: Option<(String, std::time::Instant)>,
     scrolled_away: bool,
     jump_task: Option<Task<()>>,
     jumping: bool,
     jump_after_latest: Option<String>,
-    scroll_rebound: f32,
-    rebound_task: Option<Task<()>>,
     latest_opacity: f32,
     latest_target: bool,
     latest_fade: Option<Task<()>>,
     unread_marker: Option<(String, String)>,
     gif_pool: gif::SharedPool,
+    banner_pool: gif::SharedPool,
     media: crate::media::Media,
     media_retry: Option<Task<()>>,
     profile: Option<Profile>,
@@ -266,12 +274,12 @@ fn ping_badge(count: u32) -> Div {
 }
 
 fn media_size(dimensions: Option<(u32, u32)>, max_width: f32, max_height: f32) -> (f32, f32) {
-    let ratio = dimensions
+    let (w, h) = dimensions
         .filter(|(w, h)| *w > 0 && *h > 0)
-        .map_or(16. / 9., |(w, h)| w as f32 / h as f32)
-        .clamp(0.2, 8.);
-    let width = max_width.min(max_height * ratio);
-    (width, width / ratio)
+        .unwrap_or((320, 180));
+    let (w, h) = (w as f32, h as f32);
+    let scale = (max_width / w).min(max_height / h).min(1.);
+    ((w * scale).max(1.), (h * scale).max(1.))
 }
 
 fn open_https(url: &str, cx: &mut App) {
@@ -396,10 +404,12 @@ impl Larpcord {
         let emoji_search = cx.new(|cx| TextInput::new("Find the perfect emoji", false, cx));
         let search = cx.new(|cx| TextInput::new("Find a conversation", false, cx));
         let token = cx.new(|cx| TextInput::new("Paste a session token", true, cx));
+        let catalog_search = cx.new(|cx| TextInput::new("Search the catalog", false, cx));
         let friend_search = cx.new(|cx| TextInput::new("Search friends", false, cx));
         let subscriptions = vec![
             cx.observe_window_activation(window, |this, window, cx| {
                 gif::Pool::pause(&this.gif_pool, cx);
+                gif::Pool::pause(&this.banner_pool, cx);
                 this.mark_view_read(window, cx);
                 cx.notify();
             }),
@@ -413,6 +423,7 @@ impl Larpcord {
                 this.picker_changed(cx);
                 cx.notify();
             }),
+            cx.subscribe(&catalog_search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe(&search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe(&friend_search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe_in(&composer, window, |this, _, _: &Changed, window, cx| {
@@ -484,7 +495,7 @@ impl Larpcord {
             recent: settings.recent_emoji.clone(),
             ..Default::default()
         };
-        let modules = crate::modules::Registry::load(
+        let modules = crate::modules::Registry::load_with_catalog(
             if preview_only {
                 None
             } else {
@@ -492,11 +503,17 @@ impl Larpcord {
             }
             .as_deref(),
             &settings.module_grants,
+            &settings.catalog_installed,
         );
         Self {
             modules,
             modules_loading: false,
             modules_task: None,
+            catalog: crate::modules::Catalog::bundled(),
+            catalog_task: None,
+            catalog_notice: None,
+            catalog_discover: true,
+            catalog_search,
             root_focus,
             modal_focus: cx.focus_handle(),
             previous_focus: None,
@@ -547,6 +564,7 @@ impl Larpcord {
             messages,
             rendered_ids,
             settings_tab: None,
+            profile_editor: None,
             error: None,
             loading: HashMap::new(),
             pages: HashMap::new(),
@@ -555,19 +573,20 @@ impl Larpcord {
             typing_task: None,
             typing_styles: HashMap::new(),
             hovered_name: None,
+            name_motion_origin: std::time::Instant::now(),
+            name_motion_task: Default::default(),
             read_task: None,
             typing_sent: None,
             scrolled_away: false,
             jump_task: None,
             jumping: false,
             jump_after_latest: None,
-            scroll_rebound: 0.,
-            rebound_task: None,
             latest_opacity: 0.,
             latest_target: false,
             latest_fade: None,
             unread_marker: None,
             gif_pool: Default::default(),
+            banner_pool: Default::default(),
             media,
             media_retry: None,
             profile: None,
@@ -607,7 +626,7 @@ impl Larpcord {
         if self.settings_tab.is_none() {
             self.previous_focus = window.focused(cx);
         }
-        self.settings_tab = Some(tab);
+        self.select_settings_tab(tab, cx);
         window.focus(&self.modal_focus);
         cx.notify();
     }
@@ -678,6 +697,7 @@ impl Larpcord {
         self.expression_attempts.clear();
         self.reaction_target = None;
         self.reaction_pending.clear();
+        self.profile_editor = None;
         self.generation += 1;
         self.home_page = false;
         self.profile_inspector = false;
@@ -742,6 +762,7 @@ impl Larpcord {
         self.expression_attempts.clear();
         self.reaction_target = None;
         self.reaction_pending.clear();
+        self.profile_editor = None;
         self.generation += 1;
         self.home_page = false;
         self.profile_inspector = false;
@@ -803,8 +824,6 @@ impl Larpcord {
         self.latest_fade = None;
         self.latest_opacity = 0.;
         self.latest_target = false;
-        self.rebound_task = None;
-        self.scroll_rebound = 0.;
         if let Some(channel) = self.store.channels.get(&id)
             && !channel.readable()
         {
@@ -1282,7 +1301,7 @@ impl Larpcord {
                 let enrich = |profile: &mut Profile| {
                     for badge in &badges {
                         if profile.badges.len() < 40
-                            && !profile.badges.iter().any(|b| b.icon == badge.icon)
+                            && !profile.badges.iter().any(|b| b.same_as(badge))
                         {
                             profile.badges.push(badge.clone());
                         }
@@ -1581,6 +1600,9 @@ impl Larpcord {
                         self.error = Some(error);
                     }
                 }
+            }
+            Event::EditProfile { id, saved, result } => {
+                self.edited_profile(id, saved, result, window, cx);
             }
             Event::Profile {
                 id,
@@ -2737,9 +2759,7 @@ impl Larpcord {
                                     .recipients
                                     .first()
                                     .filter(|_| channel.kind == 1)
-                                    .map(|user| {
-                                        self.display_name(&channel.label(), user, None, false)
-                                    })
+                                    .map(|user| self.display_name(&channel.label(), user, None, cx))
                                     .unwrap_or_else(|| {
                                         div().child(channel.label()).into_any_element()
                                     }),
@@ -2757,7 +2777,7 @@ impl Larpcord {
                             .first()
                             .filter(|_| channel.kind == 1)
                             .and_then(|u| self.store.presences.get(&u.id))
-                            .and_then(|p| p.activity.as_ref()),
+                            .and_then(crate::presence::Presence::summary),
                         |s, text| s.child(label(text.clone()).text_size(px(11.)).truncate()),
                     ),
             )
@@ -2781,10 +2801,9 @@ impl Larpcord {
             .map_or("Direct Messages", |g| g.name.as_str())
             .to_string();
         let banner = guild.and_then(|g| crate::media::banner(&g.id, None, g.banner.as_deref()?));
-        let banner_image = banner.as_ref().and_then(|url| {
-            self.media
-                .get(&crate::media::motion_url(url.clone(), self.motion()))
-        });
+        let banner_image = banner
+            .as_deref()
+            .and_then(|url| self.banner_media(url, !self.profile_is_modal(), cx));
         let query = self.search.read(cx).content.to_lowercase();
         let mut channels: Vec<_> = self
             .store
@@ -2991,14 +3010,7 @@ impl Larpcord {
                     .border_b_1()
                     .border_color(self.color(LINE))
                     .when_some(banner_image, |s, image| {
-                        s.child(
-                            img(image.clone())
-                                .id(("guild-banner", image.id.0))
-                                .absolute()
-                                .inset_0()
-                                .size_full()
-                                .object_fit(ObjectFit::Cover),
-                        )
+                        s.child(div().absolute().inset_0().overflow_hidden().child(image))
                     })
                     .child(
                         row()
@@ -3167,6 +3179,7 @@ impl Larpcord {
                 id: user.id.clone(),
                 guild: self.profile_guild.clone(),
                 request: self.profile_request,
+                own: user.id == self.store.user.id,
                 roles_needed: self
                     .profile_guild
                     .as_ref()
@@ -3187,13 +3200,16 @@ impl Larpcord {
     }
 
     fn media_image(&self, url: &str, width: Option<u32>, height: Option<u32>) -> AnyElement {
-        let ratio = width
-            .zip(height)
-            .filter(|(w, h)| *w > 0 && *h > 0)
-            .map_or(1.5, |(w, h)| w as f32 / h as f32)
-            .clamp(0.25, 8.);
-        let w = 400_f32.min(280. * ratio);
-        let h = w / ratio;
+        self.media_image_bounded(url, width, height, (400., 280.))
+    }
+
+    fn media_image_bounded(
+        &self,
+        url: &str,
+        width: Option<u32>,
+        height: Option<u32>,
+        limit: (f32, f32),
+    ) -> AnyElement {
         let moving = self.motion()
             && reqwest::Url::parse(url).ok().is_some_and(|u| {
                 [".gif", ".apng"]
@@ -3207,6 +3223,16 @@ impl Larpcord {
         } else {
             self.media.get(url)
         };
+        let (w, h) = media_size(
+            width.zip(height).or_else(|| {
+                image.as_ref().map(|image| {
+                    let size = image.size(0);
+                    (size.width.0 as u32, size.height.0 as u32)
+                })
+            }),
+            limit.0,
+            limit.1,
+        );
         div()
             .w(px(w))
             .max_w_full()
@@ -3216,7 +3242,8 @@ impl Larpcord {
             .bg(self.color(PANEL))
             .map(|s| match image {
                 Some(image) => s.child(
-                    img(image)
+                    img(image.clone())
+                        .id(("media-image", image.id.0))
                         .size_full()
                         .object_fit(ObjectFit::Contain)
                         .rounded_lg(),
@@ -3262,7 +3289,7 @@ impl Larpcord {
                                 message.name(),
                                 &message.author,
                                 message.member.as_ref(),
-                                self.hovered_name.as_deref() == Some(&message.id),
+                                cx,
                             ))
                             .on_hover({
                                 let id = message.id.clone();
@@ -3484,18 +3511,20 @@ impl Larpcord {
                         .child(self.rich_text(&field.value)),
                 );
             }
-            for media in [embed.image.as_ref(), embed.thumbnail.as_ref()]
-                .map(|media| media.filter(|_| playable.is_none()))
-                .into_iter()
-                .flatten()
-            {
-                if let Some(url) = media
-                    .proxy_url
-                    .as_deref()
-                    .or(media.url.as_deref())
-                    .filter(|u| crate::media::cdn_url(u))
+            if playable.is_none() {
+                if let Some(media) = embed.image.as_ref()
+                    && let Some(url) = gif::image_source(media)
                 {
                     card = card.child(self.media_image(url, media.width, media.height));
+                } else if let Some(thumbnail) = embed.thumbnail.as_ref()
+                    && let Some(url) = gif::image_source(thumbnail)
+                {
+                    card = card.child(self.media_image_bounded(
+                        url,
+                        thumbnail.width,
+                        thumbnail.height,
+                        (84., 84.),
+                    ));
                 }
             }
             if let Some((url, video)) = playable {
@@ -3664,7 +3693,7 @@ impl Larpcord {
                         channel
                             .filter(|c| c.kind == 1)
                             .and_then(|c| c.recipients.first())
-                            .map(|user| self.display_name(&title, user, None, false))
+                            .map(|user| self.display_name(&title, user, None, cx))
                             .unwrap_or_else(|| div().child(title).into_any_element()),
                     ),
             )
@@ -3754,7 +3783,7 @@ impl Larpcord {
                 )
             })
             .when(channel.is_some(), |s| {
-                s.child(column().debug_selector(||"timeline".into()).relative().flex_1().min_h_0().child(
+                s.child(column().debug_selector(||"timeline".into()).w_full().relative().flex_1().min_h_0().child(
                     list(self.messages.clone(), move |index, _, cx| {
                         let Some(view) = weak.upgrade() else {
                             return div().into_any_element();
@@ -3780,14 +3809,15 @@ impl Larpcord {
                                     let date=chrono::DateTime::parse_from_rfc3339(&message.timestamp).ok().map(|d|d.with_timezone(&chrono::Local));
                                     let new_day=date.as_ref().is_some_and(|date|previous.and_then(|p|chrono::DateTime::parse_from_rfc3339(&p.timestamp).ok()).is_none_or(|p|p.with_timezone(&chrono::Local).date_naive()!=date.date_naive()));
                                     let unread=view.unread_marker.as_ref().is_some_and(|(channel,read)|channel==&message.channel_id && snowflake_after(&message.id,read) && previous.is_none_or(|p|!snowflake_after(&p.id,read)));
-                                    column().when(new_day,|s|s.child(view.timeline_divider(&date.unwrap().format("%B %-d, %Y").to_string(),false)))
+                                    column().w_full().min_w_0().when(new_day,|s|s.child(view.timeline_divider(&date.unwrap().format("%B %-d, %Y").to_string(),false)))
                                         .when(unread,|s|s.child(view.timeline_divider("New messages",true)))
                                         .child(view.message(&message,grouped&&!unread,cx)).into_any_element()
                                 },
                             )
                         })
                     })
-                    .relative().top(px(self.scroll_rebound))
+                    .relative()
+                    .w_full()
                     .flex_1()
                     .min_h_0(),
                 )
@@ -4175,6 +4205,11 @@ impl Larpcord {
                             .gap_3()
                             .child(div().child(self.store.user.name().to_string()))
                             .child(label(self.status.clone()))
+                            .child(button("edit-own-profile", "Edit profile").on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.select_settings_tab(profile_edit::TAB, cx)
+                                }),
+                            ))
                             .child(button("own-profile", "View profile").on_click(cx.listener(
                                 |this, _, window, cx| {
                                     this.close_settings(window, cx);
@@ -4206,12 +4241,9 @@ impl Larpcord {
             1 => {
                 body = body
                     .child(div().text_size(px(26.)).child("Make it yours"))
-                    .child(label("A few useful choices. Sensible defaults."))
-                    .child(column().gap_2().child(label("CLIENT THEME").text_size(px(11.))).child(row().gap_2().flex_wrap().children(crate::theme::Theme::ALL.into_iter().map(|(theme,name)| {
-                        let tokens=theme.tokens(self.settings.custom_theme);
-                        button(SharedString::from(format!("theme-{name}")),name).border_1().border_color(self.color(if self.settings.theme==theme {0xc1b5ed}else{tokens.border})).bg(rgb(tokens.surface)).on_click(cx.listener(move |this,_,_,cx| {this.settings.theme=theme;this.persist(cx);}))
-                    }))))
-
+                    .child(button("browse-themes", "Browse themes").on_click(cx.listener(|this,_,_,cx|
+                        this.select_settings_tab(modules::THEMES_TAB,cx)
+                    )))
                     .child(
                         self.setting_toggle(
                             "notifications",
@@ -4264,7 +4296,13 @@ impl Larpcord {
                     ).child(self.setting_toggle("animations","Interface animations","Short transitions for panels and selection. Turn off to reduce motion.",self.settings.animations).on_click(cx.listener(|this,_,_,cx|{this.settings.animations = !this.settings.animations;this.persist(cx);})));
             }
             2 => {
-                body = body.child(self.modules_settings(cx));
+                body = body.child(self.modules_settings(false, cx));
+            }
+            modules::THEMES_TAB => {
+                body = body.child(self.modules_settings(true, cx));
+            }
+            profile_edit::TAB => {
+                body = body.child(self.edit_profile_settings(cx));
             }
             _ => {
                 body = body.child(img(ImageSource::Resource(Resource::Embedded("mascot.png".into()))).size(px(58.)).text_color(self.color(ACCENT)))
@@ -4315,32 +4353,33 @@ impl Larpcord {
                             .bg(self.color(PANEL))
                             .child(label("LARPCORD").mt_2().mb_4().text_size(px(10.)))
                             .children(
-                                ["Account", "Preferences", "Modules", "About"]
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(index, name)| {
-                                        row()
-                                            .id(("settings-tab", index))
-                                            .px_3()
-                                            .py_2()
-                                            .rounded_lg()
-                                            .cursor_pointer()
-                                            .bg(self.color(if tab == index {
-                                                SURFACE
-                                            } else {
-                                                PANEL
-                                            }))
-                                            .text_color(self.color(if tab == index {
-                                                ACCENT
-                                            } else {
-                                                MUTED
-                                            }))
-                                            .child(name)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.settings_tab = Some(index);
-                                                cx.notify();
-                                            }))
-                                    }),
+                                [
+                                    (0, "Account"),
+                                    (profile_edit::TAB, "Profile"),
+                                    (1, "Preferences"),
+                                    (modules::THEMES_TAB, "Themes"),
+                                    (2, "Modules"),
+                                    (3, "About"),
+                                ]
+                                .into_iter()
+                                .map(|(index, name)| {
+                                    row()
+                                        .id(("settings-tab", index))
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .cursor_pointer()
+                                        .bg(self.color(if tab == index { SURFACE } else { PANEL }))
+                                        .text_color(self.color(if tab == index {
+                                            ACCENT
+                                        } else {
+                                            MUTED
+                                        }))
+                                        .child(name)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.select_settings_tab(index, cx);
+                                        }))
+                                }),
                             )
                             .child(div().flex_1())
                             .child(label("small client,\nsoft landing.").line_height(px(20.))),
@@ -4423,14 +4462,10 @@ impl Render for Larpcord {
         });
 
         self.window_active = window.is_window_active();
-        if !self.motion() {
-            self.rebound_task = None;
-            self.scroll_rebound = 0.;
-            if self.jumping {
-                self.jump_task = None;
-                self.jumping = false;
-                self.jump_after_latest = None;
-            }
+        if !self.motion() && self.jumping {
+            self.jump_task = None;
+            self.jumping = false;
+            self.jump_after_latest = None;
         }
         self.update_latest_visibility(cx);
         gif::Pool::frame(
@@ -4443,52 +4478,19 @@ impl Render for Larpcord {
                 && !self.profile_is_modal()
                 && self.video.is_none(),
         );
+        gif::Pool::frame(
+            &self.banner_pool,
+            window,
+            cx,
+            self.motion() && self.settings_tab.is_none() && self.video.is_none(),
+        );
         column()
             .relative()
             .track_focus(&self.root_focus)
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, _| {
                 if this.jumping {
                     this.jumping = false;
                     this.jump_task = None;
-                }
-                if this.motion()
-                    && this.rebound_task.is_none()
-                    && this.settings_tab.is_none()
-                    && !this.profile_is_modal()
-                    && !this.emoji_open
-                    && this.messages.viewport_bounds().contains(&event.position)
-                {
-                    let y = -this.messages.scroll_px_offset_for_scrollbar().y;
-                    let max = this.messages.max_offset_for_scrollbar().height;
-                    let delta = event.delta.pixel_delta(px(22.)).y;
-                    let impulse = if y <= px(0.) && delta > px(0.) {
-                        5.
-                    } else if y >= max && delta < px(0.) {
-                        -5.
-                    } else {
-                        0.
-                    };
-                    if impulse != 0. {
-                        this.scroll_rebound = impulse;
-                        this.rebound_task = Some(cx.spawn(async move |view, cx| {
-                            for step in 1..=14 {
-                                cx.background_executor()
-                                    .timer(std::time::Duration::from_millis(12))
-                                    .await;
-                                let _ = view.update(cx, |this, cx| {
-                                    let t = step as f32 / 14.;
-                                    this.scroll_rebound = impulse
-                                        * (1. - t).powi(2)
-                                        * (t * std::f32::consts::TAU).cos();
-                                    if step == 14 {
-                                        this.rebound_task = None;
-                                    }
-                                    cx.notify();
-                                });
-                            }
-                        }));
-                        cx.notify();
-                    }
                 }
             }))
             .size_full()
@@ -4681,11 +4683,66 @@ mod tests {
                 row
             )
         });
+        let actions = cx.debug_bounds("message-actions").unwrap();
+        let timeline = cx.debug_bounds("timeline").unwrap();
+        assert!((actions.right() - (timeline.right() - px(16.))).abs() < px(1.));
         let action = cx.debug_bounds("reply-message").unwrap();
         cx.simulate_mouse_move(action.center(), None, Modifiers::default());
         cx.simulate_click(action.center(), Modifiers::default());
         cx.update(|_, cx| assert_eq!(view.read(cx).reply_to.as_ref().unwrap().id, "98765"));
     }
+    #[test]
+    fn media_preview_dimensions_never_upscale_small_art() {
+        use super::media_size;
+        assert_eq!(media_size(Some((32, 24)), 400., 300.), (32., 24.));
+        assert_eq!(media_size(Some((600, 1200)), 400., 300.), (150., 300.));
+        assert_eq!(media_size(Some((800, 200)), 400., 300.), (400., 100.));
+    }
+
+    #[gpui::test]
+    fn bot_section_with_button_stays_inside_its_message(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx, |v, cx| {
+            v.store.clear_history();
+            v.store.insert(serde_json::from_value(serde_json::json!({
+                "id": "101", "channel_id": "campfire", "flags": 32768,
+                "author": {"id": "bot", "username": ".fmbot", "bot": true},
+                "components": [{
+                    "type": 17, "accent_color": 16755249,
+                    "components": [{
+                        "type": 9,
+                        "components": [{"type": 10, "content": "Not enough scrobbled albums (0 of required 9) in the day time period. Try a smaller chart or a bigger time period."}],
+                        "accessory": {"type": 2, "style": 2, "label": "Edit", "custom_id": "edit"}
+                    }]
+                }]
+            })).unwrap());
+            v.store.insert(Message {
+                id: "102".into(),
+                channel_id: "campfire".into(),
+                content: "next message".into(),
+                author: User { id: "friend".into(), username: "friend".into(), ..Default::default() },
+                ..Default::default()
+            });
+            v.refresh_messages();
+            v.messages.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.) });
+            cx.notify();
+        });
+        for width in [1100., 860.] {
+            cx.draw(point(px(0.), px(0.)), size(px(width), px(730.)), |_, _| {
+                view.clone()
+            });
+            let message = cx.debug_bounds("message-row-101").unwrap();
+            let card = cx.debug_bounds("component-card-101").unwrap();
+            let next = cx.debug_bounds("message-row-102").unwrap();
+            assert!(card.size.width >= px(300.) && card.right() <= message.right());
+            assert!(
+                card.size.height >= px(64.) && card.size.height <= px(176.),
+                "{card:?}"
+            );
+            assert!(card.bottom() <= message.bottom() && message.bottom() <= next.top());
+        }
+    }
+
     #[gpui::test]
     fn gifv_uses_a_silent_inline_tile_instead_of_video_controls(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
@@ -4752,6 +4809,22 @@ mod tests {
         let card = cx.debug_bounds("profile-card").unwrap();
         let tabs = cx.debug_bounds("profile-tabs").unwrap();
         let body = cx.debug_bounds("profile-tab-body").unwrap();
+        view.update(cx, |v, cx| {
+            v.profile.as_mut().unwrap().badges.extend((0..16).map(|n| {
+                crate::model::ProfileBadge {
+                    id: format!("badge-{n}"),
+                    description: "late badge".into(),
+                    ..Default::default()
+                }
+            }));
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        assert_eq!(
+            cx.debug_bounds("profile-tabs").unwrap(),
+            tabs,
+            "late badges moved the tabs"
+        );
         for tab in [1, 2, 0, 2, 1, 0] {
             let bounds = cx
                 .debug_bounds(match tab {

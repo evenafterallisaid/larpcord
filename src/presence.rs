@@ -5,6 +5,22 @@ use std::collections::HashMap;
 pub struct Presence {
     pub status: String,
     pub activity: Option<String>,
+    pub custom: Option<CustomStatus>,
+}
+
+#[derive(Clone)]
+pub struct CustomStatus {
+    pub text: Option<String>,
+    pub emoji: Option<String>,
+    pub emoji_id: Option<String>,
+}
+impl Presence {
+    pub fn summary(&self) -> Option<&String> {
+        self.custom
+            .as_ref()
+            .and_then(|s| s.text.as_ref())
+            .or(self.activity.as_ref())
+    }
 }
 
 #[derive(Default)]
@@ -32,6 +48,31 @@ impl Presences {
         {
             self.0.remove(&old);
         }
+        let custom = value["activities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(32)
+            .find(|activity| activity["type"].as_u64() == Some(4))
+            .and_then(|activity| {
+                let text = activity["state"]
+                    .as_str()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(|text| text.chars().take(160).collect());
+                let emoji = activity["emoji"]["name"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .map(|name| name.chars().take(64).collect());
+                let emoji_id = activity["emoji"]["id"]
+                    .as_str()
+                    .filter(|id| crate::expressions::id(id))
+                    .map(str::to_string);
+                (text.is_some() || emoji.is_some() || emoji_id.is_some()).then_some(CustomStatus {
+                    text,
+                    emoji,
+                    emoji_id,
+                })
+            });
         let activity = value["activities"]
             .as_array()
             .into_iter()
@@ -40,7 +81,6 @@ impl Presences {
             .find_map(|a| {
                 let name = a["name"].as_str().unwrap_or_default();
                 match a["type"].as_u64() {
-                    Some(4) => a["state"].as_str().map(str::to_string),
                     Some(0) if !name.is_empty() => Some(format!("Playing {name}")),
                     Some(2) if !name.is_empty() => Some(format!("Listening to {name}")),
                     Some(3) if !name.is_empty() => Some(format!("Watching {name}")),
@@ -53,6 +93,7 @@ impl Presences {
             Presence {
                 status: status.into(),
                 activity,
+                custom,
             },
         );
     }
@@ -118,7 +159,10 @@ mod tests {
     fn ready_member_and_live_presence_share_one_bounded_view() {
         let mut p = Presences::default();
         p.ready(&serde_json::json!({"merged_presences":{"friends":[{"user_id":"1","status":"idle","activities":[{"type":4,"state":"tea time"}]}]}}));
-        assert_eq!(p.get("1").unwrap().activity.as_deref(), Some("tea time"));
+        assert_eq!(
+            p.get("1").unwrap().summary().map(String::as_str),
+            Some("tea time")
+        );
         p.members(&serde_json::json!({"ops":[{"op":"UPDATE","item":{"member":{"user":{"id":"1"},"presence":{"status":"dnd","activities":[]}}}}]}));
         assert_eq!(p.get("1").unwrap().status, "dnd");
         assert!(p.get("1").unwrap().activity.is_none());

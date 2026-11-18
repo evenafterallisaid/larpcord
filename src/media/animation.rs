@@ -65,7 +65,8 @@ impl Decoder {
                 self.frames.next()?.ok()?
             }
         };
-        let (ms, denom) = frame.delay().numer_denom_ms();
+        let (ms, denom) =
+            animation_delay(frame.delay(), self.bytes.starts_with(b"GIF8")).numer_denom_ms();
         let delay =
             Duration::from_secs_f64((ms as f64 / denom.max(1) as f64 / 1000.).clamp(0.016, 10.));
         let image = image::DynamicImage::ImageRgba8(frame.into_buffer());
@@ -91,7 +92,7 @@ pub fn start(url: String) -> Stream {
             if !image_url(&url) || requested.recv().is_err() {
                 return;
             }
-            let cache = disk::Disk::new();
+            let cache = disk::Disk::shared();
             let bytes = cache.read(&url).or_else(|| {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()

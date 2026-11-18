@@ -133,6 +133,7 @@ pub struct Module {
     manifest: Manifest,
     pub digest: String,
     pub enabled: bool,
+    pub from_catalog: bool,
 }
 impl Module {
     pub fn id(&self) -> &str {
@@ -147,6 +148,17 @@ impl Module {
     pub fn description(&self) -> &str {
         &self.manifest.description
     }
+    pub fn is_theme(&self) -> bool {
+        self.manifest.theme.is_some() && self.manifest.message_decorators.is_empty()
+    }
+
+    pub fn preview_theme(&self, base: crate::theme::Tokens) -> crate::theme::Tokens {
+        self.manifest
+            .theme
+            .as_ref()
+            .map_or(base, |theme| theme.apply(base))
+    }
+
     pub fn permissions(&self) -> &[Permission] {
         &self.manifest.permissions
     }
@@ -224,6 +236,46 @@ impl Registry {
         }
         r
     }
+    pub fn load_with_catalog(
+        root: Option<&Path>,
+        grants: &[Grant],
+        installed: &[CatalogEntry],
+    ) -> Self {
+        let mut registry = Self::load(root, grants);
+        for entry in installed.iter().take(MAX_MODULES) {
+            if let Err(error) = registry.install(entry, grants) {
+                registry.errors.push(error);
+            }
+        }
+        registry
+    }
+    pub fn install(&mut self, entry: &CatalogEntry, grants: &[Grant]) -> Result<(), String> {
+        let mut module = entry.module()?;
+        let existing = self.modules.iter().position(|m| m.id() == module.id());
+        if existing.is_some_and(|index| !self.modules[index].from_catalog) {
+            return Err(format!(
+                "A local module already uses the id {}.",
+                module.id()
+            ));
+        }
+        if existing.is_none() && self.modules.len() >= MAX_MODULES {
+            return Err("The installed module and theme limit is 32.".into());
+        }
+        module.enabled = grants
+            .iter()
+            .any(|g| g.id == module.id() && g.digest == module.digest);
+        if let Some(index) = existing {
+            self.modules[index] = module;
+        } else {
+            self.modules.push(module);
+        }
+        Ok(())
+    }
+    pub fn uninstall(&mut self, id: &str) {
+        self.modules
+            .retain(|module| !(module.from_catalog && module.id() == id));
+    }
+
     fn add(&mut self, bytes: &[u8], grants: &[Grant]) {
         match Manifest::parse(bytes) {
             Ok(manifest) => {
@@ -241,6 +293,7 @@ impl Registry {
                     manifest,
                     digest,
                     enabled,
+                    from_catalog: false,
                 });
             }
             Err(e) => {
@@ -309,6 +362,86 @@ impl Registry {
         labels
     }
 }
+const MAX_CATALOG_BYTES: usize = 256 * 1024;
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct CatalogEntry(serde_json::Value);
+
+impl CatalogEntry {
+    pub fn id(&self) -> &str {
+        self.0["id"].as_str().unwrap_or_default()
+    }
+    pub fn module(&self) -> Result<Module, String> {
+        let bytes = serde_json::to_vec(&self.0).map_err(|_| "Could not encode the manifest.")?;
+        let manifest = Manifest::parse(&bytes)?;
+        Ok(Module {
+            manifest,
+            digest: format!("{:x}", Sha256::digest(&bytes)),
+            enabled: false,
+            from_catalog: true,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Catalog {
+    version: u32,
+    pub entries: Vec<CatalogEntry>,
+}
+
+impl Catalog {
+    fn parse(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() > MAX_CATALOG_BYTES {
+            return Err("The catalog exceeds its size limit.".into());
+        }
+        let catalog: Self = serde_json::from_slice(bytes).map_err(|_| "Invalid catalog.")?;
+        if catalog.version != 1 || catalog.entries.len() > 64 {
+            return Err("Unsupported catalog version or item count.".into());
+        }
+        let mut ids = HashSet::new();
+        for entry in &catalog.entries {
+            entry.module()?;
+            if !ids.insert(entry.id()) {
+                return Err("The catalog contains a duplicate id.".into());
+            }
+        }
+        Ok(catalog)
+    }
+    pub fn bundled() -> Self {
+        Self::parse(include_bytes!("../catalog/index.json")).expect("bundled catalog must be valid")
+    }
+    pub async fn refresh() -> Result<Self, String> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| "Could not start catalog refresh.")?;
+        let mut response = client.get("https://raw.githubusercontent.com/evenafterallisaid/larpcord/main/catalog/index.json")
+            .send().await.and_then(reqwest::Response::error_for_status)
+            .map_err(|_| "Could not reach the Larpcord catalog.")?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "Catalog download was interrupted.")?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_CATALOG_BYTES {
+                return Err("The catalog exceeds its size limit.".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Self::parse(&bytes)
+    }
+}
+
+pub fn sanitize_catalog_entries(entries: &mut Vec<CatalogEntry>) {
+    let mut seen = HashSet::new();
+    entries.truncate(MAX_MODULES);
+    entries.retain(|entry| entry.module().is_ok() && seen.insert(entry.id().to_string()));
+}
+
 pub fn directory() -> Option<PathBuf> {
     directories::ProjectDirs::from("app", "larpcord", "Larpcord")
         .map(|p| p.config_dir().join("modules"))
@@ -326,6 +459,45 @@ pub fn sanitize_grants(grants: &mut Vec<Grant>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn catalog_update_requires_a_new_grant_and_cannot_replace_local_modules() {
+        let mut entries = Catalog::bundled().entries;
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.module().unwrap().is_theme())
+                .count(),
+            3
+        );
+        let entry = entries.remove(0);
+        let mut registry = Registry::load(None, &[]);
+        let mut grants = Vec::new();
+        registry.install(&entry, &grants).unwrap();
+        registry.set_enabled(entry.id(), true, &mut grants);
+        let loaded = Registry::load_with_catalog(None, &grants, std::slice::from_ref(&entry));
+        assert!(
+            loaded
+                .modules
+                .iter()
+                .any(|m| m.id() == entry.id() && m.enabled)
+        );
+        let mut changed = entry.clone();
+        changed.0["version"] = serde_json::json!("2.0.0");
+        registry.install(&changed, &grants).unwrap();
+        assert!(
+            !registry
+                .modules
+                .iter()
+                .find(|m| m.id() == entry.id())
+                .unwrap()
+                .enabled
+        );
+        changed.0["id"] = serde_json::json!("media-labels");
+        assert!(registry.install(&changed, &[]).is_err());
+        registry.uninstall(entry.id());
+        assert!(!registry.modules.iter().any(|m| m.id() == entry.id()));
+    }
+
     #[test]
     fn grants_are_scoped_to_reviewed_bytes_and_hooks_stay_local() {
         let mut r = Registry::load(None, &[]);

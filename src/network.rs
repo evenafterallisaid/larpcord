@@ -19,6 +19,11 @@ use zeroize::Zeroizing;
 use crate::model::{Channel, Guild, Member, Message, Page, Profile, User};
 
 pub enum Event {
+    EditProfile {
+        id: String,
+        saved: bool,
+        result: Result<Box<Profile>, String>,
+    },
     Reacted {
         channel: String,
         message: String,
@@ -97,6 +102,11 @@ pub struct Envelope {
 }
 
 pub enum Command {
+    RefreshCatalog(tokio::sync::oneshot::Sender<Result<crate::modules::Catalog, String>>),
+    EditProfile {
+        id: String,
+        changes: Option<serde_json::Map<String, Value>>,
+    },
     React {
         channel: String,
         message: String,
@@ -147,6 +157,7 @@ pub enum Command {
         guild: Option<String>,
         request: u64,
         roles_needed: bool,
+        own: bool,
     },
     Typing(String),
     Ack {
@@ -478,6 +489,49 @@ impl Api {
         }
     }
 
+    async fn edit_profile(
+        &self,
+        id: &str,
+        changes: Option<serde_json::Map<String, Value>>,
+    ) -> Result<Profile, String> {
+        if !snowflake(id) {
+            return Err("Invalid profile identity.".into());
+        }
+        let saved = if let Some(fields) = &changes {
+            let saved: User = self
+                .request(
+                    Method::PATCH,
+                    "/users/@me",
+                    Some(Value::Object(fields.clone())),
+                )
+                .await?;
+            if saved.id != id || saved.bot {
+                return Err(
+                    "Discord returned an unexpected account. Reload before trying again.".into(),
+                );
+            }
+            Some(saved)
+        } else {
+            None
+        };
+        let profile: Profile = self.request(Method::GET, &format!("/users/{id}/profile?with_mutual_guilds=false&with_mutual_friends=false&with_mutual_friends_count=false"), None).await
+            .map_err(|error| if changes.is_some() { "Discord accepted the save but the readback failed. Reload the profile to check it.".into() } else { error })?;
+        if profile.user.id != id || profile.user_profile.is_none() {
+            return Err(
+                "Discord did not return the full account profile. Reload before trying again."
+                    .into(),
+            );
+        }
+        if let Some((patch, saved)) = changes.as_ref().zip(saved.as_ref())
+            && !crate::profile_edit::confirmed(patch, &profile, saved)
+        {
+            return Err(
+                "Discord did not confirm every change. Reload the profile to check it.".into(),
+            );
+        }
+        Ok(profile)
+    }
+
     async fn request<T: DeserializeOwned>(
         &self,
         method: Method,
@@ -562,7 +616,7 @@ impl Api {
                 });
             }
             let mut response = response;
-            let mut bytes = Vec::new();
+            let mut bytes = Zeroizing::new(Vec::new());
             while let Some(chunk) = response
                 .chunk()
                 .await
@@ -638,6 +692,12 @@ impl Backend {
                         command = commands.recv() => {
                             let Some(command) = command else { break; };
                             match command {
+                                Command::RefreshCatalog(answer) => {
+                                    requests.spawn(async move {
+                                        let _ = answer.send(crate::modules::Catalog::refresh().await);
+                                    });
+                                }
+
                                 Command::QrStart { attempt } => {
                                     auth.abort_all();
                                     let events = events.clone();
@@ -773,7 +833,19 @@ impl Backend {
                                         emit(&events,generation,Event::GuildDetails {id,started,result}).await;
                                     });
                                 }
-                                Command::Profile {id, guild, request, roles_needed} => {
+                                Command::EditProfile { id, changes } => {
+                                    let events = events.clone();
+                                    let client = api.clone();
+                                    requests.spawn(async move {
+                                        let saved = changes.is_some();
+                                        let result = match client {
+                                            Some(client) => client.edit_profile(&id, changes).await.map(Box::new),
+                                            None => Err("Connect your Discord account before editing your profile.".into()),
+                                        };
+                                        emit(&events, generation, Event::EditProfile { id, saved, result }).await;
+                                    });
+                                }
+                                Command::Profile {id, guild, request, roles_needed, own} => {
                                     let Some(client) = api.clone() else { continue; };
                                     if !snowflake(&id) || guild.as_ref().is_some_and(|id| !snowflake(id)) { continue; }
                                     let events = events.clone();
@@ -787,7 +859,8 @@ impl Backend {
                                         emit(&events, generation, Event::Profile {id:id.clone(), guild:guild.clone(), request, result:result.map(Box::new)}).await;
                                         let badges=async {
                                             let client=client.discovery();
-                                            if let Ok(Ok(value))=tokio::time::timeout(Duration::from_secs(5),client.request::<Value>(Method::GET,&format!("/users/{id}/badges"),None)).await {
+                                            let account = if own { "@me" } else { &id };
+                                            if let Ok(Ok(value))=tokio::time::timeout(Duration::from_secs(5),client.request::<Value>(Method::GET,&format!("/users/{account}/badges"),None)).await {
                                                 let badges=profile_badges(&value);
                                                 emit(&events,generation,Event::ProfileBadges{id:id.clone(),guild:guild.clone(),request,badges}).await;
                                             }
@@ -1258,24 +1331,35 @@ fn profile_badges(value: &Value) -> Vec<crate::model::ProfileBadge> {
         .take(80)
         .filter(|b| b["owned"].as_bool() == Some(true) && b["hidden"].as_bool() != Some(true))
         .filter_map(|badge| {
-            let art = badge["current_tier"]
-                .as_str()
-                .and_then(|key| {
-                    badge["tiers"]
-                        .as_array()?
-                        .iter()
-                        .find(|t| t["key"].as_str() == Some(key))
-                })
-                .unwrap_or(badge);
-            let icon = [
-                "simple_icon_raster_url",
-                "simple_icon_url",
-                "complex_icon_static_url",
-            ]
-            .iter()
-            .filter_map(|key| art[*key].as_str().or(badge[*key].as_str()))
-            .find(|url| crate::media::cdn_url(url))?
-            .to_string();
+            let tier = badge["current_tier"].as_str().and_then(|key| {
+                badge["tiers"]
+                    .as_array()?
+                    .iter()
+                    .take(64)
+                    .find(|t| t["key"].as_str() == Some(key))
+            });
+            let mut art = tier
+                .into_iter()
+                .chain(std::iter::once(badge))
+                .flat_map(|source| {
+                    [
+                        "simple_icon_raster_url",
+                        "simple_icon_url",
+                        "complex_icon_static_url",
+                    ]
+                    .into_iter()
+                    .filter_map(|key| source[key].as_str())
+                    .filter(|url| url.len() <= 2048 && crate::media::cdn_url(url))
+                });
+            let icon = art.next().unwrap_or_default().to_string();
+            let fallback = art.find(|url| *url != icon).map(str::to_string);
+            let id = badge["badge_id"]
+                .as_u64()
+                .map(|id| format!("catalog-{id}"))
+                .unwrap_or_default();
+            if icon.is_empty() && id.is_empty() {
+                return None;
+            }
             let description = badge["name"]
                 .as_str()
                 .or(badge["description"].as_str())
@@ -1284,7 +1368,10 @@ fn profile_badges(value: &Value) -> Vec<crate::model::ProfileBadge> {
                 .take(160)
                 .collect();
             let mut description: String = description;
-            if let Some(tier) = art["name"].as_str().filter(|n| !description.contains(n)) {
+            if let Some(tier) = tier
+                .and_then(|t| t["name"].as_str())
+                .filter(|n| !description.contains(n))
+            {
                 description.push_str(" · ");
                 description.push_str(tier);
             }
@@ -1293,7 +1380,12 @@ fn profile_badges(value: &Value) -> Vec<crate::model::ProfileBadge> {
                 description.push_str(info);
             }
             description = description.chars().take(240).collect();
-            Some(crate::model::ProfileBadge { icon, description })
+            Some(crate::model::ProfileBadge {
+                id,
+                icon,
+                fallback,
+                description,
+            })
         })
         .take(40)
         .collect()
@@ -1302,6 +1394,56 @@ fn profile_badges(value: &Value) -> Vec<crate::model::ProfileBadge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn profile_save_checks_the_exact_fields_against_a_fresh_profile() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut api = Api::new(Zeroizing::new("synthetic-session".into())).unwrap();
+        api.endpoint = Some(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            for (method, response) in [
+                ("PATCH /users/@me ", json!({"id":"1","global_name":"new"})),
+                (
+                    "GET /users/1/profile?",
+                    json!({"user":{"id":"1","global_name":"new"},"user_profile":{"bio":"updated"}}),
+                ),
+            ] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut line = String::new();
+                socket.read_line(&mut line).await.unwrap();
+                assert!(line.starts_with(method));
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    assert!(socket.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                if method.starts_with("PATCH") {
+                    let mut bytes = vec![0; length];
+                    socket.read_exact(&mut bytes).await.unwrap();
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&bytes).unwrap(),
+                        json!({"global_name":"new","bio":"updated"})
+                    );
+                }
+                let body = response.to_string();
+                socket.get_mut().write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let patch = json!({"global_name":"new","bio":"updated"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let result = api.edit_profile("1", Some(patch)).await.unwrap();
+        assert_eq!(result.bio(), Some("updated"));
+        server.await.unwrap();
+    }
     #[tokio::test]
     async fn reaction_requests_encode_emoji_and_accept_discord_empty_responses() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1368,6 +1510,19 @@ mod tests {
         );
         assert_eq!(result.len(), 1);
         assert!(result[0].image().unwrap().contains("new-badge.png"));
+        let tiered = profile_badges(
+            &json!({"badges":[{"badge_id":39,"owned":true,"name":"Game badge",
+            "current_tier":"gold","simple_icon_raster_url":"https://cdn.discordapp.com/assets/stand-in.png",
+            "tiers":[{"key":"gold","name":"Gold","complex_icon_static_url":"https://cdn.discordapp.com/assets/gold.png"}]}]}),
+        );
+        assert!(tiered[0].image().unwrap().ends_with("gold.png"));
+        assert!(
+            tiered[0]
+                .fallback
+                .as_ref()
+                .unwrap()
+                .ends_with("stand-in.png")
+        );
     }
 
     #[tokio::test]
