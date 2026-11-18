@@ -124,6 +124,7 @@ fn identity_asset(url: &str) -> bool {
         .iter()
         .any(|prefix| path.starts_with(prefix))
             || path.contains("/avatars/")
+            || path.contains("/banners/")
     })
 }
 
@@ -156,8 +157,6 @@ fn decode_bounds(url: &str) -> (u32, u32) {
         (128, 128)
     } else if identity_asset(url) {
         (256, 256)
-    } else if url.contains("/banners/") {
-        (640, 256)
     } else {
         (640, 480)
     }
@@ -242,12 +241,12 @@ impl Media {
                     else {
                         return;
                     };
-                    let disk = Arc::new(disk::Disk::new());
+                    let disk = disk::Disk::shared();
                     let identity_decoders = Arc::new(tokio::sync::Semaphore::new(1));
-                    let media_decoders = Arc::new(tokio::sync::Semaphore::new(1));
+                    let media_decoders = Arc::new(tokio::sync::Semaphore::new(2));
                     let mut workers = tokio::task::JoinSet::new();
                     for (requests, count, identity) in
-                        [(portrait_requests, 4, true), (requests, 2, false)]
+                        [(portrait_requests, 5, true), (requests, 4, false)]
                     {
                         for _ in 0..count {
                             let (client, requests, results, disk, decoders) = (
@@ -588,6 +587,18 @@ pub fn motion_url(url: String, enabled: bool) -> String {
     }
     url
 }
+/// match browser timing for gifs with missing or 1-centisecond delays.
+pub fn animation_delay(delay: image::Delay, gif: bool) -> image::Delay {
+    let time = Duration::from(delay);
+    if gif && time <= Duration::from_millis(10) {
+        image::Delay::from_numer_denom_ms(100, 1)
+    } else if time < Duration::from_millis(10) {
+        image::Delay::from_numer_denom_ms(10, 1)
+    } else {
+        delay
+    }
+}
+
 fn decode_motion(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
     let fallback = || decode(bytes.clone(), bounds);
     let format = image::guess_format(&bytes).ok()?;
@@ -624,7 +635,7 @@ fn decode_motion(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>>
     let mut bounds = bounds;
     for frame in frames.take(2048) {
         let frame = frame.ok()?;
-        let delay = frame.delay();
+        let delay = animation_delay(frame.delay(), format == image::ImageFormat::Gif);
         let image = image::DynamicImage::ImageRgba8(frame.into_buffer());
         let pixels = image
             .thumbnail(bounds.0.min(image.width()), bounds.1.min(image.height()))
@@ -717,6 +728,21 @@ pub fn member_avatar(guild: &str, user: &str, hash: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gif_timing_normalizes_only_missing_or_very_short_delays() {
+        let normalized = |ms, gif| {
+            Duration::from(animation_delay(
+                image::Delay::from_numer_denom_ms(ms, 1),
+                gif,
+            ))
+        };
+        assert_eq!(normalized(0, true), Duration::from_millis(100));
+        assert_eq!(normalized(10, true), Duration::from_millis(100));
+        assert_eq!(normalized(20, true), Duration::from_millis(20));
+        assert_eq!(normalized(10, false), Duration::from_millis(10));
+        assert_eq!(normalized(160, false), Duration::from_millis(160));
+    }
 
     #[test]
     fn badge_svg_rasterization_is_bounded_and_keeps_alpha() {

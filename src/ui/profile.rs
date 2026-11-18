@@ -38,9 +38,18 @@ impl Larpcord {
             )
             .child(
                 row()
+                    .w_full()
                     .gap_1()
-                    .border_b_1()
-                    .border_color(self.color(LINE))
+                    .relative()
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(1.))
+                            .bg(self.color(LINE)),
+                    )
                     .children(
                         [
                             (0, "About".to_string()),
@@ -49,33 +58,38 @@ impl Larpcord {
                         ]
                         .into_iter()
                         .map(|(tab, title)| {
-                            div()
+                            let selected = self.profile_tab == tab;
+                            row()
                                 .id(("profile-tab", tab as usize))
                                 .debug_selector(move || format!("profile-tab-{tab}"))
+                                .relative()
                                 .min_w_0()
                                 .flex_1()
                                 .h(px(36.))
-                                .line_height(px(34.))
-                                .flex_shrink_0()
-                                .text_center()
-                                .text_size(px(11.))
+                                .justify_center()
+                                .rounded_t_md()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .cursor_pointer()
-                                .border_b_2()
-                                .border_color(if self.profile_tab == tab {
-                                    self.color(TEXT)
-                                } else {
-                                    rgba(0xffffff00)
+                                .text_color(self.color(if selected { TEXT } else { MUTED }))
+                                .hover(|s| s.bg(rgba(0xffffff09)).text_color(self.color(TEXT)))
+                                .child(div().min_w_0().truncate().px_1().child(title))
+                                .when(selected, |s| {
+                                    s.child(
+                                        div()
+                                            .absolute()
+                                            .bottom_0()
+                                            .left_0()
+                                            .right_0()
+                                            .h(px(2.))
+                                            .bg(self.color(LILAC)),
+                                    )
                                 })
-                                .text_color(self.color(if self.profile_tab == tab {
-                                    TEXT
-                                } else {
-                                    MUTED
-                                }))
-                                .hover(|s| s.text_color(self.color(TEXT)))
-                                .child(title)
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.profile_tab = tab;
-                                    cx.notify();
+                                    if this.profile_tab != tab {
+                                        this.profile_tab = tab;
+                                        cx.notify();
+                                    }
                                 }))
                         }),
                     ),
@@ -280,10 +294,7 @@ impl Larpcord {
                     hash,
                 )
             })
-            .and_then(|url| {
-                self.media
-                    .get(&crate::media::motion_url(url, self.motion()))
-            });
+            .and_then(|url| self.banner_media(&url, true, cx));
         let mut roles = self
             .profile_guild
             .as_ref()
@@ -465,11 +476,11 @@ impl Larpcord {
                                     .bg(rgb(profile.accent()))
                                     .when_some(banner, |s, image| {
                                         s.child(
-                                            img(image.clone()).id(("profile-banner-image",image.id.0))
+                                            div()
                                                 .absolute()
                                                 .inset_0()
-                                                .size_full()
-                                                .object_fit(ObjectFit::Cover),
+                                                .overflow_hidden()
+                                                .child(image),
                                         )
                                     }),
                             )
@@ -488,6 +499,8 @@ impl Larpcord {
                                             .gap_1()
                                             .child(
                                                 row()
+                                                    .w_full()
+                                                    .h(px(36.))
                                                     .gap_2()
                                                     .child(
                                                         div()
@@ -501,7 +514,7 @@ impl Larpcord {
                                                             }))
                                                             .font_weight(FontWeight::BOLD)
                                                             .child(self.display_name(
-                                                                name, user, member, true,
+                                                                name, user, member, cx,
                                                             )),
                                                     )
                                                     .when(user.id != self.store.user.id, |s| {
@@ -529,9 +542,14 @@ impl Larpcord {
                                             )
                                             .child(
                                                 row()
+                                                    .w_full()
+                                                    .h(px(18.))
                                                     .gap_2()
-                                                    .flex_wrap()
-                                                    .child(label(format!("@{}", user.username)))
+                                                    .overflow_hidden()
+                                                    .child(
+                                                        label(format!("@{}", user.username))
+                                                            .truncate(),
+                                                    )
                                                     .when_some(
                                                         profile
                                                             .pronouns()
@@ -539,64 +557,60 @@ impl Larpcord {
                                                             .map(str::to_string),
                                                         |s, pronouns| {
                                                             s.child(label("·"))
-                                                                .child(label(pronouns))
+                                                                .child(label(pronouns).truncate())
                                                         },
                                                     ),
                                             )
-                                            .when_some(
-                                                presence.and_then(|p| p.activity.as_ref()),
-                                                |s, activity| {
-                                                    s.child(
-                                                        label(activity.clone()).text_size(px(12.)),
-                                                    )
-                                                },
+                                            .child(
+                                                div()
+                                                    .h(px(16.))
+                                                    .w_full()
+                                                    .overflow_hidden()
+                                                    .when_some(
+                                                        presence.and_then(|p| p.activity.as_ref()),
+                                                        |s, activity| {
+                                                            s.child(
+                                                                label(activity.clone())
+                                                                    .text_size(px(12.))
+                                                                    .truncate(),
+                                                            )
+                                                        },
+                                                    ),
                                             ),
                                     )
-                                    .when(user.bot, |s| s.child(badge("APP")))
-                                    .when(!profile.badges.is_empty(), |s| {
-                                        s.child(row().gap_2().min_h(px(24.)).flex_shrink_0().flex_wrap().children(
-                                            profile.badges.iter().take(40).filter_map(|b| {
-                                                let image = self.media.get(&b.image()?);
-                                                let hint = b
-                                                    .description
-                                                    .chars()
-                                                    .take(160)
-                                                    .collect::<String>();
-                                                Some(
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "profile-badge-{}",
-                                                            b.icon
-                                                        )))
-                                                        .child(
-                                                            div().size(px(20.)).when_some(image, |s,image|s.child(img(image).size_full().object_fit(ObjectFit::Contain))),
-                                                        )
-                                                        .tooltip(move |_, cx| {
-                                                            cx.new(|_| Hint(hint.clone())).into()
-                                                        }),
-                                                )
-                                            }),
-                                        ))
-                                    })
+                                    .child(self.profile_badge_strip(profile))
                                     .child(self.profile_tabs(profile, cx))
-                                    .child(column().id("profile-tab-body").debug_selector(||"profile-tab-body".into())
-                                        .w_full().flex_1().min_h_0().overflow_hidden()
-                                            .when(self.profile_tab != 0 && user.id != self.store.user.id, |s| {
-                                        s.child(self.profile_mutuals(profile, cx))
-                                    })
-                                            .when(self.profile_tab == 0 || user.id == self.store.user.id, |s| {
-                                        s.child(
-                                            column()
-                                                .id("profile-about-scroll")
-                                                .flex_1().min_h_0().overflow_y_scroll()
-                                                .gap_4()
-                                                .when_some(
-                                                    profile
-                                                        .bio()
-                                                        .filter(|s| !s.is_empty())
-                                                        .map(str::to_string),
-                                                    |s, bio| {
-                                                        s.child(
+                                    .child(
+                                        column()
+                                            .id("profile-tab-body")
+                                            .debug_selector(|| "profile-tab-body".into())
+                                            .w_full()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .overflow_hidden()
+                                            .when(
+                                                self.profile_tab != 0
+                                                    && user.id != self.store.user.id,
+                                                |s| s.child(self.profile_mutuals(profile, cx)),
+                                            )
+                                            .when(
+                                                self.profile_tab == 0
+                                                    || user.id == self.store.user.id,
+                                                |s| {
+                                                    s.child(
+                                                        column()
+                                                            .id("profile-about-scroll")
+                                                            .flex_1()
+                                                            .min_h_0()
+                                                            .overflow_y_scroll()
+                                                            .gap_4()
+                                                            .when_some(
+                                                                profile
+                                                                    .bio()
+                                                                    .filter(|s| !s.is_empty())
+                                                                    .map(str::to_string),
+                                                                |s, bio| {
+                                                                    s.child(
                                                             column()
                                                                 .p_3()
                                                                 .rounded_lg()
@@ -611,10 +625,10 @@ impl Larpcord {
                                                                 )
                                                                 .child(self.rich_text(&bio)),
                                                         )
-                                                    },
-                                                )
-                                                .when(!roles.is_empty(), |s| {
-                                                    s.child(
+                                                                },
+                                                            )
+                                                            .when(!roles.is_empty(), |s| {
+                                                                s.child(
                                                         column()
                                                             .p_3()
                                                             .rounded_lg()
@@ -658,9 +672,9 @@ impl Larpcord {
                                                                 ),
                                                             ),
                                                     )
-                                                })
-                                                .when_some(created, |s, date| {
-                                                    s.child(
+                                                            })
+                                                            .when_some(created, |s, date| {
+                                                                s.child(
                                                         column()
                                                             .gap_1()
                                                             .child(
@@ -670,9 +684,9 @@ impl Larpcord {
                                                             )
                                                             .child(label(date)),
                                                     )
-                                                })
-                                                .when_some(joined, |s, date| {
-                                                    s.child(
+                                                            })
+                                                            .when_some(joined, |s, date| {
+                                                                s.child(
                                                         column()
                                                             .gap_1()
                                                             .child(
@@ -682,9 +696,10 @@ impl Larpcord {
                                                             )
                                                             .child(label(date)),
                                                     )
-                                                }),
-                                        )
-                                    })
+                                                            }),
+                                                    )
+                                                },
+                                            ),
                                     )
                                     .when_some(effect_title, |s, title| {
                                         s.child(label(title).text_size(px(10.)))
@@ -718,11 +733,23 @@ impl Larpcord {
                                     .border_4()
                                     .border_color(top)
                                     .child(self.avatar_with_status(
-                                        user, member, self.profile_guild.as_deref(),
-                                        if inspector {72.} else {88.}, true,
-                                        presence.map(|p|(p.status.as_str(),u32::from(top)>>8,if inspector {16.} else {20.})),
+                                        user,
+                                        member,
+                                        self.profile_guild.as_deref(),
+                                        if inspector { 72. } else { 88. },
+                                        true,
+                                        presence.map(|p| {
+                                            (
+                                                p.status.as_str(),
+                                                u32::from(top) >> 8,
+                                                if inspector { 16. } else { 20. },
+                                            )
+                                        }),
                                     )),
                             )
+                            .when_some(presence.and_then(|p| p.custom.as_ref()), |s, status| {
+                                s.child(self.profile_status(status, inspector))
+                            })
                             .child(
                                 toolbar_button("copy-user-id", "copy", "Copy user ID")
                                     .absolute()
@@ -753,17 +780,125 @@ impl Larpcord {
                     )
                     .children(front),
             )
-            .map(|element| {
-                fade_in(
-                    element,
-                    if inspector {
-                        "inspector-enter"
-                    } else {
-                        "profile-enter"
-                    },
-                    self.motion(),
-                )
+            .into_any_element()
+    }
+
+    fn profile_status(
+        &self,
+        status: &crate::presence::CustomStatus,
+        inspector: bool,
+    ) -> AnyElement {
+        let emoji = status.emoji_id.as_ref().and_then(|id| {
+            self.media.get(&format!(
+                "https://cdn.discordapp.com/emojis/{id}.webp?size=32"
+            ))
+        });
+        let surface = self.color(SURFACE);
+        let bubble = row()
+            .absolute()
+            .left(px(if inspector { 108. } else { 130. }))
+            .right(px(16.))
+            .top(px(if inspector { 72. } else { 94. }))
+            .h(px(28.))
+            .gap_1()
+            .px_2()
+            .rounded_lg()
+            .bg(surface)
+            .border_1()
+            .border_color(self.color(LINE))
+            .shadow_md()
+            .child(
+                div()
+                    .absolute()
+                    .left(px(-5.))
+                    .bottom_1()
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(surface),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(-10.))
+                    .bottom_0()
+                    .size(px(4.))
+                    .rounded_full()
+                    .bg(surface),
+            )
+            .when_some(emoji, |s, img_data| {
+                s.child(img(img_data).size(px(16.)).flex_shrink_0())
             })
+            .when(status.emoji_id.is_none(), |s| {
+                s.when_some(status.emoji.as_ref(), |s, emoji| {
+                    s.child(label(emoji.clone()))
+                })
+            })
+            .when_some(status.text.as_ref(), |s, text| {
+                s.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.))
+                        .child(text.clone()),
+                )
+            });
+        fade_in(bubble, "profile-status-enter", self.motion())
+    }
+
+    fn profile_badge_strip(&self, profile: &Profile) -> AnyElement {
+        let mut seen = Vec::<&crate::model::ProfileBadge>::new();
+        let badges = profile
+            .badges
+            .iter()
+            .chain(&profile.guild_badges)
+            .take(80)
+            .filter(|badge| {
+                if seen.iter().any(|earlier| earlier.same_as(badge)) {
+                    return false;
+                }
+                seen.push(badge);
+                true
+            })
+            .take(40)
+            .enumerate()
+            .map(|(index, badge)| {
+                let image = badge
+                    .image()
+                    .and_then(|url| self.media.get(&url))
+                    .or_else(|| {
+                        badge
+                            .fallback
+                            .as_deref()
+                            .filter(|url| crate::media::cdn_url(url))
+                            .and_then(|url| self.media.get(url))
+                    });
+                let hint = badge.description.chars().take(160).collect::<String>();
+                row()
+                    .id(("profile-badge", index))
+                    .size(px(22.))
+                    .flex_shrink_0()
+                    .justify_center()
+                    .child(match image {
+                        Some(image) => img(image)
+                            .size(px(20.))
+                            .object_fit(ObjectFit::Contain)
+                            .into_any_element(),
+                        None => icon("star", 14.)
+                            .text_color(self.color(MUTED))
+                            .into_any_element(),
+                    })
+                    .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
+            });
+        row()
+            .id("profile-badges")
+            .w_full()
+            .h(px(24.))
+            .flex_shrink_0()
+            .gap_1()
+            .overflow_x_scroll()
+            .when(profile.user.bot, |s| s.child(badge("APP")))
+            .children(badges)
+            .into_any_element()
     }
     fn profile_frame(&self, profile: &Profile, front: bool, card_width: f32) -> Vec<AnyElement> {
         let Some(frame) = profile.frame_asset.as_ref().filter(|f| f.valid()) else {

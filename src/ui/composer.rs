@@ -198,6 +198,8 @@ impl Larpcord {
         let add_reaction = message.clone();
         let menu = message.clone();
         row()
+            .id("message-actions")
+            .debug_selector(|| "message-actions".into())
             .absolute()
             .right(px(16.))
             .top(self.message_tools_top)

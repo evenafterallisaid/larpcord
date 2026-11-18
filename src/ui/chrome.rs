@@ -280,7 +280,7 @@ impl Larpcord {
                                 self.store.user.name(),
                                 &self.store.user,
                                 None,
-                                true,
+                                cx,
                             )),
                     )
                     .child(

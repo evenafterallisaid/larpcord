@@ -25,7 +25,7 @@ impl NameStyle {
         }
     }
     pub fn animated(&self) -> bool {
-        !self.colors.is_empty() && matches!(self.effect_id, Some(2 | 3 | 6 | 7 | 8))
+        matches!(self.effect_id, Some(2 | 3 | 6 | 7 | 8))
     }
     pub fn color_at_time(&self, position: f32, phase: f32, fallback: u32) -> u32 {
         let phase = if phase.is_finite() {
@@ -33,18 +33,24 @@ impl NameStyle {
         } else {
             0.
         };
-        let position = if matches!(self.effect_id, Some(2 | 7 | 8)) {
+        let position = if matches!(self.effect_id, Some(2 | 6 | 7 | 8)) {
             let wave = (position + phase * 2.).rem_euclid(2.);
             if wave > 1. { 2. - wave } else { wave }
         } else {
             position
         };
         let color = self.color_at(position, fallback);
-        if self.effect_id == Some(8) {
+        if matches!(self.effect_id, Some(3 | 6 | 8))
+            || matches!(self.effect_id, Some(2 | 7)) && self.colors.len() < 2
+        {
             let shine = (phase * std::f32::consts::TAU + position * 2.)
                 .sin()
                 .max(0.)
-                * 0.22;
+                * if self.effect_id == Some(3) {
+                    0.28
+                } else {
+                    0.19
+                };
             [16, 8, 0].into_iter().fold(0, |out, shift| {
                 let channel = ((color >> shift) & 255) as f32;
                 out | (((channel + (255. - channel) * shine).round() as u32) << shift)
@@ -58,7 +64,7 @@ impl NameStyle {
             return fallback;
         }
         let colors = &self.colors[..self.colors.len().min(8)];
-        if colors.len() == 1 || !matches!(self.effect_id, Some(2 | 7 | 8)) {
+        if colors.len() == 1 || !matches!(self.effect_id, Some(2 | 6 | 7 | 8)) {
             return colors[0] & 0xffffff;
         }
         let t = position.clamp(0., 1.) * (colors.len() - 1) as f32;

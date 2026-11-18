@@ -25,3 +25,9 @@ open settings > modules > open folder. each subdirectory holds one `module.json`
 limits: 32 modules including the bundled example, 16 kib per manifest, 16 message rules per module, three labels per visible message, 32-byte labels and 128-byte text patterns. directory discovery inspects at most 128 entries. symlink manifests/directories, unknown fields, unsupported api versions and undeclared permissions are rejected. reload file work runs on a background executor. disabled modules do not evaluate hooks. native declarative evaluation is bounded and synchronous; any future executable backend must run away from painting, with independent cpu, memory and output limits.
 
 these are new larpcord modules, not direct vencord/equicord compatibility. an adapter can reuse a plugin's ideas and pure logic, but a plugin that patches discord's javascript/react internals needs a native port. executable plugins, arbitrary ui panels, outbound event hooks, writable plugin state and automatic downloads are intentionally outside this first api.
+
+## discover and install
+
+settings has separate modules and themes catalogs. discover shows the curated larpcord entries and works offline with the bundled index. refresh catalog reads the public index from this repository. installed entries stay available across launches. install and update leave the entry disabled until you enable or apply it. deleting an installed catalog entry removes its saved permission grant. local manifests still load from the modules folder.
+
+the catalog uses the same manifest validation as local modules. it contains data-only entries with message labels and theme tokens. submit a proposed entry in `catalog/index.json` for review. published catalog changes are available through refresh without rebuilding the client.

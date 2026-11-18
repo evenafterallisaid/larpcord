@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "api_version": 1,
+      "id": "bot-marker",
+      "name": "Bot Marker",
+      "version": "1.0.0",
+      "description": "Label bot and app messages in chat.",
+      "permissions": ["message_metadata"],
+      "message_decorators": [
+        {"when": {"author_bot": true}, "label": "Automated", "color": 10143474}
+      ]
+    },
+    {
+      "api_version": 1,
+      "id": "attachment-marker",
+      "name": "Attachment Marker",
+      "version": "1.0.0",
+      "description": "Mark messages with attached files so they are easier to spot while scrolling.",
+      "permissions": ["message_metadata"],
+      "message_decorators": [
+        {"when": {"has_attachments": true}, "label": "File attached", "color": 8775364}
+      ]
+    },
+    {
+      "api_version": 1,
+      "id": "pine-night",
+      "name": "Pine Night",
+      "version": "1.0.0",
+      "description": "Deep green surfaces and soft sage accents.",
+      "permissions": ["theme"],
+      "theme": {
+        "background": 1186329, "panel": 726546, "sidebar": 923413,
+        "surface": 2046759, "border": 3039287, "text": 15199468,
+        "muted": 10659753, "accent": 10874305
+      }
+    },
+    {
+      "api_version": 1,
+      "id": "plum-dusk",
+      "name": "Plum Dusk",
+      "version": "1.0.0",
+      "description": "Dusky purple surfaces with a lilac highlight.",
+      "permissions": ["theme"],
+      "theme": {
+        "background": 2104098, "panel": 1313815, "sidebar": 1710366,
+        "surface": 3356470, "border": 4738124, "text": 16247545,
+        "muted": 12496583, "accent": 14076156
+      }
+    },
+    {
+      "api_version": 1,
+      "id": "amber-after-hours",
+      "name": "Amber After Hours",
+      "version": "1.0.0",
+      "description": "Warm charcoal surfaces and amber accents.",
+      "permissions": ["theme"],
+      "theme": {
+        "background": 1972757, "panel": 1249806, "sidebar": 1578258,
+        "surface": 3221030, "border": 4536626, "text": 15987431,
+        "muted": 12168602, "accent": 16169073
+      }
+    }
+  ]
+}

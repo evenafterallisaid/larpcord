@@ -8,7 +8,7 @@ impl Larpcord {
         name: &str,
         user: &User,
         member: Option<&Member>,
-        full: bool,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let style = member
             .and_then(|m| m.display_name_styles.as_ref())
@@ -28,8 +28,7 @@ impl Larpcord {
                     })
             })
             .map_or(TEXT, |r| r.display_color());
-        let animated = full
-            && self.motion()
+        let animated = self.motion()
             && self.settings_tab.is_none()
             && self.video.is_none()
             && style.animated();
@@ -37,7 +36,7 @@ impl Larpcord {
         let style = style.clone();
         let draw = move |element: Div, phase: f32| {
             let count = name.graphemes(true).count().max(2) - 1;
-            let highlights = if style.colors.is_empty() {
+            let highlights = if style.colors.is_empty() && !animated {
                 Vec::new()
             } else {
                 name.grapheme_indices(true)
@@ -67,7 +66,7 @@ impl Larpcord {
             let effect = style.effect_id.unwrap_or(1);
             let tint = style.color_at_time(0., phase, role_color);
             let pulse = if animated {
-                0.65 + 0.35 * (phase * std::f32::consts::TAU).sin().abs()
+                0.35 + 0.65 * (phase * std::f32::consts::PI).sin().abs()
             } else {
                 1.
             };
@@ -104,17 +103,26 @@ impl Larpcord {
                 }))
                 .child(StyledText::new(name.clone()).with_highlights(highlights))
         };
-        if animated {
-            div()
-                .with_animation(
-                    "display-name-motion",
-                    Animation::new(std::time::Duration::from_secs(3)).repeat(),
-                    draw,
-                )
-                .into_any_element()
+        let phase = if animated {
+            let mut timer = self.name_motion_task.borrow_mut();
+            if timer.is_none() {
+                *timer = Some(cx.spawn(async move |view, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(42))
+                        .await;
+                    let _ = view.update(cx, |this, cx| {
+                        this.name_motion_task.take();
+                        if this.motion() && this.settings_tab.is_none() && this.video.is_none() {
+                            cx.notify();
+                        }
+                    });
+                }));
+            }
+            (self.name_motion_origin.elapsed().as_secs_f32() / 3.).fract()
         } else {
-            draw(div(), 0.).into_any_element()
-        }
+            0.
+        };
+        draw(div(), phase).into_any_element()
     }
 
     pub(super) fn decorated_avatar(

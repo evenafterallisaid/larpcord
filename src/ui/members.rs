@@ -56,7 +56,7 @@ impl Larpcord {
                                                         user.name(),
                                                         &user,
                                                         None,
-                                                        false,
+                                                        cx,
                                                     )),
                                             )
                                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -226,14 +226,11 @@ impl Larpcord {
                                     .relative()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().truncate().text_size(px(14.)).child(
-                                        self.display_name(
-                                            name,
-                                            &user,
-                                            Some(&member),
-                                            self.hovered_name.as_deref() == Some(&hover_key),
+                                    .child(
+                                        div().truncate().text_size(px(14.)).child(
+                                            self.display_name(name, &user, Some(&member), cx),
                                         ),
-                                    ))
+                                    )
                                     .when_some(activity.clone(), |s, text| {
                                         s.child(label(text).truncate().text_size(px(11.)))
                                     }),

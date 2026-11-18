@@ -6,7 +6,7 @@ impl Larpcord {
     }
     pub(super) fn rich_text_at(&self, text: &str, font_size: f32) -> AnyElement {
         let jumbo = font_size >= 16. && crate::content::emoji_only(text);
-        let emoji_size = if jumbo { 44. } else { 22. };
+        let emoji_size = if jumbo { 32. } else { font_size + 2. };
         let blocks = crate::content::markdown(text);
         column().debug_selector(|| "rich-text".into()).w_full().min_w_0().gap_1()
             .children(blocks.into_iter().enumerate().map(|(index, block)| {
@@ -52,14 +52,14 @@ impl Larpcord {
                                 },
                                 crate::content::Part::Emoji {name,id} => {
                                     let image=self.media.get(&format!("https://cdn.discordapp.com/emojis/{id}.webp?size=64&quality=lossless"));
-                                    items.push(div().size(px(emoji_size)).flex_shrink_0().overflow_hidden().map(|s|match image {Some(image)=>s.child(img(image).size_full()),None=>s.child(label(format!(":{name}:"))).text_size(px(8.))}).into_any_element());
+                                    items.push(div().size(px(emoji_size)).flex_shrink_0().overflow_hidden().map(|s|match image {Some(image)=>s.child(img(image).size_full().object_fit(ObjectFit::Contain)),None=>s.child(label(format!(":{name}:"))).text_size(px(8.))}).into_any_element());
                                 }
                             }
                         }
                     }
                 }
                 row().id(("rich-block",index)).w_full().min_w_0().flex_wrap().min_h(px(22.))
-                    .text_size(px(if block.heading>0 {22.-(block.heading.min(4)-1) as f32*2.}else if jumbo {40.} else{font_size})).line_height(px(if block.heading>0{28.}else if jumbo {48.} else{22.}))
+                    .text_size(px(if block.heading>0 {22.-(block.heading.min(4)-1) as f32*2.}else if jumbo {30.} else{font_size})).line_height(px(if block.heading>0{28.}else if jumbo {36.} else{22.}))
                     .when(block.heading>0,|s|s.font_weight(FontWeight::BOLD).mt_1())
                     .when(block.code,|s|s.font_family("monospace").p_2().rounded_md().bg(self.color(PANEL)))
                     .when(block.quote,|s|s.pl_3().border_l_2().border_color(self.color(MUTED))).children(items)

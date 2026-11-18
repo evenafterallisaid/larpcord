@@ -8,18 +8,20 @@ impl Larpcord {
             self.color(LINE)
         };
         row()
+            .w_full()
             .h(px(32.))
             .px_4()
             .gap_3()
             .child(div().h(px(1.)).flex_1().bg(color))
             .child(
                 div()
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::BOLD)
+                    .flex_shrink_0()
                     .text_color(if unread {
                         rgb(0xff8086)
                     } else {
-                        self.color(MUTED)
+                        self.color(TEXT)
                     })
                     .child(title.to_string()),
             )
