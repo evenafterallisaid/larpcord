@@ -64,14 +64,24 @@ impl Larpcord {
                     .collect::<Vec<_>>()
             };
             let effect = style.effect_id.unwrap_or(1);
-            let tint = style.color_at_time(0., phase, role_color);
+            let tint = if effect == 3 {
+                style.color_at(0., role_color)
+            } else {
+                style.color_at_time(0., phase, role_color)
+            };
             let pulse = if animated {
                 0.35 + 0.65 * (phase * std::f32::consts::PI).sin().abs()
             } else {
                 1.
             };
             let copies: Vec<(f32, f32, u32, f32)> = match effect {
-                3 | 6 => vec![
+                3 => vec![
+                    (-1.4, 0., tint, 0.70 * pulse),
+                    (1.4, 0., tint, 0.70 * pulse),
+                    (0., -1.4, tint, 0.70 * pulse),
+                    (0., 1.4, tint, 0.70 * pulse),
+                ],
+                6 => vec![
                     (-1.2, 0., tint, 0.22 * pulse),
                     (1.2, 0., tint, 0.22 * pulse),
                     (0., -1.2, tint, 0.22 * pulse),

@@ -141,12 +141,10 @@ fn decode_bounds(url: &str) -> (u32, u32) {
     if url.contains("/banners/") {
         return (640, 256);
     }
-    if url.contains("#motion") {
+    if url.contains("/media/v1/collectibles-shop/") || url.contains("/assets/profile_effects/") {
+        (640, 832)
+    } else if url.contains("#motion") {
         (128, 192)
-    } else if url.contains("/media/v1/collectibles-shop/")
-        || url.contains("/assets/profile_effects/")
-    {
-        (480, 640)
     } else if url.contains("/stickers/") {
         (192, 192)
     } else if url.contains("/icons/")

@@ -3364,7 +3364,7 @@ dependencies = [
 
 [[package]]
 name = "larpcord"
-version = "0.2.0-dev.14"
+version = "0.2.0-dev.15"
 dependencies = [
  "alhazen-gpui",
  "anyhow",
@@ -3390,6 +3390,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "unicode-segmentation",
  "zeroize",
 ]
@@ -5335,6 +5336,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -5354,12 +5356,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.12",
 ]

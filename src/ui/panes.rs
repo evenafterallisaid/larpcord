@@ -45,7 +45,7 @@ impl Render for ResizePreview {
 impl Larpcord {
     pub(super) fn pane_widths(&self, viewport: Pixels) -> PaneWidths {
         let inspector = if self.profile_inspector && self.profile.is_some() {
-            296.
+            super::profile::INSPECTOR_WIDTH
         } else {
             0.
         };

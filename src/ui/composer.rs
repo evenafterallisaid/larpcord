@@ -6,6 +6,7 @@ pub(super) struct Reply {
     pub channel: String,
     pub name: String,
     pub text: String,
+    pub ping: bool,
 }
 impl Larpcord {
     pub(super) fn reply_to_message(
@@ -18,10 +19,14 @@ impl Larpcord {
             id: message.id.clone(),
             channel: message.channel_id.clone(),
             name: message.name().to_string(),
+            ping: message.author.id != self.store.user.id,
             text: if super::gif::gif_only(message) {
                 "GIF".into()
             } else {
-                message.content.chars().take(100).collect()
+                self.message_excerpt(message, &message.content)
+                    .chars()
+                    .take(100)
+                    .collect()
             },
         });
         window.focus(&self.composer.focus_handle(cx));
@@ -47,6 +52,23 @@ impl Larpcord {
                     .child(reply.name.clone()),
             )
             .child(label(reply.text.clone()).truncate().flex_1().min_w_0())
+            .child(
+                button(
+                    "toggle-reply-ping",
+                    if reply.ping {
+                        "Mention on"
+                    } else {
+                        "Mention off"
+                    },
+                )
+                .text_size(px(11.))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(reply) = this.reply_to.as_mut() {
+                        reply.ping = !reply.ping;
+                    }
+                    cx.notify();
+                })),
+            )
             .child(
                 button("cancel-reply", "")
                     .p_1()

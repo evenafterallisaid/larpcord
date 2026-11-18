@@ -146,7 +146,9 @@ pub enum Command {
         content: String,
         nonce: String,
         reply: Option<String>,
+        ping_reply: bool,
         sticker: Option<String>,
+        files: Vec<crate::attachments::DraftFile>,
     },
     Notify {
         title: String,
@@ -532,6 +534,73 @@ impl Api {
         Ok(profile)
     }
 
+    async fn upload_files(
+        &self,
+        channel: &str,
+        files: &[crate::attachments::DraftFile],
+    ) -> Result<Vec<Value>, String> {
+        use crate::attachments::upload_url;
+
+        let upload = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300))
+            .build()
+            .map_err(|_| "Could not start attachment upload.".to_string())?;
+        let route = format!("/channels/{channel}/attachments");
+        let mut attachments = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            let body = file.upload_body().await?;
+            let id = index.to_string();
+            let prepared: Value = self
+                .request(
+                    Method::POST,
+                    &route,
+                    Some(json!({"files":[{
+                        "id":id,"filename":file.name,"file_size":file.size,"is_clip":false
+                    }]})),
+                )
+                .await?;
+            let target = prepared["attachments"]
+                .as_array()
+                .filter(|items| items.len() == 1)
+                .map(|items| &items[0])
+                .ok_or("Discord did not prepare the attachment.")?;
+            if target.get("id").is_some_and(|value| {
+                value.as_str() != Some(id.as_str()) && value.as_u64() != Some(index as u64)
+            }) {
+                return Err("Discord returned an unexpected attachment ID.".into());
+            }
+            let url = target["upload_url"]
+                .as_str()
+                .and_then(upload_url)
+                .ok_or("Discord returned an unsupported upload address.")?;
+            let uploaded = target["upload_filename"]
+                .as_str()
+                .filter(|name| {
+                    !name.is_empty() && name.len() <= 1024 && !name.chars().any(char::is_control)
+                })
+                .ok_or("Discord did not provide an attachment name.")?;
+            let response = upload
+                .put(url)
+                .header(reqwest::header::CONTENT_LENGTH, file.size)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(body)
+                .send()
+                .await
+                .map_err(|_| format!("Could not upload {}.", file.name))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "Discord could not accept {} (HTTP {}).",
+                    file.name,
+                    response.status().as_u16()
+                ));
+            }
+            attachments.push(json!({"id":id,"filename":file.name,"uploaded_filename":uploaded}));
+        }
+        Ok(attachments)
+    }
+
     async fn request<T: DeserializeOwned>(
         &self,
         method: Method,
@@ -648,7 +717,11 @@ fn safe_delay(seconds: f64) -> Duration {
 }
 
 fn send_body(content: &str, nonce: &str, reply: Option<&str>, sticker: Option<&str>) -> Value {
-    let mut body = json!({"content":content,"nonce":nonce,"enforce_nonce":true,"allowed_mentions":{"parse":[],"replied_user":false}});
+    let (content, silent) = crate::content::silent_content(content);
+    let mut body = json!({"content":content,"nonce":nonce,"enforce_nonce":true,"allowed_mentions":{"parse":["users","roles","everyone"],"replied_user":false}});
+    if silent {
+        body["flags"] = json!(Message::SUPPRESS_NOTIFICATIONS);
+    }
     if let Some(id) = reply.filter(|id| snowflake(id)) {
         body["message_reference"] = json!({"message_id":id,"fail_if_not_exists":false});
     }
@@ -860,7 +933,7 @@ impl Backend {
                                         let badges=async {
                                             let client=client.discovery();
                                             let account = if own { "@me" } else { &id };
-                                            if let Ok(Ok(value))=tokio::time::timeout(Duration::from_secs(5),client.request::<Value>(Method::GET,&format!("/users/{account}/badges"),None)).await {
+                                            if let Ok(Ok(value))=tokio::time::timeout(Duration::from_secs(12),client.request::<Value>(Method::GET,&format!("/users/{account}/badges"),None)).await {
                                                 let badges=profile_badges(&value);
                                                 emit(&events,generation,Event::ProfileBadges{id:id.clone(),guild:guild.clone(),request,badges}).await;
                                             }
@@ -912,12 +985,25 @@ impl Backend {
                                     if !snowflake(&channel) { continue; }
                                     requests.spawn(async move {let _ = client.request::<()>(Method::POST,&format!("/channels/{channel}/typing"),None).await;});
                                 }
-                                Command::Send { channel, content, nonce,reply,sticker } => {
-                                    let Some(client) = api.clone() else { continue; };
-                                    if !snowflake(&channel) || (content.is_empty() && sticker.is_none()) || content.chars().count() > 2000 || sticker.as_deref().is_some_and(|id|!snowflake(id)) { continue; }
+                                Command::Send { channel, content, nonce,reply,ping_reply,sticker,files } => {
+                                    let client = api.clone();
                                     let events = events.clone();
                                     requests.spawn(async move {
-                                        let result = client.request::<Message>(Method::POST, &format!("/channels/{channel}/messages"), Some(send_body(&content,&nonce,reply.as_deref(),sticker.as_deref()))).await;
+                                        let result = async {
+                                            let client = client.ok_or("Wait for the connection before sending.")?;
+                                            let (text, _) = crate::content::silent_content(&content);
+                                            if !snowflake(&channel) || (text.is_empty() && sticker.is_none() && files.is_empty()) || text.chars().count() > 2000 || sticker.as_deref().is_some_and(|id|!snowflake(id)) || files.len() > crate::attachments::MAX_FILES {
+                                                return Err("This message could not be sent.".to_string());
+                                            }
+                                            let mut body = send_body(&content,&nonce,reply.as_deref(),sticker.as_deref());
+                                            if reply.as_deref().is_some_and(snowflake) {
+                                                body["allowed_mentions"]["replied_user"] = json!(ping_reply);
+                                            }
+                                            if !files.is_empty() {
+                                                body["attachments"] = json!(client.upload_files(&channel, &files).await?);
+                                            }
+                                            client.request::<Message>(Method::POST, &format!("/channels/{channel}/messages"), Some(body)).await
+                                        }.await;
                                         emit(&events, generation, Event::Sent { nonce, result: result.map(Box::new) }).await;
                                     });
                                 }
@@ -1326,10 +1412,17 @@ pub fn guild_channels(value: &Value) -> Vec<Channel> {
 fn profile_badges(value: &Value) -> Vec<crate::model::ProfileBadge> {
     value["badges"]
         .as_array()
+        .or_else(|| value.as_array())
         .into_iter()
         .flatten()
         .take(80)
-        .filter(|b| b["owned"].as_bool() == Some(true) && b["hidden"].as_bool() != Some(true))
+        .filter(|b| {
+            let obtained = b["obtained_at"]
+                .as_str()
+                .is_some_and(|date| chrono::DateTime::parse_from_rfc3339(date).is_ok())
+                || b["obtained_at"].as_u64().is_some_and(|time| time > 0);
+            b["owned"].as_bool().unwrap_or(obtained) && b["hidden"].as_bool() != Some(true)
+        })
         .filter_map(|badge| {
             let tier = badge["current_tier"].as_str().and_then(|key| {
                 badge["tiers"]
@@ -1355,6 +1448,11 @@ fn profile_badges(value: &Value) -> Vec<crate::model::ProfileBadge> {
             let fallback = art.find(|url| *url != icon).map(str::to_string);
             let id = badge["badge_id"]
                 .as_u64()
+                .or_else(|| {
+                    badge["badge_id"]
+                        .as_str()
+                        .and_then(|s| s.parse::<u64>().ok())
+                })
                 .map(|id| format!("catalog-{id}"))
                 .unwrap_or_default();
             if icon.is_empty() && id.is_empty() {
@@ -1639,6 +1737,13 @@ mod tests {
         assert_eq!(body["message_reference"]["message_id"], "456");
         assert_eq!(body["allowed_mentions"]["replied_user"], false);
         assert_eq!(body["sticker_ids"], json!(["789"]));
+        let silent = send_body("@silent <@42> hello", "124", None, None);
+        assert_eq!(silent["content"], "<@42> hello");
+        assert_eq!(silent["flags"], Message::SUPPRESS_NOTIFICATIONS);
+        assert_eq!(
+            silent["allowed_mentions"]["parse"],
+            json!(["users", "roles", "everyone"])
+        );
     }
 
     #[tokio::test]

@@ -250,7 +250,12 @@ impl Larpcord {
                 .id(id)
                 .w_full()
                 .min_w_0()
-                .child(self.rich_text(component.content.as_deref().unwrap_or_default()))
+                .child(self.rich_message_text(
+                    message,
+                    component.content.as_deref().unwrap_or_default(),
+                    14.,
+                    cx,
+                ))
                 .into_any_element(),
             11 => component.media.as_ref().map_or_else(
                 || div().into_any_element(),

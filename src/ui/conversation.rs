@@ -73,6 +73,18 @@ impl Larpcord {
                     .child(
                         label(if gif::gif_link(&original.content, &original.embeds) {
                             "GIF".into()
+                        } else if !original.content.is_empty() {
+                            self.mention_excerpt(
+                                super::mentions::MentionScope {
+                                    channel: Some(&message.channel_id),
+                                    users: &original.mentions,
+                                    channels: &original.mention_channels,
+                                },
+                                &original.content,
+                            )
+                            .chars()
+                            .take(120)
+                            .collect()
                         } else {
                             original.excerpt()
                         })
