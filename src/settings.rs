@@ -10,6 +10,8 @@ pub struct Settings {
     pub remember_session: bool,
     pub compact: bool,
     pub show_send_button: bool,
+    pub channel_pane_width: u16,
+    pub member_pane_width: u16,
     pub animations: bool,
     pub theme: crate::theme::Theme,
     #[serde(skip)]
@@ -30,6 +32,8 @@ impl Default for Settings {
             remember_session: true,
             compact: false,
             show_send_button: false,
+            channel_pane_width: 256,
+            member_pane_width: 240,
             animations: true,
             theme: crate::theme::Theme::default(),
             custom_theme: None,

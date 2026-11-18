@@ -8,6 +8,7 @@ mod friends;
 mod gif;
 mod members;
 mod modules;
+mod panes;
 mod picker;
 mod profile;
 mod profile_edit;
@@ -81,6 +82,7 @@ pub struct Larpcord {
     reaction_replays: HashMap<String, u64>,
     collapsed_categories: HashSet<String>,
     composer: Entity<TextInput>,
+    pane_resize_dirty: bool,
     emoji_search: Entity<TextInput>,
     emoji_open: bool,
     picker: crate::expressions::Picker,
@@ -541,6 +543,7 @@ impl Larpcord {
             reaction_replays: HashMap::new(),
             collapsed_categories: HashSet::new(),
             composer,
+            pane_resize_dirty: false,
             emoji_search,
             emoji_open: false,
             picker,
@@ -2792,7 +2795,7 @@ impl Larpcord {
         div().w_full().px_2().child(content).into_any_element()
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar(&self, width: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
         let guild = self
             .selected_guild
             .as_ref()
@@ -2980,7 +2983,7 @@ impl Larpcord {
             );
         }
         column()
-            .w(px(256.))
+            .w(width)
             .h_full()
             .flex_shrink_0()
             .bg(self.color(SIDEBAR))
@@ -3646,7 +3649,7 @@ impl Larpcord {
             .into_any_element()
     }
 
-    fn conversation(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn conversation(&self, widths: panes::PaneWidths, cx: &mut Context<Self>) -> AnyElement {
         let channel = self
             .selected_channel
             .as_ref()
@@ -3955,18 +3958,15 @@ impl Larpcord {
                     .min_h_0()
                     .items_start()
                     .child(content)
-                    .when(
-                        self.members_open
-                            && (self.selected_guild.is_some()
-                                || channel.is_some_and(|c| c.kind == 3)),
-                        |s| {
-                            s.child(if channel.is_some_and(|c| c.kind == 3) {
-                                self.group_members(channel.unwrap(), cx)
+                    .when(widths.members > 0., |s| {
+                        s.child(self.pane_divider(panes::Pane::Members, cx)).child(
+                            if let Some(group) = channel.filter(|c| c.kind == 3) {
+                                self.group_members(group, px(widths.members), cx)
                             } else {
-                                self.member_rail(cx)
-                            })
-                        },
-                    )
+                                self.member_rail(px(widths.members), cx)
+                            },
+                        )
+                    })
                     .when_some(
                         self.profile.as_ref().filter(|_| self.profile_inspector),
                         |s, profile| s.child(self.profile_panel(profile, cx)),
@@ -4496,9 +4496,15 @@ impl Render for Larpcord {
             cx,
             self.motion() && self.settings_tab.is_none() && self.video.is_none(),
         );
+        let widths = self.pane_widths(window.viewport_size().width);
         column()
             .relative()
             .track_focus(&self.root_focus)
+            .on_drop(cx.listener(|this, _: &panes::Pane, _, cx| this.save_pane_resize(cx)))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.save_pane_resize(cx)),
+            )
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, _| {
                 if this.jumping {
                     this.jumping = false;
@@ -4556,7 +4562,7 @@ impl Render for Larpcord {
                     .items_start()
                     .child(
                         column()
-                            .w(px(328.))
+                            .w(widths.sidebar())
                             .flex_shrink_0()
                             .h_full()
                             .child(
@@ -4564,14 +4570,15 @@ impl Render for Larpcord {
                                     .flex_1()
                                     .min_h_0()
                                     .child(self.rail(cx))
-                                    .child(self.sidebar(cx)),
+                                    .child(self.sidebar(px(widths.channels), cx)),
                             )
                             .child(self.account_bar(cx)),
                     )
+                    .child(self.pane_divider(panes::Pane::Channels, cx))
                     .child(if self.home_page {
                         self.friends_page(cx)
                     } else {
-                        self.conversation(cx)
+                        self.conversation(widths, cx)
                     }),
             )
             .when(self.emoji_open, |s| s.child(self.emoji_panel(cx)))

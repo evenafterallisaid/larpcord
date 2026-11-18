@@ -1,14 +1,19 @@
 use super::*;
 
 impl Larpcord {
-    pub(super) fn group_members(&self, channel: &Channel, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn group_members(
+        &self,
+        channel: &Channel,
+        width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut users = channel.recipients.clone();
         if !users.iter().any(|u| u.id == self.store.user.id) {
             users.push(self.store.user.clone());
         }
         users.sort_by_cached_key(|u| u.name().to_lowercase());
         column()
-            .w(px(240.))
+            .w(width)
             .h_full()
             .flex_shrink_0()
             .bg(self.color(SIDEBAR))
@@ -94,14 +99,14 @@ impl Larpcord {
             });
         }
     }
-    pub(super) fn member_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn member_rail(&self, width: Pixels, cx: &mut Context<Self>) -> AnyElement {
         let count = if self.members.received {
             self.members.total
         } else {
             0
         };
         column()
-            .w(px(240.))
+            .w(width)
             .flex_shrink_0()
             .h_full()
             .bg(self.color(SIDEBAR))
