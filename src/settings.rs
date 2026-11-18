@@ -9,6 +9,7 @@ pub struct Settings {
     pub keep_connected: bool,
     pub remember_session: bool,
     pub compact: bool,
+    pub show_send_button: bool,
     pub animations: bool,
     pub theme: crate::theme::Theme,
     #[serde(skip)]
@@ -28,6 +29,7 @@ impl Default for Settings {
             keep_connected: true,
             remember_session: true,
             compact: false,
+            show_send_button: false,
             animations: true,
             theme: crate::theme::Theme::default(),
             custom_theme: None,

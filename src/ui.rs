@@ -3917,13 +3917,13 @@ impl Larpcord {
                                 .child(toolbar_button("choose-gif", "gif", "Choose GIF").on_click(cx.listener(|this,_,window,cx|this.toggle_picker(crate::expressions::Tab::Gifs,window,cx))))
                                 .child(toolbar_button("choose-sticker", "sticker", "Choose sticker").on_click(cx.listener(|this,_,window,cx|this.toggle_picker(crate::expressions::Tab::Stickers,window,cx))))
                                 .child(toolbar_button("choose-emoji", "smile", "Choose emoji").on_click(cx.listener(|this,_,window,cx|this.toggle_picker(crate::expressions::Tab::Emoji,window,cx))))
-                                .child(
+                                .when(self.settings.show_send_button, |s| s.child(
                                     toolbar_button("send", "send", "Send message")
                                     .text_color(self.color(if self.sending.is_some() { MUTED } else { ACCENT }))
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.send(window, cx)),
                                     ),
-                                ),
+                                )),
                         )
                         .when(self.preview,|s|s.child(
                             row().justify_between().px_1().child(
@@ -4278,6 +4278,18 @@ impl Larpcord {
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.settings.keep_connected = !this.settings.keep_connected;
+                            this.persist(cx);
+                        })),
+                    )
+                    .child(
+                        self.setting_toggle(
+                            "send-button",
+                            "Show Send button",
+                            "Add a Send button beside the composer. Enter sends in either mode.",
+                            self.settings.show_send_button,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings.show_send_button = !this.settings.show_send_button;
                             this.persist(cx);
                         })),
                     )
