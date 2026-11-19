@@ -19,7 +19,7 @@ impl Larpcord {
             id: message.id.clone(),
             channel: message.channel_id.clone(),
             name: message.name().to_string(),
-            ping: message.author.id != self.store.user.id,
+            ping: self.settings.reply_mentions,
             text: if super::gif::gif_only(message) {
                 "GIF".into()
             } else {
@@ -61,10 +61,13 @@ impl Larpcord {
                         "Mention off"
                     },
                 )
+                .debug_selector(|| "reply-mentions-toggle".into())
                 .text_size(px(11.))
                 .on_click(cx.listener(|this, _, _, cx| {
                     if let Some(reply) = this.reply_to.as_mut() {
                         reply.ping = !reply.ping;
+                        this.settings.reply_mentions = reply.ping;
+                        this.persist(cx);
                     }
                     cx.notify();
                 })),

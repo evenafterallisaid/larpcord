@@ -14,6 +14,7 @@ pub struct Members {
     pub list_id: Option<String>,
     pub total: usize,
     pub online: u32,
+    pub count: Option<u32>,
     pub received: bool,
     pub rows: BTreeMap<usize, Row>,
     groups: BTreeMap<String, u32>,
@@ -166,6 +167,10 @@ impl Members {
             return;
         }
         self.received = true;
+        self.count = data["member_count"]
+            .as_u64()
+            .and_then(|count| u32::try_from(count).ok())
+            .or(self.count);
         self.online = data["online_count"]
             .as_u64()
             .unwrap_or(self.online as u64)
@@ -181,6 +186,9 @@ impl Members {
                     ))
                 })
                 .collect();
+            if data["member_count"].is_null() {
+                self.count = Some(self.groups.values().copied().fold(0, u32::saturating_add));
+            }
             for row in self.rows.values_mut() {
                 if let Row::Group { id, count } = row
                     && let Some(current) = self.groups.get(id)

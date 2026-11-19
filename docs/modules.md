@@ -1,6 +1,6 @@
 # native modules, api 1
 
-modules are local, opt-in extensions inside larpcord. api 1 is a working declarative host for message labels and semantic theme colors. it does not execute javascript, wasm, native libraries or shell commands. no runtime, jit, filesystem watcher or background polling is added. executable adapters can use this same registry and permission boundary in a later api.
+modules are local, opt-in extensions inside larpcord. api 1 is a declarative host for message labels, semantic theme colors and opt-in native presentation features. it does not execute javascript, wasm, native libraries or shell commands. no runtime, jit, filesystem watcher or background polling is added. executable adapters can use this same registry and permission boundary in a later api.
 
 open settings > modules > open folder. each subdirectory holds one `module.json`. reload modules discovers changes without restarting. the bundled **media labels** example is available without installing anything, disabled by default. local modules appear with their names, versions, descriptions and declared permissions. enabling stores the manifest's sha256 digest. any byte change requires enabling again. disabling immediately removes its hooks and grant. malformed modules are skipped with a visible error; they do not break chat.
 
@@ -31,3 +31,9 @@ these are new larpcord modules, not direct vencord/equicord compatibility. an ad
 settings has separate modules and themes catalogs. discover shows the curated larpcord entries and works offline with the bundled index. refresh catalog reads the public index from this repository. installed entries stay available across launches. install and update leave the entry disabled until you enable or apply it. deleting an installed catalog entry removes its saved permission grant. local manifests still load from the modules folder.
 
 the catalog uses the same manifest validation as local modules. it contains data-only entries with message labels and theme tokens. submit a proposed entry in `catalog/index.json` for review. published catalog changes are available through refresh without rebuilding the client.
+
+## native ports in discover
+
+member count and show me your name adapt the behavior of the Vencord plugins. account panel server profile adapts the Equicord shortcut. booster count adapts the Illegalcord plugin for the server rail. they use Larpcord's existing state and render paths. [Vencord plugins](https://vencord.dev/plugins/), [Equicord](https://github.com/Equicord/Equicord), [Illegalcord](https://github.com/ImHisako/Illegalcord)
+
+catppuccin mocha, nord and tokyo night map the upstream palettes onto Larpcord's theme colors. [Catppuccin](https://github.com/catppuccin/palette), [Nord](https://www.nordtheme.com/docs/colors-and-palettes), [Tokyo Night](https://github.com/enkia/tokyo-night-vscode-theme)

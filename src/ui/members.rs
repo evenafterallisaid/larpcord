@@ -112,6 +112,23 @@ impl Larpcord {
             .bg(self.color(SIDEBAR))
             .border_l_1()
             .border_color(self.color(LINE))
+            .when(
+                self.members.received
+                    && self
+                        .modules
+                        .feature(crate::modules::NativeFeature::MemberCount),
+                |s| {
+                    s.when_some(self.members.count, |s, count| {
+                        s.child(
+                            label(format!("{count} members · {} online", self.members.online))
+                                .px_4()
+                                .py_3()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .truncate(),
+                        )
+                    })
+                },
+            )
             .when(count == 0, |s| {
                 s.child(
                     column()
@@ -141,7 +158,9 @@ impl Larpcord {
                             .collect::<Vec<_>>()
                     }),
                 )
-                .size_full(),
+                .w_full()
+                .flex_1()
+                .min_h_0(),
             )
             .into_any_element()
     }
@@ -235,6 +254,21 @@ impl Larpcord {
                                         div().truncate().text_size(px(14.)).child(
                                             self.display_name(name, &user, Some(&member), cx),
                                         ),
+                                    )
+                                    .when(
+                                        activity.is_none()
+                                            && !user.username.is_empty()
+                                            && user.username != name
+                                            && self
+                                                .modules
+                                                .feature(crate::modules::NativeFeature::Usernames),
+                                        |s| {
+                                            s.child(
+                                                label(format!("@{}", user.username))
+                                                    .truncate()
+                                                    .text_size(px(11.)),
+                                            )
+                                        },
                                     )
                                     .when_some(activity.clone(), |s, text| {
                                         s.child(label(text).truncate().text_size(px(11.)))
