@@ -3,9 +3,9 @@
 <p align="center">a little room to breathe.</p>
 <p align="center">a native discord client, written in rust with gpui.</p>
 
-this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the current published preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.2.0-dev.15).
+this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the current published preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.2.0-dev.16).
 
-**0.2.0-dev.16 is a development preview.** this build adds anchored profile previews, native module and palette ports, badge catalog compatibility, and a remembered reply mention preference. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
+**0.2.0-dev.16 is a development preview.** this release adds animated panels, anchored profile previews, native module and palette ports, badge catalog compatibility, and a remembered reply mention preference. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
 
 ## what works in this milestone
 

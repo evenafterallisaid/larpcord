@@ -263,6 +263,7 @@ impl Larpcord {
             .child(
                 div()
                     .id("self-avatar")
+                    .debug_selector(|| "self-avatar".into())
                     .cursor_pointer()
                     .child(self.presence_avatar(&self.store.user, 32.))
                     .on_click(cx.listener(move |this, _, window, cx| {

@@ -5119,6 +5119,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn account_avatar_opens_an_animated_profile_preview(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        let viewport = cx.update(|window, _| {
+            window.activate_window();
+            window.viewport_size()
+        });
+        view.update(cx, |v, cx| {
+            v.settings.animations = true;
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let avatar = cx.debug_bounds("self-avatar").unwrap();
+        cx.simulate_click(avatar.center(), Modifiers::default());
+        cx.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(view.profile_is_modal());
+            assert_eq!(view.profile_anchor, Some(avatar.center()));
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let card = cx.debug_bounds("profile-card").unwrap();
+        assert!(card.left() > avatar.center().x && card.bottom() <= viewport.height);
+        cx.simulate_click(
+            point(viewport.width - px(16.), px(64.)),
+            Modifiers::default(),
+        );
+        cx.update(|_, cx| {
+            let view = view.read(cx);
+            assert!(view.profile_is_modal());
+            assert!(view.panel_exit.is_some());
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(150));
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(!view.read(cx).profile_is_modal()));
+    }
+
+    #[gpui::test]
     fn reply_mention_choice_defaults_off_and_carries_into_the_next_reply(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
         let viewport = cx.update(|window, _| window.viewport_size());
