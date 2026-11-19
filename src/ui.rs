@@ -140,6 +140,7 @@ pub struct Larpcord {
     profile: Option<Profile>,
     profile_inspector: bool,
     profile_expanded: bool,
+    profile_anchor: Option<Point<Pixels>>,
     profile_tab: u8,
     profile_guild: Option<String>,
     profile_request: u64,
@@ -618,6 +619,7 @@ impl Larpcord {
             profile: None,
             profile_inspector: false,
             profile_expanded: false,
+            profile_anchor: None,
             profile_tab: 0,
             profile_guild: None,
             profile_request: 0,
@@ -3216,6 +3218,7 @@ impl Larpcord {
     fn open_profile(&mut self, user: User, window: &mut Window, cx: &mut Context<Self>) {
         self.profile_inspector = false;
         self.profile_expanded = false;
+        self.profile_anchor = Some(window.mouse_position());
         self.profile_tab = 0;
         self.close_picker();
         self.previous_focus = window.focused(cx);
@@ -4206,7 +4209,7 @@ impl Larpcord {
                     })
                     .when_some(
                         self.profile.as_ref().filter(|_| self.profile_inspector),
-                        |s, profile| s.child(self.profile_panel(profile, cx)),
+                        |s, profile| s.child(self.profile_panel(profile, None, cx)),
                     ),
             )
             .into_any_element()
@@ -4839,7 +4842,7 @@ impl Render for Larpcord {
             .when(self.login_open, |s| s.child(self.login_screen(cx)))
             .when_some(
                 self.profile.clone().filter(|_| !self.profile_inspector),
-                |s, user| s.child(self.profile_panel(&user, cx)),
+                |s, user| s.child(self.profile_panel(&user, Some(window.viewport_size()), cx)),
             )
             .when(self.video.is_some(), |s| s.child(self.video_panel(cx)))
             .when_some(self.component_menu.clone(), |s, (message, component)| {

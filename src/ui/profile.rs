@@ -2,6 +2,28 @@ use super::*;
 
 pub(super) const INSPECTOR_WIDTH: f32 = 292.;
 const PREVIEW_WIDTH: f32 = 360.;
+const TITLEBAR: Pixels = px(32.);
+const POPOVER_GAP: Pixels = px(16.);
+
+fn popup_bounds(anchor: Point<Pixels>, viewport: Size<Pixels>, width: Pixels) -> Bounds<Pixels> {
+    let height = px(560.).min((viewport.height - TITLEBAR - px(64.)).max(px(240.)));
+    let right = anchor.x + POPOVER_GAP;
+    let left = anchor.x - POPOVER_GAP - width;
+    let x = if right + width + POPOVER_GAP <= viewport.width {
+        right
+    } else {
+        left
+    }
+    .clamp(
+        POPOVER_GAP,
+        (viewport.width - POPOVER_GAP - width).max(POPOVER_GAP),
+    );
+    let y = (anchor.y - TITLEBAR - px(48.)).clamp(
+        px(28.),
+        (viewport.height - TITLEBAR - height - px(28.)).max(px(28.)),
+    );
+    Bounds::new(point(x, y), size(width, height))
+}
 
 impl Larpcord {
     fn profile_tabs(&self, profile: &Profile, cx: &mut Context<Self>) -> AnyElement {
@@ -252,18 +274,30 @@ impl Larpcord {
         }
     }
 
-    pub(super) fn profile_panel(&self, profile: &Profile, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn profile_panel(
+        &self,
+        profile: &Profile,
+        viewport: Option<Size<Pixels>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let inspector = self.profile_inspector;
         let expanded = self.profile_expanded && !inspector;
+        let popup = viewport
+            .zip(self.profile_anchor)
+            .filter(|_| !expanded && !inspector);
         let frame = profile.frame_asset.as_ref().filter(|f| f.valid());
         let card_width = if inspector {
             let inner = INSPECTOR_WIDTH - 24.;
             frame.map_or(inner, |f| {
                 inner * f.inner_width / (f.inner_width + 2. * f.overflow_horizontal)
             })
+        } else if popup.is_some() {
+            328.
         } else {
             PREVIEW_WIDTH
         };
+        let placement =
+            popup.map(|(viewport, anchor)| popup_bounds(anchor, viewport, px(card_width)));
         let (frame_top, frame_bottom) = frame.map_or((0., 0.), |f| {
             (
                 f.overflow_top * card_width / f.inner_width,
@@ -423,10 +457,16 @@ impl Larpcord {
                     .occlude()
                     .absolute()
                     .inset_0()
-                    .top(px(32.))
-                    .bg(rgba(0x00000099))
+                    .top(TITLEBAR)
+                    .when(placement.is_none(), |s| s.bg(rgba(0x00000099)))
                     .items_center()
                     .justify_center()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.dismiss_profile(window, cx);
+                        }),
+                    )
             })
             .when(inspector, |s| {
                 s.w(px(INSPECTOR_WIDTH))
@@ -449,6 +489,13 @@ impl Larpcord {
                     .h(px(if expanded { 640. } else { 560. }))
                     .when(inspector, |s| s.h_full())
                     .max_h(relative(if inspector { 1. } else { 0.9 }))
+                    .when_some(placement, |s, area| {
+                        s.absolute()
+                            .left(area.origin.x)
+                            .top(area.origin.y)
+                            .h(area.size.height)
+                    })
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         column()
                             .relative()
@@ -841,12 +888,7 @@ impl Larpcord {
                                             .rounded_full()
                                             .bg(rgba(0x111216aa))
                                             .on_click(cx.listener(|this, _, window, cx| {
-                                                this.profile = None;
-                                                this.profile_inspector = false;
-                                                if let Some(focus) = this.previous_focus.take() {
-                                                    window.focus(&focus);
-                                                }
-                                                cx.notify();
+                                                this.dismiss_profile(window, cx)
                                             })),
                                     ),
                             )
@@ -857,6 +899,17 @@ impl Larpcord {
                     }),
             )
             .into_any_element()
+    }
+
+    fn dismiss_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.profile = None;
+        self.profile_inspector = false;
+        self.profile_expanded = false;
+        self.profile_anchor = None;
+        if let Some(focus) = self.previous_focus.take() {
+            window.focus(&focus);
+        }
+        cx.notify();
     }
 
     fn expanded_profile_details(
