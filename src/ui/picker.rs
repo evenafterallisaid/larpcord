@@ -151,6 +151,7 @@ impl Larpcord {
         }
     }
     pub(super) fn close_picker(&mut self) {
+        self.cancel_panel_exit(super::panels::Panel::Picker);
         self.emoji_open = false;
         self.picker_debounce = None;
         self.picker.request += 1;
@@ -161,9 +162,9 @@ impl Larpcord {
     }
     pub(super) fn toggle_picker(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         if self.emoji_open && self.picker.tab == tab {
-            self.close_picker();
-            window.focus(&self.composer.focus_handle(cx));
+            self.animate_panel_close(super::panels::Panel::Picker, window, cx);
         } else {
+            self.cancel_panel_exit(super::panels::Panel::Picker);
             self.emoji_open = true;
             self.picker.tab = tab;
             self.picker.scope = None;
@@ -1027,7 +1028,11 @@ impl Larpcord {
             .child(label(detail.to_string()).text_size(px(11.)).text_center())
             .into_any_element()
     }
-    pub(super) fn emoji_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn emoji_panel(
+        &self,
+        widths: super::panes::PaneWidths,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let tab = self.picker.tab;
         div()
             .id("emoji-backdrop")
@@ -1038,9 +1043,7 @@ impl Larpcord {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
-                    this.close_picker();
-                    window.focus(&this.composer.focus_handle(cx));
-                    cx.notify();
+                    this.animate_panel_close(super::panels::Panel::Picker, window, cx);
                 }),
             )
             .child(
@@ -1048,20 +1051,10 @@ impl Larpcord {
                     .id("emoji-picker")
                     .debug_selector(|| "expression-picker".into())
                     .absolute()
-                    .right(px(if self.profile_inspector {
-                        336.
-                    } else if self.members_open
-                        && (self.selected_guild.is_some()
-                            || self
-                                .selected_channel
-                                .as_ref()
-                                .and_then(|id| self.store.channels.get(id))
-                                .is_some_and(|c| c.kind == 3))
-                    {
-                        256.
-                    } else {
-                        16.
-                    }))
+                    .right(px(16.
+                        + widths.inspector
+                        + widths.members
+                        + if widths.members > 0. { 6. } else { 0. }))
                     .bottom(px(76.))
                     .w(px(432.))
                     .h(px(440.))
@@ -1117,9 +1110,11 @@ impl Larpcord {
                             .child(
                                 toolbar_button("close-expression-picker", "close", "Close picker")
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.close_picker();
-                                        window.focus(&this.composer.focus_handle(cx));
-                                        cx.notify();
+                                        this.animate_panel_close(
+                                            super::panels::Panel::Picker,
+                                            window,
+                                            cx,
+                                        );
                                     })),
                             ),
                     )
@@ -1248,7 +1243,13 @@ impl Larpcord {
                         }
                     }),
             )
-            .into_any_element()
+            .map(|element| {
+                self.panel_transition(
+                    element,
+                    super::panels::Panel::Picker,
+                    "expression-picker-enter",
+                )
+            })
     }
     pub(super) fn sticker_draft(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(sticker) = &self.selected_sticker else {

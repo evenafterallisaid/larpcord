@@ -464,7 +464,7 @@ impl Larpcord {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
-                            this.dismiss_profile(window, cx);
+                            this.animate_panel_close(super::panels::Panel::Profile, window, cx);
                         }),
                     )
             })
@@ -826,6 +826,9 @@ impl Larpcord {
                                                                 }
                                                                 this.profile_inspector = false;
                                                                 this.profile_expanded = true;
+                                                                this.profile_anchor.get_or_insert(
+                                                                    window.mouse_position(),
+                                                                );
                                                                 window.focus(&this.modal_focus);
                                                                 cx.notify();
                                                             },
@@ -888,7 +891,11 @@ impl Larpcord {
                                             .rounded_full()
                                             .bg(rgba(0x111216aa))
                                             .on_click(cx.listener(|this, _, window, cx| {
-                                                this.dismiss_profile(window, cx)
+                                                this.animate_panel_close(
+                                                    super::panels::Panel::Profile,
+                                                    window,
+                                                    cx,
+                                                )
                                             })),
                                     ),
                             )
@@ -898,10 +905,23 @@ impl Larpcord {
                         s.child(self.expanded_profile_details(profile, top, cx))
                     }),
             )
-            .into_any_element()
+            .map(|element| {
+                self.panel_transition(
+                    element,
+                    super::panels::Panel::Profile,
+                    if expanded {
+                        "profile-expanded-enter"
+                    } else if inspector {
+                        "profile-inspector-enter"
+                    } else {
+                        "profile-preview-enter"
+                    },
+                )
+            })
     }
 
-    fn dismiss_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn dismiss_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.panel_exit = None;
         self.profile = None;
         self.profile_inspector = false;
         self.profile_expanded = false;
@@ -931,10 +951,24 @@ impl Larpcord {
             .border_1()
             .border_color(self.color(LINE))
             .child(
-                div()
-                    .text_size(px(16.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Profile details"),
+                row()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(16.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Profile details"),
+                    )
+                    .child(
+                        button("collapse-profile", "Back to preview")
+                            .text_size(px(11.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.panel_exit = None;
+                                this.profile_expanded = false;
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(self.profile_tabs(profile, cx))
             .when(

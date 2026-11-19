@@ -61,6 +61,66 @@
         "surface": 3221030, "border": 4536626, "text": 15987431,
         "muted": 12168602, "accent": 16169073
       }
+    },
+    {
+      "api_version": 1,
+      "id": "catppuccin-mocha",
+      "name": "Catppuccin Mocha",
+      "version": "1.0.0",
+      "description": "The dark Catppuccin palette with a mauve accent.",
+      "permissions": [
+        "theme"
+      ],
+      "theme": {
+        "background": 1973806,
+        "panel": 1118491,
+        "sidebar": 1579045,
+        "surface": 3224132,
+        "border": 4540250,
+        "text": 13489908,
+        "muted": 10923464,
+        "accent": 13346551
+      }
+    },
+    {
+      "api_version": 1,
+      "id": "nord",
+      "name": "Nord",
+      "version": "1.0.0",
+      "description": "Nord polar-night surfaces with a frost accent.",
+      "permissions": [
+        "theme"
+      ],
+      "theme": {
+        "background": 3028032,
+        "panel": 3028032,
+        "sidebar": 3883602,
+        "surface": 4410462,
+        "border": 5002858,
+        "text": 15527924,
+        "muted": 14212841,
+        "accent": 8962256
+      }
+    },
+    {
+      "api_version": 1,
+      "id": "tokyo-night",
+      "name": "Tokyo Night",
+      "version": "1.0.0",
+      "description": "Cool blue highlights on the Tokyo Night palette.",
+      "permissions": [
+        "theme"
+      ],
+      "theme": {
+        "background": 1710886,
+        "panel": 1447454,
+        "sidebar": 2040629,
+        "surface": 2698818,
+        "border": 4278376,
+        "text": 12634869,
+        "muted": 11121110,
+        "accent": 8037111
+      }
     }
   ]
 }

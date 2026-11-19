@@ -2,6 +2,7 @@
 
 mod attachments;
 mod auth;
+mod badges;
 mod components;
 mod content;
 mod cosmetics;

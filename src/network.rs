@@ -217,6 +217,7 @@ struct Api {
     token: Arc<Zeroizing<String>>,
     gate: Arc<Mutex<Instant>>,
     discovery_gate: Arc<Mutex<Instant>>,
+    badge_schema: Arc<tokio::sync::OnceCell<Option<u32>>>,
     effects: Arc<Mutex<EffectCache>>,
     session_id: Arc<std::sync::Mutex<Option<String>>>,
     reads: Arc<Mutex<ReadSync>>,
@@ -230,6 +231,7 @@ struct ReadSync {
 struct RequestFailure {
     message: String,
     retryable: bool,
+    status: Option<reqwest::StatusCode>,
 }
 
 impl RequestFailure {
@@ -237,6 +239,7 @@ impl RequestFailure {
         Self {
             message: message.into(),
             retryable: true,
+            status: None,
         }
     }
 }
@@ -245,6 +248,7 @@ impl From<String> for RequestFailure {
         Self {
             message,
             retryable: false,
+            status: None,
         }
     }
 }
@@ -309,6 +313,7 @@ impl Api {
             token: Arc::new(token),
             gate: Arc::new(Mutex::new(Instant::now())),
             discovery_gate: Arc::new(Mutex::new(Instant::now())),
+            badge_schema: Arc::new(tokio::sync::OnceCell::new()),
             effects: Arc::new(Mutex::new(EffectCache::default())),
             session_id: Arc::new(std::sync::Mutex::new(None)),
             reads: Arc::new(Mutex::new(ReadSync::default())),
@@ -626,6 +631,68 @@ impl Api {
         path: &str,
         body: Option<Value>,
     ) -> Result<T, RequestFailure> {
+        self.request_with_badge_schema(method, path, body, None)
+            .await
+    }
+
+    async fn current_badge_schema(&self) -> Option<u32> {
+        let mut response = self
+            .client
+            .get("https://discord.com/app")
+            .timeout(Duration::from_secs(4))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?;
+        if response.url().host_str() != Some("discord.com") {
+            return None;
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.ok()? {
+            if body.len() + chunk.len() > 256 * 1024 {
+                return None;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        crate::badges::build_from_app_shell(&body)
+    }
+
+    async fn badge_catalog(&self, account: &str) -> Result<Value, RequestFailure> {
+        let path = format!("/users/{account}/badges");
+        let build = self
+            .badge_schema
+            .get()
+            .copied()
+            .flatten()
+            .unwrap_or(crate::badges::BADGE_SCHEMA_BUILD);
+        let first = self
+            .request_with_badge_schema(Method::GET, &path, None, Some(build))
+            .await;
+        if first
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.status == Some(reqwest::StatusCode::NOT_FOUND))
+            && let Some(current) = *self
+                .badge_schema
+                .get_or_init(|| self.current_badge_schema())
+                .await
+            && current != build
+        {
+            return self
+                .request_with_badge_schema(Method::GET, &path, None, Some(current))
+                .await;
+        }
+        first
+    }
+
+    async fn request_with_badge_schema<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        badge_schema: Option<u32>,
+    ) -> Result<T, RequestFailure> {
         // one request lane observes retry-after and avoids a burst when switching channels.
         let mut next = self.gate.lock().await;
         for _ in 0..3 {
@@ -634,6 +701,12 @@ impl Api {
                 .client
                 .request(method.clone(), self.endpoint(path))
                 .header("Authorization", self.token.as_str());
+            if let Some(build) = badge_schema {
+                request = request.header(
+                    "X-Super-Properties",
+                    crate::badges::compatibility_header(build),
+                );
+            }
             if path.ends_with("/typing") {
                 request = request.timeout(Duration::from_secs(3));
             }
@@ -678,11 +751,13 @@ impl Api {
                     "Discord returned HTTP {}. Try again shortly.",
                     status.as_u16()
                 );
-                return Err(if status.is_server_error() || status.as_u16() == 408 {
+                let mut failure = if status.is_server_error() || status.as_u16() == 408 {
                     RequestFailure::retry(message)
                 } else {
                     message.into()
-                });
+                };
+                failure.status = Some(status);
+                return Err(failure);
             }
             let mut response = response;
             let mut bytes = Zeroizing::new(Vec::new());
@@ -933,7 +1008,7 @@ impl Backend {
                                         let badges=async {
                                             let client=client.discovery();
                                             let account = if own { "@me" } else { &id };
-                                            if let Ok(Ok(value))=tokio::time::timeout(Duration::from_secs(12),client.request::<Value>(Method::GET,&format!("/users/{account}/badges"),None)).await {
+                                            if let Ok(Ok(value))=tokio::time::timeout(Duration::from_secs(12),client.badge_catalog(account)).await {
                                                 let badges=profile_badges(&value);
                                                 emit(&events,generation,Event::ProfileBadges{id:id.clone(),guild:guild.clone(),request,badges}).await;
                                             }

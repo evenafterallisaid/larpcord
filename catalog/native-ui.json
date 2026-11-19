@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "api_version": 1,
+      "id": "member-count",
+      "name": "Member Count",
+      "version": "1.0.0",
+      "description": "Show the member and online counts above the member list. Native adaptation of Vencord's MemberCount.",
+      "permissions": ["native_presentation"],
+      "native_features": ["member_count"]
+    },
+    {
+      "api_version": 1,
+      "id": "show-usernames",
+      "name": "Show Me Your Name",
+      "version": "1.0.0",
+      "description": "See account usernames alongside display names in chat and member lists. Native adaptation of Vencord's ShowMeYourName.",
+      "permissions": ["native_presentation"],
+      "native_features": ["usernames"]
+    },
+    {
+      "api_version": 1,
+      "id": "account-panel-server-profile",
+      "name": "Account Panel Server Profile",
+      "version": "1.0.0",
+      "description": "Click your account avatar for your main profile. Right-click it for your current server profile. Adapted from the Equicord plugin.",
+      "permissions": ["native_presentation"],
+      "native_features": ["account_server_profile"]
+    },
+    {
+      "api_version": 1,
+      "id": "booster-count",
+      "name": "Booster Count",
+      "version": "1.0.0",
+      "description": "Show boosts and boost level when hovering a server icon after its metadata has loaded. Native adaptation of Illegalcord's BoosterCount.",
+      "permissions": ["native_presentation"],
+      "native_features": ["booster_count"]
+    }
+  ]
+}

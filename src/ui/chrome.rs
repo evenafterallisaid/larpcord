@@ -244,6 +244,9 @@ impl Larpcord {
             .into_any_element()
     }
     pub(super) fn account_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let server_shortcut = self
+            .modules
+            .feature(crate::modules::NativeFeature::AccountServerProfile);
         row()
             .relative()
             .h(px(52.))
@@ -262,9 +265,28 @@ impl Larpcord {
                     .id("self-avatar")
                     .cursor_pointer()
                     .child(self.presence_avatar(&self.store.user, 32.))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_profile(this.store.user.clone(), window, cx)
-                    })),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if server_shortcut {
+                            this.open_profile_in(this.store.user.clone(), None, window, cx);
+                        } else {
+                            this.open_profile(this.store.user.clone(), window, cx);
+                        }
+                    }))
+                    .when(server_shortcut, |s| {
+                        s.on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, _, window, cx| {
+                                if let Some(guild) = this.selected_guild.clone() {
+                                    this.open_profile_in(
+                                        this.store.user.clone(),
+                                        Some(guild),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }),
+                        )
+                    }),
             )
             .child(
                 column()

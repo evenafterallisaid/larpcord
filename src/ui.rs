@@ -10,6 +10,7 @@ mod gif;
 mod members;
 mod mentions;
 mod modules;
+mod panels;
 mod panes;
 mod picker;
 mod profile;
@@ -140,6 +141,7 @@ pub struct Larpcord {
     profile: Option<Profile>,
     profile_inspector: bool,
     profile_expanded: bool,
+    panel_exit: Option<panels::Exit>,
     profile_anchor: Option<Point<Pixels>>,
     profile_tab: u8,
     profile_guild: Option<String>,
@@ -619,6 +621,7 @@ impl Larpcord {
             profile: None,
             profile_inspector: false,
             profile_expanded: false,
+            panel_exit: None,
             profile_anchor: None,
             profile_tab: 0,
             profile_guild: None,
@@ -655,12 +658,14 @@ impl Larpcord {
         if self.settings_tab.is_none() {
             self.previous_focus = window.focused(cx);
         }
+        self.panel_exit = None;
         self.select_settings_tab(tab, cx);
         window.focus(&self.modal_focus);
         cx.notify();
     }
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.panel_exit = None;
         self.settings_tab = None;
         if let Some(focus) = self.previous_focus.take() {
             window.focus(&focus);
@@ -1354,13 +1359,22 @@ impl Larpcord {
                 badges,
             } => {
                 let enrich = |profile: &mut Profile| {
-                    for badge in &badges {
-                        if profile.badges.len() < 40
-                            && !profile.badges.iter().any(|b| b.same_as(badge))
+                    if badges.is_empty() {
+                        return;
+                    }
+                    let mut merged = badges.clone();
+                    for legacy in std::mem::take(&mut profile.badges) {
+                        if let Some(current) =
+                            merged.iter_mut().find(|badge| badge.same_as(&legacy))
                         {
-                            profile.badges.push(badge.clone());
+                            if current.fallback.is_none() {
+                                current.fallback = legacy.image();
+                            }
+                        } else if merged.len() < 40 {
+                            merged.push(legacy);
                         }
                     }
+                    profile.badges = merged;
                 };
                 if self.profile_request == request
                     && self.profile_guild == guild
@@ -2651,7 +2665,20 @@ impl Larpcord {
             return div().into_any_element();
         };
         let id = guild.id.clone();
-        let name = guild.name.clone();
+        let name = if self
+            .modules
+            .feature(crate::modules::NativeFeature::BoosterCount)
+            && let Some(boosts) = guild.premium_subscription_count
+        {
+            format!(
+                "{} · {} boosts · Level {}",
+                guild.name,
+                boosts,
+                guild.premium_tier.unwrap_or(0)
+            )
+        } else {
+            guild.name.clone()
+        };
         let selected = self.selected_guild.as_ref() == Some(&id);
         let pings = self.store.server_mentions(&id);
         let unread = self.store.server_unread(&id);
@@ -3216,6 +3243,25 @@ impl Larpcord {
     }
 
     fn open_profile(&mut self, user: User, window: &mut Window, cx: &mut Context<Self>) {
+        let guild = (!self.home_page)
+            .then(|| {
+                self.selected_channel
+                    .as_ref()
+                    .and_then(|id| self.store.channels.get(id))
+                    .and_then(|c| c.guild_id.clone())
+            })
+            .flatten();
+        self.open_profile_in(user, guild, window, cx);
+    }
+
+    fn open_profile_in(
+        &mut self,
+        user: User,
+        guild: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.panel_exit = None;
         self.profile_inspector = false;
         self.profile_expanded = false;
         self.profile_anchor = Some(window.mouse_position());
@@ -3226,14 +3272,7 @@ impl Larpcord {
         self.profile_error = None;
         self.profile_request += 1;
         self.profile_started = std::time::Instant::now();
-        self.profile_guild = if self.home_page {
-            None
-        } else {
-            self.selected_channel
-                .as_ref()
-                .and_then(|id| self.store.channels.get(id))
-                .and_then(|c| c.guild_id.clone())
-        };
+        self.profile_guild = guild;
         let key = (user.id.clone(), self.profile_guild.clone());
         let cached = self
             .profiles
@@ -3243,6 +3282,7 @@ impl Larpcord {
         let member = self
             .selected_channel
             .as_deref()
+            .filter(|_| self.profile_guild.is_some())
             .and_then(|id| {
                 self.store
                     .channel_messages(id)
@@ -3378,6 +3418,20 @@ impl Larpcord {
                             })),
                     )
                     .when(message.author.bot, |s| s.child(badge("APP")))
+                    .when(
+                        !message.author.username.is_empty()
+                            && message.author.username != message.name()
+                            && self
+                                .modules
+                                .feature(crate::modules::NativeFeature::Usernames),
+                        |s| {
+                            s.child(
+                                label(format!("@{}", message.author.username))
+                                    .truncate()
+                                    .text_size(px(11.)),
+                            )
+                        },
+                    )
                     .child(label(time.clone()).text_size(px(12.)))
                     .when(message.silent(), |s| {
                         s.child(
@@ -4643,7 +4697,13 @@ impl Larpcord {
                             .min_w_0()
                             .child(row().px_6().pt_4().justify_end().child(
                                 button("close-settings", "×").px_2().on_click(cx.listener(
-                                    |this, _, window, cx| this.close_settings(window, cx),
+                                    |this, _, window, cx| {
+                                        this.animate_panel_close(
+                                            panels::Panel::Settings,
+                                            window,
+                                            cx,
+                                        )
+                                    },
                                 )),
                             ))
                             .child(
@@ -4667,7 +4727,9 @@ impl Larpcord {
                             ),
                     ),
             )
-            .map(|element| fade_in(element, "settings-enter", self.motion()))
+            .map(|element| {
+                self.panel_transition(element, panels::Panel::Settings, "settings-enter")
+            })
     }
 }
 
@@ -4778,21 +4840,20 @@ impl Render for Larpcord {
                     }
                     cx.notify();
                 } else if this.emoji_open {
-                    this.close_picker();
-                    window.focus(&this.composer.focus_handle(cx));
-                    cx.notify();
+                    this.animate_panel_close(panels::Panel::Picker, window, cx);
                 } else if this.hide_mention_picker(window, cx) {
                     cx.notify();
                 } else if this.video.is_some() {
                     this.close_video(window, cx);
                 } else if this.settings_tab.is_some() {
-                    this.close_settings(window, cx);
-                } else if this.component_menu.take().is_some() || this.profile.take().is_some() {
-                    this.profile_inspector = false;
+                    this.animate_panel_close(panels::Panel::Settings, window, cx);
+                } else if this.component_menu.take().is_some() {
                     if let Some(focus) = this.previous_focus.take() {
                         window.focus(&focus);
                     }
                     cx.notify();
+                } else if this.profile.is_some() {
+                    this.animate_panel_close(panels::Panel::Profile, window, cx);
                 } else if this.login_open {
                     this.close_login(cx);
                 }
@@ -4834,7 +4895,7 @@ impl Render for Larpcord {
                         self.conversation(widths, cx)
                     }),
             )
-            .when(self.emoji_open, |s| s.child(self.emoji_panel(cx)))
+            .when(self.emoji_open, |s| s.child(self.emoji_panel(widths, cx)))
             .when(self.message_menu.is_some(), |s| {
                 s.child(self.message_menu_panel(cx))
             })
@@ -5025,6 +5086,74 @@ mod tests {
         let gif = cx.debug_bounds("autoplay-gif").unwrap();
         cx.simulate_click(gif.center(), Modifiers::default());
         cx.update(|_, cx| assert!(view.read(cx).video.is_none()));
+    }
+
+    #[gpui::test]
+    fn profile_previews_flip_to_fit_and_full_profiles_open_in_the_center(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        let viewport = cx.update(|window, _| window.viewport_size());
+        let anchor = point(viewport.width - px(50.), viewport.height - px(50.));
+        view.update(cx, |v, cx| {
+            v.settings.animations = false;
+            v.profile = Some(Profile {
+                user: v.store.user.clone(),
+                ..Default::default()
+            });
+            v.profile_anchor = Some(anchor);
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let compact = cx.debug_bounds("profile-card").unwrap();
+        assert!(compact.right() < anchor.x && compact.bottom() < viewport.height);
+        assert!(cx.debug_bounds("expanded-profile-details").is_none());
+        view.update(cx, |v, cx| {
+            v.profile_expanded = true;
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let card = cx.debug_bounds("profile-card").unwrap();
+        let details = cx.debug_bounds("expanded-profile-details").unwrap();
+        assert!(((card.left() + details.right()) / 2. - viewport.width / 2.).abs() < px(1.));
+        cx.simulate_click(point(px(12.), px(64.)), Modifiers::default());
+        cx.update(|_, cx| assert!(view.read(cx).profile.is_none()));
+    }
+
+    #[gpui::test]
+    fn reply_mention_choice_defaults_off_and_carries_into_the_next_reply(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        let viewport = cx.update(|window, _| window.viewport_size());
+        let msg = Message {
+            id: "321".into(),
+            channel_id: "campfire".into(),
+            content: "Example reply".into(),
+            author: User {
+                id: "42".into(),
+                username: "Sam".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            !serde_json::from_str::<crate::settings::Settings>("{}")
+                .unwrap()
+                .reply_mentions
+        );
+        cx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                v.reply_to_message(&msg, window, cx);
+                assert!(!v.reply_to.as_ref().unwrap().ping);
+            })
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let toggle = cx.debug_bounds("reply-mentions-toggle").unwrap();
+        cx.simulate_click(toggle.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                assert!(v.settings.reply_mentions);
+                v.reply_to_message(&msg, window, cx);
+                assert!(v.reply_to.as_ref().unwrap().ping);
+            })
+        });
     }
 
     #[gpui::test]

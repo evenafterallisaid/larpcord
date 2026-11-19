@@ -137,6 +137,8 @@ impl ProfileBadge {
     pub fn same_as(&self, other: &Self) -> bool {
         (!self.id.is_empty() && self.id == other.id)
             || (!self.icon.is_empty() && self.icon == other.icon)
+            || crate::badges::catalog_number(&self.id)
+                .is_some_and(|id| crate::badges::catalog_number(&other.id) == Some(id))
     }
     pub fn image(&self) -> Option<String> {
         if crate::media::cdn_url(&self.icon) && self.icon.len() <= 2048 {

@@ -22,6 +22,7 @@ pub enum Permission {
     MessageMetadata,
     MessageContent,
     Theme,
+    NativePresentation,
 }
 impl Permission {
     pub fn description(self) -> &'static str {
@@ -29,8 +30,20 @@ impl Permission {
             Self::MessageMetadata => "Read message kind and attachment presence",
             Self::MessageContent => "Read visible message text (up to 4 KiB)",
             Self::Theme => "Change client theme colors",
+            Self::NativePresentation => {
+                "Show extra account, server or message details in the client"
+            }
         }
     }
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeFeature {
+    MemberCount,
+    Usernames,
+    AccountServerProfile,
+    BoosterCount,
 }
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -78,6 +91,8 @@ struct Manifest {
     permissions: Vec<Permission>,
     #[serde(default)]
     message_decorators: Vec<Decorator>,
+    #[serde(default)]
+    native_features: Vec<NativeFeature>,
     theme: Option<ThemePatch>,
 }
 impl Manifest {
@@ -102,8 +117,9 @@ impl Manifest {
             || !text(&m.name, 64)
             || !text(&m.version, 32)
             || !text(&m.description, 320)
-            || m.permissions.len() > 3
+            || m.permissions.len() > 4
             || m.message_decorators.len() > 16
+            || m.native_features.len() > 4
         {
             return Err("Invalid module identity or limits".into());
         }
@@ -125,6 +141,11 @@ impl Manifest {
                 || !theme.apply(Default::default()).valid())
         {
             return Err("Theme hook has invalid colors or lacks its permission".into());
+        }
+        if !m.native_features.is_empty()
+            && (!m.permissions.contains(&Permission::NativePresentation) || m.theme.is_some())
+        {
+            return Err("Native features require their own presentation permission".into());
         }
         Ok(m)
     }
@@ -179,6 +200,11 @@ pub struct Label<'a> {
     pub module: &'a str,
 }
 impl Registry {
+    pub fn feature(&self, feature: NativeFeature) -> bool {
+        self.modules
+            .iter()
+            .any(|module| module.enabled && module.manifest.native_features.contains(&feature))
+    }
     pub fn load(root: Option<&Path>, grants: &[Grant]) -> Self {
         let mut r = Self {
             modules: vec![],
@@ -410,7 +436,23 @@ impl Catalog {
         Ok(catalog)
     }
     pub fn bundled() -> Self {
-        Self::parse(include_bytes!("../catalog/index.json")).expect("bundled catalog must be valid")
+        Self::parse(include_bytes!("../catalog/index.json"))
+            .expect("bundled catalog must be valid")
+            .with_native_features()
+    }
+
+    fn with_native_features(mut self) -> Self {
+        let built_in = Self::parse(include_bytes!("../catalog/native-ui.json"))
+            .expect("native feature catalog must be valid");
+        self.entries.retain(|entry| {
+            !built_in
+                .entries
+                .iter()
+                .any(|native| native.id() == entry.id())
+        });
+        self.entries.truncate(64 - built_in.entries.len());
+        self.entries.extend(built_in.entries);
+        self
     }
     pub async fn refresh() -> Result<Self, String> {
         let client = reqwest::Client::builder()
@@ -432,7 +474,7 @@ impl Catalog {
             }
             bytes.extend_from_slice(&chunk);
         }
-        Self::parse(&bytes)
+        Self::parse(&bytes).map(Self::with_native_features)
     }
 }
 
@@ -459,6 +501,28 @@ pub fn sanitize_grants(grants: &mut Vec<Grant>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_features_wait_for_an_explicit_grant() {
+        let catalog = Catalog::bundled();
+        let entry = catalog
+            .entries
+            .iter()
+            .find(|entry| entry.id() == "member-count")
+            .unwrap();
+        let mut registry = Registry::load(None, &[]);
+        let mut grants = Vec::new();
+        registry.install(entry, &grants).unwrap();
+        assert!(!registry.feature(NativeFeature::MemberCount));
+        registry.set_enabled("member-count", true, &mut grants);
+        assert!(registry.feature(NativeFeature::MemberCount));
+        assert!(
+            Registry::load_with_catalog(None, &grants, std::slice::from_ref(entry))
+                .feature(NativeFeature::MemberCount)
+        );
+        registry.set_enabled("member-count", false, &mut grants);
+        assert!(!registry.feature(NativeFeature::MemberCount));
+    }
     #[test]
     fn catalog_update_requires_a_new_grant_and_cannot_replace_local_modules() {
         let mut entries = Catalog::bundled().entries;
@@ -467,7 +531,7 @@ mod tests {
                 .iter()
                 .filter(|entry| entry.module().unwrap().is_theme())
                 .count(),
-            3
+            6
         );
         let entry = entries.remove(0);
         let mut registry = Registry::load(None, &[]);
