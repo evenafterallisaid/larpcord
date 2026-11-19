@@ -497,7 +497,9 @@ impl Larpcord {
                 content: gif.url.clone(),
                 nonce: nonce.clone(),
                 reply,
+                ping_reply: self.reply_to.as_ref().is_some_and(|r| r.ping),
                 sticker: None,
+                files: Vec::new(),
             }) {
                 self.error = Some(error);
                 cx.notify();

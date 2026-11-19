@@ -26,6 +26,28 @@ impl Presence {
 #[derive(Default)]
 pub struct Presences(HashMap<String, Presence>);
 impl Presences {
+    pub fn sessions(&mut self, id: &str, value: &Value) {
+        if id.is_empty() {
+            return;
+        }
+        let Some(sessions) = value.as_array() else {
+            return;
+        };
+        let mut sessions = sessions
+            .iter()
+            .take(40)
+            .filter(|session| session["status"].is_string());
+        if let Some(mut presence) = sessions
+            .clone()
+            .find(|s| s["session_id"] == "all")
+            .or_else(|| sessions.next())
+            .cloned()
+        {
+            presence["user_id"] = id.into();
+            self.update(&presence);
+        }
+    }
+
     pub fn get(&self, id: &str) -> Option<&Presence> {
         self.0.get(id)
     }

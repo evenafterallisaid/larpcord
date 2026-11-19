@@ -40,17 +40,20 @@ impl NameStyle {
             position
         };
         let color = self.color_at(position, fallback);
-        if matches!(self.effect_id, Some(3 | 6 | 8))
+        if self.effect_id == Some(3) {
+            let wave = (phase * std::f32::consts::TAU - position * 3.).sin();
+            let core = 0.52 + 0.22 * wave;
+            [16, 8, 0].into_iter().fold(0, |out, shift| {
+                let channel = ((color >> shift) & 255) as f32;
+                out | (((channel + (255. - channel) * core).round() as u32) << shift)
+            })
+        } else if matches!(self.effect_id, Some(6 | 8))
             || matches!(self.effect_id, Some(2 | 7)) && self.colors.len() < 2
         {
             let shine = (phase * std::f32::consts::TAU + position * 2.)
                 .sin()
                 .max(0.)
-                * if self.effect_id == Some(3) {
-                    0.28
-                } else {
-                    0.19
-                };
+                * 0.27;
             [16, 8, 0].into_iter().fold(0, |out, shift| {
                 let channel = ((color >> shift) & 255) as f32;
                 out | (((channel + (255. - channel) * shine).round() as u32) << shift)

@@ -1,5 +1,8 @@
 use super::*;
 
+pub(super) const INSPECTOR_WIDTH: f32 = 292.;
+const PREVIEW_WIDTH: f32 = 360.;
+
 impl Larpcord {
     fn profile_tabs(&self, profile: &Profile, cx: &mut Context<Self>) -> AnyElement {
         if profile.user.id == self.store.user.id {
@@ -251,13 +254,15 @@ impl Larpcord {
 
     pub(super) fn profile_panel(&self, profile: &Profile, cx: &mut Context<Self>) -> AnyElement {
         let inspector = self.profile_inspector;
+        let expanded = self.profile_expanded && !inspector;
         let frame = profile.frame_asset.as_ref().filter(|f| f.valid());
         let card_width = if inspector {
-            frame.map_or(296., |f| {
-                296. * f.inner_width / (f.inner_width + 2. * f.overflow_horizontal)
+            let inner = INSPECTOR_WIDTH - 24.;
+            frame.map_or(inner, |f| {
+                inner * f.inner_width / (f.inner_width + 2. * f.overflow_horizontal)
             })
         } else {
-            440.
+            PREVIEW_WIDTH
         };
         let (frame_top, frame_bottom) = frame.map_or((0., 0.), |f| {
             (
@@ -424,7 +429,7 @@ impl Larpcord {
                     .justify_center()
             })
             .when(inspector, |s| {
-                s.w(px(320.))
+                s.w(px(INSPECTOR_WIDTH))
                     .debug_selector(|| "profile-side-column".into())
                     .h_full()
                     .flex_shrink_0()
@@ -438,87 +443,94 @@ impl Larpcord {
                     .border_color(self.color(LINE))
             })
             .child(
-                column()
-                    .relative()
-                    .w(px(card_width))
-                    .h(px(600.))
+                row()
+                    .items_start()
+                    .gap_6()
+                    .h(px(if expanded { 640. } else { 560. }))
                     .when(inspector, |s| s.h_full())
-                    .min_h_0()
                     .max_h(relative(if inspector { 1. } else { 0.9 }))
-                    .children(back)
                     .child(
                         column()
                             .relative()
-                            .w_full()
-                            .debug_selector(|| "profile-card".into())
+                            .w(px(card_width))
                             .h_full()
                             .min_h_0()
-                            .rounded_xl()
-                            .overflow_hidden()
-                            .bg(linear_gradient(
-                                180.,
-                                linear_color_stop(top, 0.),
-                                linear_color_stop(bottom, 1.),
-                            ))
-                            .shadow_lg()
-                            .child(
-                                row()
-                                    .relative()
-                                    .debug_selector(|| "profile-banner".into())
-                                    .h(px(if inspector { 108. } else { 132. }))
-                                    .flex_shrink_0()
-                                    .rounded_t_xl()
-                                    .overflow_hidden()
-                                    .px_4()
-                                    .items_start()
-                                    .pt_3()
-                                    .justify_end()
-                                    .bg(rgb(profile.accent()))
-                                    .when_some(banner, |s, image| {
-                                        s.child(
-                                            div()
-                                                .absolute()
-                                                .inset_0()
-                                                .overflow_hidden()
-                                                .child(image),
-                                        )
-                                    }),
-                            )
+                            .children(back)
                             .child(
                                 column()
-                                    .id("profile-content")
-                                    .flex_1()
+                                    .relative()
+                                    .w_full()
+                                    .debug_selector(|| "profile-card".into())
+                                    .h_full()
                                     .min_h_0()
-                                    .p(px(if inspector { 16. } else { 20. }))
-                                    .pt(px(if inspector { 52. } else { 64. }))
-                                    .gap_4()
+                                    .rounded_xl()
+                                    .overflow_hidden()
+                                    .bg(linear_gradient(
+                                        180.,
+                                        linear_color_stop(top, 0.),
+                                        linear_color_stop(bottom, 1.),
+                                    ))
+                                    .shadow_lg()
+                                    .child(
+                                        row()
+                                            .relative()
+                                            .debug_selector(|| "profile-banner".into())
+                                            .h(px(if inspector { 108. } else { 132. }))
+                                            .flex_shrink_0()
+                                            .rounded_t_xl()
+                                            .overflow_hidden()
+                                            .px_4()
+                                            .items_start()
+                                            .pt_3()
+                                            .justify_end()
+                                            .bg(rgb(profile.accent()))
+                                            .when_some(banner, |s, image| {
+                                                s.child(
+                                                    div()
+                                                        .absolute()
+                                                        .inset_0()
+                                                        .overflow_hidden()
+                                                        .child(image),
+                                                )
+                                            }),
+                                    )
                                     .child(
                                         column()
-                                            .debug_selector(|| "profile-identity".into())
-                                            .flex_shrink_0()
-                                            .gap_1()
+                                            .id("profile-content")
+                                            .flex_1()
+                                            .min_h_0()
+                                            .p(px(if inspector { 16. } else { 20. }))
+                                            .pt(px(if inspector { 52. } else { 64. }))
+                                            .gap_4()
                                             .child(
-                                                row()
-                                                    .w_full()
-                                                    .h(px(36.))
-                                                    .gap_2()
+                                                column()
+                                                    .debug_selector(|| "profile-identity".into())
+                                                    .flex_shrink_0()
+                                                    .gap_1()
                                                     .child(
-                                                        div()
-                                                            .min_w_0()
-                                                            .flex_1()
-                                                            .truncate()
-                                                            .text_size(px(if inspector {
-                                                                22.
-                                                            } else {
-                                                                24.
-                                                            }))
-                                                            .font_weight(FontWeight::BOLD)
-                                                            .child(self.display_name(
-                                                                name, user, member, cx,
-                                                            )),
-                                                    )
-                                                    .when(user.id != self.store.user.id, |s| {
-                                                        s.child(
+                                                        row()
+                                                            .w_full()
+                                                            .h(px(36.))
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .min_w_0()
+                                                                    .flex_1()
+                                                                    .truncate()
+                                                                    .text_size(px(if inspector {
+                                                                        22.
+                                                                    } else {
+                                                                        24.
+                                                                    }))
+                                                                    .font_weight(FontWeight::BOLD)
+                                                                    .child(self.display_name(
+                                                                        name, user, member, cx,
+                                                                    )),
+                                                            )
+                                                            .when(
+                                                                user.id != self.store.user.id,
+                                                                |s| {
+                                                                    s.child(
                                                             toolbar_button(
                                                                 "profile-message",
                                                                 "message",
@@ -538,79 +550,96 @@ impl Larpcord {
                                                                 },
                                                             )),
                                                         )
-                                                    }),
-                                            )
-                                            .child(
-                                                row()
-                                                    .w_full()
-                                                    .h(px(18.))
-                                                    .gap_2()
-                                                    .overflow_hidden()
-                                                    .child(
-                                                        label(format!("@{}", user.username))
-                                                            .truncate(),
+                                                                },
+                                                            ),
                                                     )
-                                                    .when_some(
-                                                        profile
-                                                            .pronouns()
-                                                            .filter(|s| !s.is_empty())
-                                                            .map(str::to_string),
-                                                        |s, pronouns| {
-                                                            s.child(label("·"))
-                                                                .child(label(pronouns).truncate())
-                                                        },
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .h(px(16.))
-                                                    .w_full()
-                                                    .overflow_hidden()
-                                                    .when_some(
-                                                        presence.and_then(|p| p.activity.as_ref()),
-                                                        |s, activity| {
-                                                            s.child(
-                                                                label(activity.clone())
-                                                                    .text_size(px(12.))
-                                                                    .truncate(),
+                                                    .child(
+                                                        row()
+                                                            .w_full()
+                                                            .h(px(18.))
+                                                            .gap_2()
+                                                            .overflow_hidden()
+                                                            .child(
+                                                                label(format!(
+                                                                    "@{}",
+                                                                    user.username
+                                                                ))
+                                                                .truncate(),
                                                             )
-                                                        },
-                                                    ),
-                                            ),
-                                    )
-                                    .child(self.profile_badge_strip(profile))
-                                    .child(self.profile_tabs(profile, cx))
-                                    .child(
-                                        column()
-                                            .id("profile-tab-body")
-                                            .debug_selector(|| "profile-tab-body".into())
-                                            .w_full()
-                                            .flex_1()
-                                            .min_h_0()
-                                            .overflow_hidden()
-                                            .when(
-                                                self.profile_tab != 0
-                                                    && user.id != self.store.user.id,
-                                                |s| s.child(self.profile_mutuals(profile, cx)),
-                                            )
-                                            .when(
-                                                self.profile_tab == 0
-                                                    || user.id == self.store.user.id,
-                                                |s| {
-                                                    s.child(
-                                                        column()
-                                                            .id("profile-about-scroll")
-                                                            .flex_1()
-                                                            .min_h_0()
-                                                            .overflow_y_scroll()
-                                                            .gap_4()
                                                             .when_some(
                                                                 profile
-                                                                    .bio()
+                                                                    .pronouns()
                                                                     .filter(|s| !s.is_empty())
                                                                     .map(str::to_string),
-                                                                |s, bio| {
+                                                                |s, pronouns| {
+                                                                    s.child(label("·")).child(
+                                                                        label(pronouns).truncate(),
+                                                                    )
+                                                                },
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .h(px(16.))
+                                                            .w_full()
+                                                            .overflow_hidden()
+                                                            .when_some(
+                                                                presence.and_then(|p| {
+                                                                    p.activity.as_ref()
+                                                                }),
+                                                                |s, activity| {
                                                                     s.child(
+                                                                        label(activity.clone())
+                                                                            .text_size(px(12.))
+                                                                            .truncate(),
+                                                                    )
+                                                                },
+                                                            ),
+                                                    ),
+                                            )
+                                            .child(self.profile_badge_strip(profile))
+                                            .when(!expanded, |s| {
+                                                s.child(self.profile_tabs(profile, cx))
+                                            })
+                                            .child(
+                                                column()
+                                                    .id("profile-tab-body")
+                                                    .debug_selector(|| "profile-tab-body".into())
+                                                    .w_full()
+                                                    .flex_1()
+                                                    .min_h_0()
+                                                    .overflow_hidden()
+                                                    .when(
+                                                        !expanded
+                                                            && self.profile_tab != 0
+                                                            && user.id != self.store.user.id,
+                                                        |s| {
+                                                            s.child(
+                                                                self.profile_mutuals(profile, cx),
+                                                            )
+                                                        },
+                                                    )
+                                                    .when(
+                                                        expanded
+                                                            || self.profile_tab == 0
+                                                            || user.id == self.store.user.id,
+                                                        |s| {
+                                                            s.child(
+                                                                column()
+                                                                    .id("profile-about-scroll")
+                                                                    .flex_1()
+                                                                    .min_h_0()
+                                                                    .overflow_y_scroll()
+                                                                    .gap_4()
+                                                                    .when_some(
+                                                                        profile
+                                                                            .bio()
+                                                                            .filter(|s| {
+                                                                                !s.is_empty()
+                                                                            })
+                                                                            .map(str::to_string),
+                                                                        |s, bio| {
+                                                                            s.child(
                                                             column()
                                                                 .p_3()
                                                                 .rounded_lg()
@@ -625,10 +654,10 @@ impl Larpcord {
                                                                 )
                                                                 .child(self.rich_text(&bio)),
                                                         )
-                                                                },
-                                                            )
-                                                            .when(!roles.is_empty(), |s| {
-                                                                s.child(
+                                                                        },
+                                                                    )
+                                                                    .when(!roles.is_empty(), |s| {
+                                                                        s.child(
                                                         column()
                                                             .p_3()
                                                             .rounded_lg()
@@ -672,9 +701,11 @@ impl Larpcord {
                                                                 ),
                                                             ),
                                                     )
-                                                            })
-                                                            .when_some(created, |s, date| {
-                                                                s.child(
+                                                                    })
+                                                                    .when_some(
+                                                                        created,
+                                                                        |s, date| {
+                                                                            s.child(
                                                         column()
                                                             .gap_1()
                                                             .child(
@@ -684,9 +715,12 @@ impl Larpcord {
                                                             )
                                                             .child(label(date)),
                                                     )
-                                                            })
-                                                            .when_some(joined, |s, date| {
-                                                                s.child(
+                                                                        },
+                                                                    )
+                                                                    .when_some(
+                                                                        joined,
+                                                                        |s, date| {
+                                                                            s.child(
                                                         column()
                                                             .gap_1()
                                                             .child(
@@ -696,89 +730,184 @@ impl Larpcord {
                                                             )
                                                             .child(label(date)),
                                                     )
-                                                            }),
-                                                    )
-                                                },
+                                                                        },
+                                                                    ),
+                                                            )
+                                                        },
+                                                    ),
+                                            )
+                                            .when_some(effect_title, |s, title| {
+                                                s.child(label(title).text_size(px(10.)))
+                                            })
+                                            .when_some(self.profile_error.clone(), |s, error| {
+                                                s.child(label(error).text_color(rgb(0xf0b7c3)))
+                                            })
+                                            .when(user.id == self.store.user.id, |s| {
+                                                s.child(
+                                                    button("edit-own-profile", "Edit profile")
+                                                        .w_full()
+                                                        .justify_center()
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.profile = None;
+                                                                this.profile_inspector = false;
+                                                                this.profile_expanded = false;
+                                                                if let Some(focus) =
+                                                                    this.previous_focus.take()
+                                                                {
+                                                                    window.focus(&focus);
+                                                                }
+                                                                this.open_settings(
+                                                                    super::profile_edit::TAB,
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
+                                                )
+                                            })
+                                            .when(!expanded, |s| {
+                                                s.child(
+                                                    button("expand-profile", "View full profile")
+                                                        .w_full()
+                                                        .justify_center()
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                if this.profile_inspector {
+                                                                    this.previous_focus =
+                                                                        window.focused(cx);
+                                                                }
+                                                                this.profile_inspector = false;
+                                                                this.profile_expanded = true;
+                                                                window.focus(&this.modal_focus);
+                                                                cx.notify();
+                                                            },
+                                                        )),
+                                                )
+                                            }),
+                                    )
+                                    .children(effect_layers)
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .debug_selector(|| "profile-avatar".into())
+                                            .top(px(if inspector { 68. } else { 84. }))
+                                            .left(px(if inspector { 16. } else { 20. }))
+                                            .size(px(if inspector { 80. } else { 96. }))
+                                            .child(
+                                                div().absolute().inset_0().rounded_full().bg(top),
+                                            )
+                                            .child(
+                                                div().absolute().top(px(4.)).left(px(4.)).child(
+                                                    self.avatar_with_status(
+                                                        user,
+                                                        member,
+                                                        self.profile_guild.as_deref(),
+                                                        if inspector { 72. } else { 88. },
+                                                        true,
+                                                        presence.map(|p| {
+                                                            (
+                                                                p.status.as_str(),
+                                                                u32::from(top) >> 8,
+                                                                if inspector { 16. } else { 20. },
+                                                            )
+                                                        }),
+                                                    ),
+                                                ),
                                             ),
                                     )
-                                    .when_some(effect_title, |s, title| {
-                                        s.child(label(title).text_size(px(10.)))
-                                    })
-                                    .when_some(self.profile_error.clone(), |s, error| {
-                                        s.child(label(error).text_color(rgb(0xf0b7c3)))
-                                    })
-                                    .when(inspector, |s| {
-                                        s.child(
-                                            button("expand-profile", "View full profile")
-                                                .w_full()
-                                                .justify_center()
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.profile_inspector = false;
-                                                    this.previous_focus = window.focused(cx);
-                                                    window.focus(&this.modal_focus);
-                                                    cx.notify();
-                                                })),
-                                        )
-                                    }),
+                                    .when_some(
+                                        presence.and_then(|p| p.custom.as_ref()),
+                                        |s, status| s.child(self.profile_status(status, inspector)),
+                                    )
+                                    .child(
+                                        toolbar_button("copy-user-id", "copy", "Copy user ID")
+                                            .absolute()
+                                            .top(px(12.))
+                                            .right(px(48.))
+                                            .rounded_full()
+                                            .bg(rgba(0x111216aa))
+                                            .on_click(move |_, _, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    id.clone(),
+                                                ))
+                                            }),
+                                    )
+                                    .child(
+                                        toolbar_button("close-profile", "close", "Close profile")
+                                            .absolute()
+                                            .top(px(12.))
+                                            .right(px(12.))
+                                            .rounded_full()
+                                            .bg(rgba(0x111216aa))
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.profile = None;
+                                                this.profile_inspector = false;
+                                                if let Some(focus) = this.previous_focus.take() {
+                                                    window.focus(&focus);
+                                                }
+                                                cx.notify();
+                                            })),
+                                    ),
                             )
-                            .children(effect_layers)
+                            .children(front),
+                    )
+                    .when(expanded, |s| {
+                        s.child(self.expanded_profile_details(profile, top, cx))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn expanded_profile_details(
+        &self,
+        profile: &Profile,
+        color: Rgba,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let presence = self.store.presences.get(&profile.user.id);
+        column()
+            .debug_selector(|| "expanded-profile-details".into())
+            .w(px(340.))
+            .h_full()
+            .min_h_0()
+            .p_4()
+            .gap_3()
+            .rounded_xl()
+            .bg(color)
+            .border_1()
+            .border_color(self.color(LINE))
+            .child(
+                div()
+                    .text_size(px(16.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Profile details"),
+            )
+            .child(self.profile_tabs(profile, cx))
+            .when(
+                self.profile_tab == 0 || profile.user.id == self.store.user.id,
+                |s| {
+                    s.child(
+                        column()
+                            .p_3()
+                            .gap_2()
+                            .rounded_lg()
+                            .bg(rgba(0xffffff09))
+                            .child(label("CURRENT ACTIVITY").font_weight(FontWeight::SEMIBOLD))
                             .child(
-                                div()
-                                    .absolute()
-                                    .debug_selector(|| "profile-avatar".into())
-                                    .top(px(if inspector { 68. } else { 84. }))
-                                    .left(px(if inspector { 16. } else { 20. }))
-                                    .size(px(if inspector { 80. } else { 96. }))
-                                    .rounded_full()
-                                    .border_4()
-                                    .border_color(top)
-                                    .child(self.avatar_with_status(
-                                        user,
-                                        member,
-                                        self.profile_guild.as_deref(),
-                                        if inspector { 72. } else { 88. },
-                                        true,
-                                        presence.map(|p| {
-                                            (
-                                                p.status.as_str(),
-                                                u32::from(top) >> 8,
-                                                if inspector { 16. } else { 20. },
-                                            )
-                                        }),
-                                    )),
-                            )
-                            .when_some(presence.and_then(|p| p.custom.as_ref()), |s, status| {
-                                s.child(self.profile_status(status, inspector))
-                            })
-                            .child(
-                                toolbar_button("copy-user-id", "copy", "Copy user ID")
-                                    .absolute()
-                                    .top(px(12.))
-                                    .right(px(48.))
-                                    .rounded_full()
-                                    .bg(rgba(0x111216aa))
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))
-                                    }),
-                            )
-                            .child(
-                                toolbar_button("close-profile", "close", "Close profile")
-                                    .absolute()
-                                    .top(px(12.))
-                                    .right(px(12.))
-                                    .rounded_full()
-                                    .bg(rgba(0x111216aa))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.profile = None;
-                                        this.profile_inspector = false;
-                                        if let Some(focus) = this.previous_focus.take() {
-                                            window.focus(&focus);
-                                        }
-                                        cx.notify();
-                                    })),
+                                div().child(
+                                    presence
+                                        .and_then(|p| p.activity.as_ref())
+                                        .cloned()
+                                        .unwrap_or_else(|| "No current activity".into()),
+                                ),
                             ),
                     )
-                    .children(front),
+                },
+            )
+            .when(
+                self.profile_tab != 0 && profile.user.id != self.store.user.id,
+                |s| s.child(self.profile_mutuals(profile, cx)),
             )
             .into_any_element()
     }
@@ -788,18 +917,22 @@ impl Larpcord {
         status: &crate::presence::CustomStatus,
         inspector: bool,
     ) -> AnyElement {
+        let emoji_only = status.text.is_none();
+        let emoji_size = if emoji_only { 32. } else { 16. };
         let emoji = status.emoji_id.as_ref().and_then(|id| {
             self.media.get(&format!(
-                "https://cdn.discordapp.com/emojis/{id}.webp?size=32"
+                "https://cdn.discordapp.com/emojis/{id}.webp?size=64&quality=lossless"
             ))
         });
         let surface = self.color(SURFACE);
         let bubble = row()
             .absolute()
             .left(px(if inspector { 108. } else { 130. }))
-            .right(px(16.))
-            .top(px(if inspector { 72. } else { 94. }))
-            .h(px(28.))
+            .when(emoji_only, |s| s.size(px(46.)).justify_center())
+            .when(!emoji_only, |s| {
+                s.max_w(px(if inspector { 132. } else { 200. })).h(px(30.))
+            })
+            .top(px(if inspector { 94. } else { 102. }))
             .gap_1()
             .px_2()
             .rounded_lg()
@@ -826,11 +959,16 @@ impl Larpcord {
                     .bg(surface),
             )
             .when_some(emoji, |s, img_data| {
-                s.child(img(img_data).size(px(16.)).flex_shrink_0())
+                s.child(
+                    img(img_data)
+                        .size(px(emoji_size))
+                        .object_fit(ObjectFit::Contain)
+                        .flex_shrink_0(),
+                )
             })
             .when(status.emoji_id.is_none(), |s| {
                 s.when_some(status.emoji.as_ref(), |s, emoji| {
-                    s.child(label(emoji.clone()))
+                    s.child(label(emoji.clone()).text_size(px(emoji_size)))
                 })
             })
             .when_some(status.text.as_ref(), |s, text| {
@@ -892,9 +1030,12 @@ impl Larpcord {
         row()
             .id("profile-badges")
             .w_full()
-            .h(px(24.))
+            .h(px(28.))
             .flex_shrink_0()
             .gap_1()
+            .px_1()
+            .rounded_md()
+            .bg(rgba(0xffffff0a))
             .overflow_x_scroll()
             .when(profile.user.bot, |s| s.child(badge("APP")))
             .children(badges)

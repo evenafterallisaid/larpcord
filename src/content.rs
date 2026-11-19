@@ -4,6 +4,79 @@ pub enum Part<'a> {
     Emoji { name: &'a str, id: &'a str },
 }
 
+pub fn silent_content(text: &str) -> (&str, bool) {
+    if let Some(rest) = text.strip_prefix("@silent")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        (rest.trim_start(), true)
+    } else {
+        (text, false)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mention<'a> {
+    User(&'a str),
+    Role(&'a str),
+    Channel(&'a str),
+    Everyone,
+    Here,
+}
+
+pub fn mention_ranges(text: &str) -> Vec<(std::ops::Range<usize>, Mention<'_>)> {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut result = Vec::new();
+    let mut end_of_last = 0;
+    for (start, ch) in text.match_indices(['<', '@']) {
+        if start < end_of_last
+            || text[..start]
+                .bytes()
+                .rev()
+                .take_while(|b| *b == b'\\')
+                .count()
+                % 2
+                != 0
+        {
+            continue;
+        }
+        let tail = &text[start..];
+        let parsed = if ch == "<" {
+            tail.find('>')
+                .filter(|end| (3..=23).contains(end))
+                .and_then(|end| {
+                    let value = &tail[1..end];
+                    let (id, mention) = if let Some(id) = value.strip_prefix("@&") {
+                        (id, Mention::Role(id))
+                    } else if let Some(id) =
+                        value.strip_prefix("@!").or_else(|| value.strip_prefix('@'))
+                    {
+                        (id, Mention::User(id))
+                    } else {
+                        let id = value.strip_prefix('#')?;
+                        (id, Mention::Channel(id))
+                    };
+                    (!id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit()))
+                        .then_some((end + 1, mention))
+                })
+        } else if text[..start].chars().next_back().is_some_and(word) {
+            None
+        } else {
+            [("@everyone", Mention::Everyone), ("@here", Mention::Here)]
+                .into_iter()
+                .find_map(|(prefix, mention)| {
+                    tail.strip_prefix(prefix)
+                        .filter(|rest| !rest.starts_with(word))
+                        .map(|_| (prefix.len(), mention))
+                })
+        };
+        if let Some((length, mention)) = parsed {
+            end_of_last = start + length;
+            result.push((start..end_of_last, mention));
+        }
+    }
+    result
+}
+
 pub fn parts(text: &str) -> Vec<Part<'_>> {
     let mut result = Vec::new();
     let mut start = 0;
@@ -181,6 +254,28 @@ pub fn emoji_only(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifies_mention_tokens_without_mistaking_an_email_or_word_for_a_ping() {
+        let source = "<@42> <@!109> <@&12> <#123> @here @everyone hola@here @everyone_else \\<@5>";
+        let tokens = mention_ranges(source)
+            .into_iter()
+            .map(|(range, kind)| (&source[range], kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tokens,
+            vec![
+                ("<@42>", Mention::User("42")),
+                ("<@!109>", Mention::User("109")),
+                ("<@&12>", Mention::Role("12")),
+                ("<#123>", Mention::Channel("123")),
+                ("@here", Mention::Here),
+                ("@everyone", Mention::Everyone)
+            ]
+        );
+        assert_eq!(silent_content("@silent\t<@42>"), ("<@42>", true));
+        assert_eq!(silent_content("@silently test"), ("@silently test", false));
+    }
 
     #[test]
     fn standalone_emoji_get_room_without_enlarging_ordinary_messages() {

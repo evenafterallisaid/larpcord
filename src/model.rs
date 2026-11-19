@@ -29,6 +29,13 @@ pub struct User {
     pub avatar_decoration_data: Option<AvatarDecoration>,
     pub display_name_styles: Option<crate::cosmetics::NameStyle>,
     pub collectibles: Option<crate::cosmetics::Collectibles>,
+    #[serde(skip_serializing)]
+    pub member: Option<UserMentionMember>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+pub struct UserMentionMember {
+    pub nick: Option<String>,
 }
 
 impl User {
@@ -377,6 +384,10 @@ pub struct ReferencedMessage {
     pub author: User,
     #[serde(default)]
     pub content: String,
+    #[serde(default)]
+    pub mentions: Vec<User>,
+    #[serde(default)]
+    pub mention_channels: Vec<Channel>,
     pub member: Option<Member>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
@@ -421,6 +432,8 @@ impl From<&Message> for ReferencedMessage {
         Self {
             author: message.author.clone(),
             content: message.content.clone(),
+            mentions: message.mentions.clone(),
+            mention_channels: message.mention_channels.clone(),
             member: message.member.clone(),
             attachments: message.attachments.clone(),
             embeds: message.embeds.clone(),
@@ -446,6 +459,8 @@ pub struct Message {
     #[serde(default)]
     pub mentions: Vec<User>,
     #[serde(default)]
+    pub mention_channels: Vec<Channel>,
+    #[serde(default)]
     pub mention_everyone: bool,
     #[serde(default)]
     pub mention_roles: Vec<String>,
@@ -469,6 +484,12 @@ pub struct Message {
 }
 
 impl Message {
+    pub const SUPPRESS_NOTIFICATIONS: u64 = 1 << 12;
+
+    pub fn silent(&self) -> bool {
+        self.flags & Self::SUPPRESS_NOTIFICATIONS != 0
+    }
+
     pub fn name(&self) -> &str {
         self.member
             .as_ref()
@@ -482,6 +503,7 @@ impl Message {
             || self.author.avatar != previous.author.avatar
             || self.channel_id != previous.channel_id
             || self.webhook_id != previous.webhook_id
+            || self.silent() != previous.silent()
             || !matches!(self.kind, 0 | 19)
             || !matches!(previous.kind, 0 | 19)
             || self.kind == 19
