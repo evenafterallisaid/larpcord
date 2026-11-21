@@ -26,14 +26,14 @@ pub struct Tokens {
 impl Default for Tokens {
     fn default() -> Self {
         Self {
-            background: 0x1b1c21,
-            panel: 0x111216,
-            sidebar: 0x15161b,
-            surface: 0x282a32,
-            border: 0x2d2f38,
-            text: 0xf2f3f5,
-            muted: 0x9a9da7,
-            accent: 0xc1b5ed,
+            background: 0x1e1f26,
+            panel: 0x14151a,
+            sidebar: 0x191a21,
+            surface: 0x2b2d38,
+            border: 0x333542,
+            text: 0xebedf4,
+            muted: 0xa5a8ba,
+            accent: 0xb9a8f9,
         }
     }
 }

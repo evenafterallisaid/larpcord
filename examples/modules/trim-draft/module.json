@@ -1,0 +1,9 @@
+{
+  "api_version": 1,
+  "id": "trim-draft",
+  "name": "Trim draft",
+  "version": "1.0.0",
+  "description": "Preview a draft with outer spaces, tabs and blank lines removed.",
+  "permissions": ["composer_draft"],
+  "composer_tool": true
+}

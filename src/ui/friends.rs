@@ -2,6 +2,8 @@ use super::*;
 
 impl Larpcord {
     pub(super) fn show_friends(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_composer_tools();
+        self.reset_conversation_search(cx);
         self.home_page = true;
         self.read_task = None;
         self.opening_dm = None;

@@ -1,4 +1,8 @@
-//! Small native module host. v1 executes bounded declarative hooks, never arbitrary code.
+//! Permission-scoped native module host.
+mod wasm;
+
+pub(crate) use wasm::MAX_DRAFT as MAX_TOOL_DRAFT;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -6,10 +10,31 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 const MAX_MODULES: usize = 32;
 const MAX_MANIFEST: usize = 16 * 1024;
+
+fn read_wasm(directory: &Path) -> Result<Arc<[u8]>, String> {
+    let path = directory.join("composer.wasm");
+    let meta = fs::symlink_metadata(&path).map_err(|_| "Missing composer.wasm")?;
+    if !meta.is_file() || meta.len() > wasm::MAX_BINARY as u64 {
+        return Err("Composer tool must be a regular Wasm file of at most 256 KiB".into());
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .and_then(|file| {
+            file.take(wasm::MAX_BINARY as u64 + 1)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|_| "Could not read composer.wasm")?;
+    if bytes.len() > wasm::MAX_BINARY || !bytes.starts_with(b"\0asm\x01\0\0\0") {
+        return Err("Invalid or oversized composer.wasm".into());
+    }
+    Ok(bytes.into())
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grant {
@@ -23,6 +48,7 @@ pub enum Permission {
     MessageContent,
     Theme,
     NativePresentation,
+    ComposerDraft,
 }
 impl Permission {
     pub fn description(self) -> &'static str {
@@ -32,6 +58,9 @@ impl Permission {
             Self::Theme => "Change client theme colors",
             Self::NativePresentation => {
                 "Show extra account, server or message details in the client"
+            }
+            Self::ComposerDraft => {
+                "Read the current draft when you run this tool and propose an edit"
             }
         }
     }
@@ -93,6 +122,8 @@ struct Manifest {
     message_decorators: Vec<Decorator>,
     #[serde(default)]
     native_features: Vec<NativeFeature>,
+    #[serde(default)]
+    composer_tool: bool,
     theme: Option<ThemePatch>,
 }
 impl Manifest {
@@ -117,7 +148,7 @@ impl Manifest {
             || !text(&m.name, 64)
             || !text(&m.version, 32)
             || !text(&m.description, 320)
-            || m.permissions.len() > 4
+            || m.permissions.len() > 5
             || m.message_decorators.len() > 16
             || m.native_features.len() > 4
         {
@@ -147,11 +178,23 @@ impl Manifest {
         {
             return Err("Native features require their own presentation permission".into());
         }
+        if m.composer_tool
+            && (m.permissions.as_slice() != [Permission::ComposerDraft]
+                || m.theme.is_some()
+                || !m.message_decorators.is_empty()
+                || !m.native_features.is_empty())
+        {
+            return Err(
+                "A composer tool needs its own draft permission and cannot mix with other hooks"
+                    .into(),
+            );
+        }
         Ok(m)
     }
 }
 pub struct Module {
     manifest: Manifest,
+    wasm: Option<Arc<[u8]>>,
     pub digest: String,
     pub enabled: bool,
     pub from_catalog: bool,
@@ -183,6 +226,35 @@ impl Module {
     pub fn permissions(&self) -> &[Permission] {
         &self.manifest.permissions
     }
+
+    pub fn is_composer_tool(&self) -> bool {
+        self.wasm.is_some()
+    }
+
+    pub fn composer_tool(&self) -> Option<ComposerTool> {
+        if !self.enabled {
+            return None;
+        }
+        Some(ComposerTool {
+            id: self.id().to_string(),
+            name: self.name().to_string(),
+            digest: self.digest.clone(),
+            bytes: self.wasm.clone()?,
+        })
+    }
+}
+
+pub struct ComposerTool {
+    pub id: String,
+    pub name: String,
+    pub digest: String,
+    bytes: Arc<[u8]>,
+}
+
+impl ComposerTool {
+    pub fn transform(&self, draft: &str) -> Result<String, &'static str> {
+        wasm::transform(&self.bytes, draft)
+    }
 }
 pub struct Registry {
     pub modules: Vec<Module>,
@@ -212,6 +284,15 @@ impl Registry {
         };
         r.add(
             include_bytes!("../examples/modules/media-labels/module.json"),
+            grants,
+        );
+        r.add_local(
+            include_bytes!("../examples/modules/trim-draft/module.json"),
+            || {
+                Ok(Arc::from(
+                    &include_bytes!("../examples/modules/trim-draft/composer.wasm")[..],
+                ))
+            },
             grants,
         );
         let Some(root) = root else {
@@ -256,7 +337,7 @@ impl Registry {
                     .map(|_| b)
             });
             match bytes {
-                Ok(bytes) => r.add(&bytes, grants),
+                Ok(bytes) => r.add_local(&bytes, || read_wasm(&entry.path()), grants),
                 Err(_) => r.errors.push("Could not read a module manifest".into()),
             }
         }
@@ -303,20 +384,40 @@ impl Registry {
     }
 
     fn add(&mut self, bytes: &[u8], grants: &[Grant]) {
-        match Manifest::parse(bytes) {
-            Ok(manifest) => {
+        self.add_local(bytes, || Err("Missing composer.wasm".into()), grants);
+    }
+
+    fn add_local(
+        &mut self,
+        bytes: &[u8],
+        wasm_bytes: impl FnOnce() -> Result<Arc<[u8]>, String>,
+        grants: &[Grant],
+    ) {
+        let result = Manifest::parse(bytes).and_then(|manifest| {
+            let binary = manifest.composer_tool.then(wasm_bytes).transpose()?;
+            Ok((manifest, binary))
+        });
+        match result {
+            Ok((manifest, wasm)) => {
                 if self.modules.iter().any(|m| m.id() == manifest.id) {
                     self.errors
                         .push(format!("Duplicate module id: {}", manifest.id));
                     return;
                 }
-                let digest = format!("{:x}", Sha256::digest(bytes));
+                let mut hasher = Sha256::new();
+                hasher.update(bytes);
+                if let Some(binary) = &wasm {
+                    hasher.update([0]);
+                    hasher.update(binary);
+                }
+                let digest = format!("{:x}", hasher.finalize());
                 let enabled = grants
                     .iter()
                     .take(32)
                     .any(|g| g.id == manifest.id && g.digest == digest);
                 self.modules.push(Module {
                     manifest,
+                    wasm,
                     digest,
                     enabled,
                     from_catalog: false,
@@ -401,8 +502,12 @@ impl CatalogEntry {
     pub fn module(&self) -> Result<Module, String> {
         let bytes = serde_json::to_vec(&self.0).map_err(|_| "Could not encode the manifest.")?;
         let manifest = Manifest::parse(&bytes)?;
+        if manifest.composer_tool {
+            return Err("Executable modules must be installed from local files.".into());
+        }
         Ok(Module {
             manifest,
+            wasm: None,
             digest: format!("{:x}", Sha256::digest(&bytes)),
             enabled: false,
             from_catalog: true,
@@ -501,6 +606,47 @@ pub fn sanitize_grants(grants: &mut Vec<Grant>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composer_tool_grants_cover_the_executable_and_preview_its_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let module = directory.path().join("fixture");
+        fs::create_dir(&module).unwrap();
+        let manifest = include_str!("../examples/modules/trim-draft/module.json")
+            .replace("trim-draft", "local-trim");
+        let original = include_bytes!("../examples/modules/trim-draft/composer.wasm");
+        fs::write(module.join("module.json"), &manifest).unwrap();
+        fs::write(module.join("composer.wasm"), original).unwrap();
+        let mut registry = Registry::load(Some(directory.path()), &[]);
+        let find = |registry: &Registry| {
+            registry
+                .modules
+                .iter()
+                .find(|m| m.id() == "local-trim")
+                .unwrap()
+                .composer_tool()
+        };
+        assert!(find(&registry).is_none());
+        let mut grants = Vec::new();
+        registry.set_enabled("local-trim", true, &mut grants);
+        let tool = find(&registry).unwrap();
+        assert_eq!(
+            tool.transform("  \n🎉 keep this  \t\n").unwrap(),
+            "🎉 keep this"
+        );
+        assert_eq!(tool.transform(" \t\n").unwrap(), "");
+        assert!(tool.transform(&"x".repeat(MAX_TOOL_DRAFT + 1)).is_err());
+        // A well-formed custom section changes the reviewed bytes without changing behavior.
+        let mut modified = original.to_vec();
+        modified.extend_from_slice(b"\0\x02\x01x");
+        fs::write(module.join("composer.wasm"), modified).unwrap();
+        assert!(find(&Registry::load(Some(directory.path()), &grants)).is_none());
+        assert!(
+            CatalogEntry(serde_json::from_str(&manifest).unwrap())
+                .module()
+                .is_err()
+        );
+    }
 
     #[test]
     fn native_features_wait_for_an_explicit_grant() {
@@ -645,7 +791,7 @@ mod tests {
         fs::create_dir(&m).unwrap();
         fs::write(m.join("module.json"), vec![b' '; MAX_MANIFEST + 1]).unwrap();
         let r = Registry::load(Some(dir.path()), &[]);
-        assert_eq!(r.modules.len(), 1);
+        assert_eq!(r.modules.len(), Registry::load(None, &[]).modules.len());
         assert!(!r.errors.is_empty());
         fs::write(
             m.join("module.json"),

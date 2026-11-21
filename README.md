@@ -25,7 +25,8 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 - a nonblocking dm profile inspector, expandable full profiles, live presence/activity, badge artwork, a direct-message action, clickable mutual friend/server lists, profile theme colors and overlapping avatars, banners, biographies, pronouns, server identity, decorations, layered frames, bounded effects and role chips
 - server icons, banners and group chat icons, saved server order and folders, unread/mention badges, a flat single-color home mark and custom typing indicators
 - silent, bounded gifv autoplay and image gif/apng motion; click-to-play video attachments, cdn video embeds and components v2 video galleries, with a native viewer, seeking, volume and mute
-- opt-in local [modules](docs/modules.md) with searchable discover and installed views, permission review, and message-label and theme hooks
+- opt-in [modules](docs/modules.md) with searchable catalogs, permission review, message labels, theme tokens and local Wasm composer tools
+- search loaded messages in the open conversation with the header search button or Command/Ctrl+F
 - floating settings with mouse, scroll and keyboard isolation; charcoal, onyx, midnight and rose themes with a semantic custom-theme token file
 - gateway heartbeats, acknowledgement checks, session resume, reconnection backoff and automatic retry after a transient startup failure
 - desktop notifications for direct messages, mentions and incoming call signals

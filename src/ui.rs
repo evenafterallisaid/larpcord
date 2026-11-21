@@ -3,7 +3,9 @@ mod burst;
 mod chrome;
 mod components;
 mod composer;
+mod composer_tools;
 mod conversation;
+mod conversation_search;
 mod cosmetics;
 mod friends;
 mod gif;
@@ -47,7 +49,10 @@ const MUTED: u32 = 0x9a9da7;
 const ACCENT: u32 = 0xe2e4e9;
 const LILAC: u32 = 0xc1b5ed;
 
-actions!(larpcord, [Quit, OpenSettings, ClosePanel, FocusSearch]);
+actions!(
+    larpcord,
+    [Quit, OpenSettings, ClosePanel, FocusSearch, FindMessages]
+);
 
 pub struct Larpcord {
     root_focus: FocusHandle,
@@ -64,6 +69,12 @@ pub struct Larpcord {
     catalog_notice: Option<(String, bool)>,
     catalog_discover: bool,
     catalog_search: Entity<TextInput>,
+    conversation_search: Entity<TextInput>,
+    conversation_search_open: bool,
+    searched_message: Option<String>,
+    composer_tools_open: bool,
+    composer_tool_task: Option<Task<()>>,
+    composer_tool_result: Option<composer_tools::Outcome>,
     generation: u64,
     preview: bool,
     preview_only: bool,
@@ -416,7 +427,9 @@ impl Larpcord {
         let emoji_search = cx.new(|cx| TextInput::new("Find the perfect emoji", false, cx));
         let search = cx.new(|cx| TextInput::new("Find a conversation", false, cx));
         let token = cx.new(|cx| TextInput::new("Paste a session token", true, cx));
-        let catalog_search = cx.new(|cx| TextInput::new("Search the catalog", false, cx));
+        let catalog_search =
+            cx.new(|cx| TextInput::new("Filter by name or description", false, cx));
+        let conversation_search = cx.new(|cx| TextInput::new("Search loaded messages", false, cx));
         let friend_search = cx.new(|cx| TextInput::new("Search friends", false, cx));
         let subscriptions = vec![
             cx.observe_window_activation(window, |this, window, cx| {
@@ -452,11 +465,13 @@ impl Larpcord {
                 cx.notify();
             }),
             cx.subscribe(&catalog_search, |_, _, _: &Changed, cx| cx.notify()),
+            cx.subscribe(&conversation_search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe(&search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe(&friend_search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe_in(&composer, window, |this, _, _: &Changed, window, cx| {
                 this.mention_choice = 0;
                 this.mentions_hidden = false;
+                this.composer_tool_result = None;
                 cx.notify();
                 if this.composer.read(cx).content.is_empty()
                     || this.home_page
@@ -538,6 +553,12 @@ impl Larpcord {
             catalog_notice: None,
             catalog_discover: true,
             catalog_search,
+            conversation_search,
+            conversation_search_open: false,
+            searched_message: None,
+            composer_tools_open: false,
+            composer_tool_task: None,
+            composer_tool_result: None,
             root_focus,
             modal_focus: cx.focus_handle(),
             previous_focus: None,
@@ -648,12 +669,16 @@ impl Larpcord {
 
     fn open_settings(&mut self, tab: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.close_picker();
+        self.close_composer_tools();
         if self.login_open
             || self.profile_is_modal()
             || self.component_menu.is_some()
             || self.video.is_some()
         {
             return;
+        }
+        if self.conversation_search_open {
+            self.close_conversation_search(window, cx);
         }
         if self.settings_tab.is_none() {
             self.previous_focus = window.focused(cx);
@@ -720,6 +745,8 @@ impl Larpcord {
     }
 
     fn connect(&mut self, token: Zeroizing<String>, cx: &mut Context<Self>) {
+        self.close_composer_tools();
+        self.reset_conversation_search(cx);
         self.picker = crate::expressions::Picker {
             recent: self.settings.recent_emoji.clone(),
             ..Default::default()
@@ -787,6 +814,8 @@ impl Larpcord {
     }
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
+        self.close_composer_tools();
+        self.reset_conversation_search(cx);
         self.picker = crate::expressions::Picker {
             recent: self.settings.recent_emoji.clone(),
             ..Default::default()
@@ -856,6 +885,8 @@ impl Larpcord {
     }
 
     fn choose_channel(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_composer_tools();
+        self.reset_conversation_search(cx);
         self.jump_task = None;
         self.jumping = false;
         self.jump_after_latest = None;
@@ -2493,12 +2524,12 @@ impl Larpcord {
             }
         }
         column()
-            .w(px(72.))
+            .w(px(panes::RAIL))
             .h_full()
             .flex_shrink_0()
             .items_center()
-            .py_4()
-            .gap_3()
+            .py_3()
+            .gap_2()
             .bg(self.color(PANEL))
             .child(
                 row()
@@ -2506,24 +2537,28 @@ impl Larpcord {
                     .size(px(40.))
                     .justify_center()
                     .rounded_xl()
-                    .bg(self.color(if self.selected_guild.is_none() {
-                        0x5865f2
+                    .bg(self.color(SURFACE))
+                    .border_1()
+                    .border_color(self.color(if self.selected_guild.is_none() {
+                        LILAC
                     } else {
-                        SURFACE
+                        LINE
                     }))
+                    .hover(|s| s.bg(self.color(LINE)))
                     .cursor_pointer()
-                    .child(
-                        svg()
-                            .path("home.svg")
-                            .size(px(28.))
-                            .text_color(self.color(TEXT)),
-                    )
+                    .child(svg().path("home.svg").size(px(28.)).text_color(self.color(
+                        if self.selected_guild.is_none() {
+                            LILAC
+                        } else {
+                            TEXT
+                        },
+                    )))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.show_friends(window, cx);
                         cx.notify();
                     })),
             )
-            .child(div().w(px(26.)).h(px(1.)).bg(self.color(LINE)))
+            .child(div().w(px(28.)).h(px(1.)).bg(self.color(LINE)))
             .child(
                 div().flex_1().min_h_0().w_full().overflow_hidden().child(
                     uniform_list(
@@ -2716,7 +2751,7 @@ impl Larpcord {
                         .w(px(3.))
                         .h(px(20.))
                         .rounded_full()
-                        .bg(self.color(TEXT))
+                        .bg(self.color(LILAC))
                         .map(|element| {
                             if self.motion() {
                                 element
@@ -2830,15 +2865,15 @@ impl Larpcord {
             .cursor_pointer()
             .bg(self.color(if selected { SURFACE } else { SIDEBAR }))
             .hover(|s| s.bg(self.color(SURFACE)))
-            .when(unread && !selected, |s| {
+            .when(selected, |s| {
                 s.child(
                     div()
                         .absolute()
-                        .left(px(-4.))
-                        .top(px(18.))
-                        .size(px(6.))
+                        .left_0()
+                        .h(px(16.))
+                        .w(px(2.))
                         .rounded_full()
-                        .bg(self.color(TEXT)),
+                        .bg(self.color(LILAC)),
                 )
             })
             .child(self.channel_avatar(channel, 32.))
@@ -2851,7 +2886,7 @@ impl Larpcord {
                     .child(
                         div()
                             .truncate()
-                            .font_weight(if unread {
+                            .font_weight(if unread || selected {
                                 FontWeight::SEMIBOLD
                             } else {
                                 FontWeight::NORMAL
@@ -3014,7 +3049,7 @@ impl Larpcord {
             navigation.push(
                 row()
                     .id(SharedString::from(format!("channel-{id}")))
-                    .h(px(if channel.guild_id.is_none() { 40. } else { 32. }))
+                    .h(px(32.))
                     .px_2()
                     .gap_2()
                     .relative()
@@ -3022,33 +3057,31 @@ impl Larpcord {
                     .cursor_pointer()
                     .bg(self.color(if selected { SURFACE } else { SIDEBAR }))
                     .hover(|s| s.bg(self.color(SURFACE)))
-                    .text_color(self.color(if selected { TEXT } else { MUTED }))
-                    .child(if channel.guild_id.is_none() {
-                        channel
-                            .recipients
-                            .first()
-                            .map(|user| self.avatar(user, 28.))
-                            .unwrap_or_else(|| {
-                                div()
-                                    .size(px(28.))
-                                    .rounded_full()
-                                    .bg(self.color(SURFACE))
-                                    .child("@")
-                                    .into_any_element()
-                            })
+                    .text_color(self.color(if selected || self.store.unread.contains(&id) {
+                        TEXT
                     } else {
-                        div()
-                            .w(px(22.))
-                            .text_size(px(21.))
-                            .text_color(rgb(0x80848e))
-                            .child(icon(crate::icons::channel_icon(channel.kind), 18.))
-                            .into_any_element()
+                        MUTED
+                    }))
+                    .when(selected, |s| {
+                        s.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .w(px(2.))
+                                .h(px(16.))
+                                .rounded_full()
+                                .bg(self.color(LILAC)),
+                        )
                     })
+                    .child(
+                        icon(crate::icons::channel_icon(channel.kind), 17.)
+                            .text_color(self.color(if selected { LILAC } else { MUTED })),
+                    )
                     .child(
                         div()
                             .flex_1()
                             .truncate()
-                            .text_size(px(15.))
+                            .text_size(px(14.))
                             .font_weight(if selected || self.store.unread.contains(&id) {
                                 FontWeight::SEMIBOLD
                             } else {
@@ -3100,38 +3133,38 @@ impl Larpcord {
                             .bg(self.color(PANEL))
                             .border_1()
                             .border_color(self.color(LINE))
+                            .gap_2()
+                            .child(icon("search", 15.).text_color(self.color(MUTED)))
                             .child(self.search.clone()),
                     )
                     .into_any_element()
             } else {
                 column()
                     .relative()
-                    .h(px(if banner.is_some() { 148. } else { 48. }))
+                    .h(px(if banner.is_some() { 132. } else { 48. }))
                     .flex_shrink_0()
-                    .justify_start()
+                    .justify_end()
+                    .overflow_hidden()
                     .border_b_1()
                     .border_color(self.color(LINE))
                     .when_some(banner_image, |s, image| {
-                        s.child(div().absolute().inset_0().overflow_hidden().child(image))
+                        s.child(div().absolute().inset_0().child(image)).child(
+                            div().absolute().inset_0().bg(linear_gradient(
+                                180.,
+                                linear_color_stop(rgba(0x00000000), 0.25),
+                                linear_color_stop(rgba(0x090a0ee8), 1.),
+                            )),
+                        )
                     })
                     .child(
-                        row()
-                            .relative()
-                            .h(px(48.))
-                            .px_4()
-                            .bg(if banner.is_some() {
-                                rgba(0x00000088)
-                            } else {
-                                rgba(0x00000000)
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .truncate()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(title),
-                            )
-                            .child(icon("chevron-down", 18.)),
+                        row().relative().h(px(48.)).px_4().child(
+                            div()
+                                .flex_1()
+                                .truncate()
+                                .text_size(px(15.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
+                        ),
                     )
                     .into_any_element()
             })
@@ -3266,6 +3299,10 @@ impl Larpcord {
         self.profile_expanded = false;
         self.profile_anchor = Some(window.mouse_position());
         self.profile_tab = 0;
+        self.close_composer_tools();
+        if self.conversation_search_open {
+            self.close_conversation_search(window, cx);
+        }
         self.close_picker();
         self.previous_focus = window.focused(cx);
         window.focus(&self.modal_focus);
@@ -3393,12 +3430,12 @@ impl Larpcord {
         if !grouped {
             body = body.child(
                 row()
-                    .gap_3()
+                    .gap_2()
                     .child(
                         div()
                             .id("author")
                             .cursor_pointer()
-                            .text_size(px(16.))
+                            .text_size(px(15.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(self.display_name(
                                 message.name(),
@@ -3471,7 +3508,7 @@ impl Larpcord {
             body = body.child(
                 div()
                     .debug_selector(|| "message-content".into())
-                    .child(self.rich_message_text(message, content, 16., cx)),
+                    .child(self.rich_message_text(message, content, 15., cx)),
             );
         }
         if message.edited_timestamp.is_some() {
@@ -3705,7 +3742,7 @@ impl Larpcord {
                 let id = message.id.clone();
                 move || format!("message-row-{id}")
             })
-            .min_h(px(34.))
+            .min_h(px(if grouped { 22. } else { 42. }))
             .on_mouse_down(MouseButton::Right, {
                 let message = message.clone();
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -3714,6 +3751,9 @@ impl Larpcord {
                 })
             })
             .relative()
+            .when(self.searched_message.as_deref() == Some(&message.id), |s| {
+                s.bg(rgba(0xb9a8f923))
+            })
             .when(mentioned, |s| {
                 s.bg(rgba(0xf8b03b15)).child(
                     div()
@@ -3741,8 +3781,8 @@ impl Larpcord {
                 })
             })
             .hover(move |s| s.bg(rgba(if mentioned { 0xf8b03b21 } else { 0xffffff06 })))
-            .text_size(px(16.))
-            .line_height(px(22.))
+            .text_size(px(15.))
+            .line_height(px(21.))
             .items_start()
             .gap_3()
             .px_4()
@@ -3751,7 +3791,7 @@ impl Larpcord {
             } else if self.settings.compact {
                 6.
             } else {
-                12.
+                10.
             }))
             .pb(px(if grouped { 1. } else { 4. }))
             .w_full()
@@ -3813,7 +3853,7 @@ impl Larpcord {
             .h(px(48.))
             .flex_shrink_0()
             .px_4()
-            .gap_3()
+            .gap_2()
             .border_b_1()
             .border_color(self.color(LINE))
             .child(
@@ -3823,7 +3863,7 @@ impl Larpcord {
                     .unwrap_or_else(|| {
                         icon(
                             crate::icons::channel_icon(channel.map_or(0, |c| c.kind)),
-                            22.,
+                            19.,
                         )
                         .text_color(self.color(MUTED))
                         .into_any_element()
@@ -3833,9 +3873,9 @@ impl Larpcord {
                 div()
                     .id("channel-title")
                     .min_w_0()
-                    .max_w(px(240.))
+                    .max_w(relative(0.45))
                     .truncate()
-                    .text_size(px(16.))
+                    .text_size(px(15.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .tooltip({
                         let title = title.clone();
@@ -3850,13 +3890,18 @@ impl Larpcord {
                     ),
             )
             .when(has_topic, |s| {
-                s.child(div().w(px(1.)).h(px(24.)).bg(self.color(LINE)))
+                let full = topic.clone();
+                s.child(div().w(px(1.)).h(px(18.)).bg(self.color(LINE)))
                     .child(
-                        label(topic)
+                        div()
+                            .id("channel-topic")
                             .min_w_0()
                             .flex_1()
                             .truncate()
-                            .text_size(px(13.)),
+                            .text_size(px(12.))
+                            .text_color(self.color(MUTED))
+                            .child(topic)
+                            .tooltip(move |_, cx| cx.new(|_| Hint(full.clone())).into()),
                     )
             })
             .when(!has_topic, |s| s.child(div().flex_1()))
@@ -3864,13 +3909,21 @@ impl Larpcord {
                 channel.is_some_and(|c| c.guild_id.is_some() || c.kind == 3),
                 |s| {
                     s.child(
-                        toolbar_button("toggle-members", "users", "Toggle member list").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.members_open = !this.members_open;
-                                this.subscribe_members();
-                                cx.notify();
-                            }),
-                        ),
+                        toolbar_button(
+                            "toggle-members",
+                            "users",
+                            if self.members_open {
+                                "Hide member list"
+                            } else {
+                                "Show member list"
+                            },
+                        )
+                        .when(self.members_open, |s| s.bg(self.color(SURFACE)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.members_open = !this.members_open;
+                            this.subscribe_members();
+                            cx.notify();
+                        })),
                     )
                 },
             )
@@ -3899,19 +3952,9 @@ impl Larpcord {
                     )
                 },
             )
-            .child(
-                button("conversation-search", "")
-                    .w(px(170.))
-                    .h(px(28.))
-                    .py_0()
-                    .px_2()
-                    .bg(self.color(PANEL))
-                    .child(label("Find conversation").flex_1())
-                    .child(icon("search", 16.))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        window.focus(&this.search.focus_handle(cx))
-                    })),
-            )
+            .when(channel.is_some(), |s| {
+                s.child(self.conversation_search_button(cx))
+            })
             .when(self.preview, |s| s.child(badge("PREVIEW")));
         let content = column()
             .flex_1()
@@ -4059,7 +4102,7 @@ impl Larpcord {
                 .child(
                     column()
                         .px_4()
-                        .pb_4()
+                        .pb_3()
                         .pt_2()
                         .gap_2()
                         .when_some(self.error.clone(), |s, error| {
@@ -4084,6 +4127,9 @@ impl Larpcord {
                             s.child(self.typing_indicator())
                         })
                         .when(self.reply_to.is_some(), |s| s.child(self.reply_banner(cx)))
+                        .when(self.composer_tools_open, |s| {
+                            s.child(self.composer_tools(cx))
+                        })
                         .children(self.mention_picker(cx))
                         .when(
                             self.selected_channel.as_ref().is_some_and(|channel| {
@@ -4163,20 +4209,30 @@ impl Larpcord {
                         })
                         .child(
                             row()
-                                .min_h(px(44.))
-                                .px_3()
-                                .gap_2()
-                                .rounded_xl()
+                                .debug_selector(|| "composer-bar".into())
+                                .min_h(px(46.))
+                                .px_2()
+                                .gap_1()
+                                .rounded_lg()
                                 .border_1()
                                 .border_color(self.color(LINE))
                                 .bg(self.color(SURFACE))
                                 .child(
                                     toolbar_button("attach-files", "plus", "Attach files")
+                                        .bg(self.color(SIDEBAR))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.choose_attachments(window, cx)
                                         })),
                                 )
+                                .child(div().h(px(20.)).w(px(1.)).mx_1().bg(self.color(LINE)))
                                 .child(div().flex_1().min_w_0().child(self.composer.clone()))
+                                .when(
+                                    self.modules
+                                        .modules
+                                        .iter()
+                                        .any(|m| m.enabled && m.is_composer_tool()),
+                                    |s| s.child(self.composer_tools_button(cx)),
+                                )
                                 .child(toolbar_button("choose-gif", "gif", "Choose GIF").on_click(
                                     cx.listener(|this, _, window, cx| {
                                         this.toggle_picker(
@@ -4237,13 +4293,11 @@ impl Larpcord {
             .into_any_element();
         column()
             .debug_selector(|| "conversation-shell".into())
+            .relative()
             .flex_1()
             .min_w_0()
             .h_full()
-            .rounded_tl_lg()
-            .border_l_1()
-            .border_t_1()
-            .border_color(self.color(LINE))
+            .bg(self.color(BG))
             .overflow_hidden()
             .child(header)
             .child(
@@ -4266,6 +4320,9 @@ impl Larpcord {
                         |s, profile| s.child(self.profile_panel(profile, None, cx)),
                     ),
             )
+            .when(self.conversation_search_open, |s| {
+                s.child(self.conversation_search_panel(cx))
+            })
             .into_any_element()
     }
 
@@ -4477,12 +4534,15 @@ impl Larpcord {
 
     fn settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let tab = self.settings_tab.unwrap_or(0);
-        let mut body = column().gap_4();
+        let mut body = column().gap_3();
         match tab {
             0 => {
-                body = body
-                    .child(div().text_size(px(26.)).child("Your account"))
-                    .child(label("Connect directly to your Discord conversations."));
+                body = body.child(
+                    div()
+                        .text_size(px(23.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Your account"),
+                );
                 if self.preview || self.status == "Disconnected" {
                     body = body.child(column().mt_4().p_4().rounded_xl().border_1().border_color(self.color(LINE)).bg(self.color(SURFACE)).gap_3()
                         .child(div().text_size(px(13.)).child("Discord session token"))
@@ -4534,10 +4594,8 @@ impl Larpcord {
             }
             1 => {
                 body = body
-                    .child(div().text_size(px(26.)).child("Make it yours"))
-                    .child(button("browse-themes", "Browse themes").on_click(cx.listener(|this,_,_,cx|
-                        this.select_settings_tab(modules::THEMES_TAB,cx)
-                    )))
+                    .child(div().text_size(px(23.)).font_weight(FontWeight::SEMIBOLD).child("Preferences"))
+                    .child(label("Notifications").mt_2().font_weight(FontWeight::SEMIBOLD))
                     .child(
                         self.setting_toggle(
                             "notifications",
@@ -4563,6 +4621,7 @@ impl Larpcord {
                             this.persist(cx);
                         })),
                     )
+                    .child(label("Workspace").mt_2().font_weight(FontWeight::SEMIBOLD))
                     .child(
                         self.setting_toggle(
                             "keep-connected",
@@ -4621,7 +4680,7 @@ impl Larpcord {
                         .child(label("Up to 12 conversations and 200 messages per conversation. Images load as you scroll. The connection runs independently of rendering."))
                         .child(button("clear-cache", "Clear message cache").on_click(cx.listener(|this, _, _, cx| { this.store.clear_history(); this.refresh_messages(); cx.notify(); }))))
                     .child(button("github", "Open GitHub ↗").on_click(|_, _, cx| cx.open_url("https://github.com/evenafterallisaid/larpcord")))
-                    .child(label("Native voice and executable plugin adapters are future milestones. Video codec support depends on your platform and installed graphics drivers."));
+                    .child(label("Video codec support depends on your platform and installed graphics drivers."));
                 if self.preview_only {
                     body = body.child(button("sample-video", "Try sample video").on_click(
                         cx.listener(|this, _, window, cx| this.sample_video(window, cx)),
@@ -4642,76 +4701,132 @@ impl Larpcord {
             .child(
                 row()
                     .w(relative(0.9))
-                    .max_w(px(960.))
+                    .max_w(px(1000.))
                     .h(relative(0.9))
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(0x46474f))
+                    .border_color(self.color(LINE))
                     .shadow_lg()
                     .overflow_hidden()
                     .bg(self.color(BG))
                     .child(
                         column()
-                            .w(px(240.))
+                            .w(relative(0.23))
+                            .max_w(px(208.))
+                            .flex_shrink_0()
                             .h_full()
-                            .p_4()
-                            .gap_2()
+                            .px_3()
+                            .py_4()
+                            .gap_1()
                             .bg(self.color(PANEL))
-                            .child(label("LARPCORD").mt_2().mb_4().text_size(px(10.)))
+                            .border_r_1()
+                            .border_color(self.color(LINE))
                             .children(
                                 [
-                                    (0, "Account"),
-                                    (profile_edit::TAB, "Profile"),
-                                    (1, "Preferences"),
-                                    (modules::THEMES_TAB, "Themes"),
-                                    (2, "Modules"),
-                                    (3, "About"),
+                                    (
+                                        "Account",
+                                        &[
+                                            (0, "Account", "user"),
+                                            (profile_edit::TAB, "Profile", "users"),
+                                        ][..],
+                                    ),
+                                    (
+                                        "Client",
+                                        &[
+                                            (1, "Preferences", "settings"),
+                                            (modules::THEMES_TAB, "Themes", "grid"),
+                                            (2, "Modules", "sparkles"),
+                                            (3, "About", "file"),
+                                        ][..],
+                                    ),
                                 ]
                                 .into_iter()
-                                .map(|(index, name)| {
-                                    row()
-                                        .id(("settings-tab", index))
-                                        .px_3()
-                                        .py_2()
-                                        .rounded_lg()
-                                        .cursor_pointer()
-                                        .bg(self.color(if tab == index { SURFACE } else { PANEL }))
-                                        .text_color(self.color(if tab == index {
-                                            ACCENT
-                                        } else {
-                                            MUTED
-                                        }))
-                                        .child(name)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.select_settings_tab(index, cx);
+                                .map(|(group, sections)| {
+                                    column()
+                                        .gap_1()
+                                        .mb_3()
+                                        .child(
+                                            label(group)
+                                                .px_2()
+                                                .pb_1()
+                                                .text_size(px(11.))
+                                                .font_weight(FontWeight::SEMIBOLD),
+                                        )
+                                        .children(sections.iter().map(|&(index, name, symbol)| {
+                                            let selected = tab == index;
+                                            row()
+                                                .id(("settings-tab", index))
+                                                .relative()
+                                                .h(px(34.))
+                                                .px_2()
+                                                .gap_2()
+                                                .rounded_md()
+                                                .cursor_pointer()
+                                                .text_size(px(13.))
+                                                .text_color(self.color(if selected {
+                                                    TEXT
+                                                } else {
+                                                    MUTED
+                                                }))
+                                                .hover(|s| {
+                                                    s.bg(self.color(SURFACE))
+                                                        .text_color(self.color(TEXT))
+                                                })
+                                                .when(selected, |s| {
+                                                    s.bg(self.color(SURFACE)).child(
+                                                        div()
+                                                            .absolute()
+                                                            .left_0()
+                                                            .w(px(2.))
+                                                            .h(px(14.))
+                                                            .rounded_full()
+                                                            .bg(self.color(LILAC)),
+                                                    )
+                                                })
+                                                .child(icon(symbol, 15.).text_color(
+                                                    self.color(if selected {
+                                                        LILAC
+                                                    } else {
+                                                        MUTED
+                                                    }),
+                                                ))
+                                                .child(div().min_w_0().truncate().child(name))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.select_settings_tab(index, cx)
+                                                }))
                                         }))
                                 }),
-                            )
-                            .child(div().flex_1())
-                            .child(label("small client,\nsoft landing.").line_height(px(20.))),
+                            ),
                     )
                     .child(
                         column()
                             .flex_1()
                             .h_full()
                             .min_w_0()
-                            .child(row().px_6().pt_4().justify_end().child(
-                                button("close-settings", "×").px_2().on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.animate_panel_close(
-                                            panels::Panel::Settings,
-                                            window,
-                                            cx,
-                                        )
-                                    },
-                                )),
-                            ))
+                            .child(
+                                row().h(px(46.)).px_5().justify_end().child(
+                                    toolbar_button(
+                                        "close-settings",
+                                        "close",
+                                        "Close settings (Esc)",
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.animate_panel_close(
+                                                panels::Panel::Settings,
+                                                window,
+                                                cx,
+                                            )
+                                        },
+                                    )),
+                                ),
+                            )
                             .child(
                                 column()
                                     .id("settings-body")
                                     .flex_1()
                                     .min_h_0()
-                                    .px_6()
+                                    .px_5()
                                     .pb_6()
                                     .overflow_y_scroll()
                                     .child(body)
@@ -4847,6 +4962,11 @@ impl Render for Larpcord {
                     this.close_video(window, cx);
                 } else if this.settings_tab.is_some() {
                     this.animate_panel_close(panels::Panel::Settings, window, cx);
+                } else if this.conversation_search_open {
+                    this.close_conversation_search(window, cx);
+                } else if this.composer_tools_open {
+                    this.close_composer_tools();
+                    cx.notify();
                 } else if this.component_menu.take().is_some() {
                     if let Some(focus) = this.previous_focus.take() {
                         window.focus(&focus);
@@ -4867,6 +4987,9 @@ impl Render for Larpcord {
                 {
                     window.focus(&this.search.focus_handle(cx));
                 }
+            }))
+            .on_action(cx.listener(|this, _: &FindMessages, window, cx| {
+                this.open_conversation_search(window, cx);
             }))
             .child(self.titlebar(cx))
             .child(
@@ -5153,6 +5276,107 @@ mod tests {
             .advance_clock(std::time::Duration::from_millis(150));
         cx.run_until_parked();
         cx.update(|_, cx| assert!(!view.read(cx).profile_is_modal()));
+    }
+
+    #[gpui::test]
+    fn conversation_search_jumps_to_a_loaded_message_without_editing_the_draft(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        let viewport = cx.update(|window, _| window.viewport_size());
+        view.update(cx, |v, cx| {
+            v.store.insert(Message {
+                id: "640".into(),
+                channel_id: "campfire".into(),
+                content: "A lighthouse on the coast".into(),
+                author: User {
+                    id: "friend".into(),
+                    username: "Friend".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            v.refresh_messages();
+            v.composer
+                .update(cx, |input, cx| input.set("keep this draft", cx));
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let search = cx.debug_bounds("conversation-search").unwrap();
+        cx.simulate_click(search.center(), Modifiers::default());
+        view.update(cx, |v, cx| {
+            v.conversation_search
+                .update(cx, |input, cx| input.set("LIGHTHOUSE", cx));
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let result = cx.debug_bounds("search-hit-640").unwrap();
+        cx.simulate_click(result.center(), Modifiers::default());
+        cx.update(|_, cx| {
+            let v = view.read(cx);
+            assert!(!v.conversation_search_open);
+            assert_eq!(v.searched_message.as_deref(), Some("640"));
+            assert_eq!(v.composer.read(cx).content.as_ref(), "keep this draft");
+        });
+    }
+
+    #[gpui::test]
+    fn composer_wasm_previews_before_applying_and_discards_a_stale_result(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        let viewport = cx.update(|window, _| window.viewport_size());
+        view.update(cx, |v, cx| {
+            v.modules
+                .set_enabled("trim-draft", true, &mut v.settings.module_grants);
+            v.composer
+                .update(cx, |input, cx| input.set("  hello  ", cx));
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let tools = cx.debug_bounds("composer-tools").unwrap();
+        cx.simulate_click(tools.center(), Modifiers::default());
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let run = cx.debug_bounds("run-tool-trim-draft").unwrap();
+        cx.simulate_click(run.center(), Modifiers::default());
+        cx.run_until_parked();
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let apply = cx.debug_bounds("apply-tool-output").unwrap();
+        cx.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).composer.read(cx).content.as_ref(),
+                "  hello  "
+            )
+        });
+        view.update(cx, |v, cx| {
+            v.composer
+                .update(cx, |input, cx| input.set("new draft", cx))
+        });
+        cx.simulate_click(apply.center(), Modifiers::default());
+        cx.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).composer.read(cx).content.as_ref(),
+                "new draft"
+            )
+        });
+        view.update(cx, |v, cx| {
+            v.composer
+                .update(cx, |input, cx| input.set("  ✨ hello  ", cx));
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let tools = cx.debug_bounds("composer-tools").unwrap();
+        cx.simulate_click(tools.center(), Modifiers::default());
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let run = cx.debug_bounds("run-tool-trim-draft").unwrap();
+        cx.simulate_click(run.center(), Modifiers::default());
+        cx.run_until_parked();
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let apply = cx.debug_bounds("apply-tool-output").unwrap();
+        cx.simulate_click(apply.center(), Modifiers::default());
+        cx.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.composer.read(cx).content.as_ref(), "✨ hello");
+            assert!(view.sending.is_none());
+        });
     }
 
     #[gpui::test]

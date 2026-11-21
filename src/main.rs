@@ -27,7 +27,7 @@ mod video;
 
 use gpui::{prelude::*, *};
 use std::borrow::Cow;
-use ui::{ClosePanel, FocusSearch, Larpcord, OpenSettings, Quit};
+use ui::{ClosePanel, FindMessages, FocusSearch, Larpcord, OpenSettings, Quit};
 
 struct Assets;
 impl AssetSource for Assets {
@@ -81,6 +81,7 @@ fn main() {
             KeyBinding::new(&format!("{modifier}-q"), Quit, None),
             KeyBinding::new(&format!("{modifier}-,"), OpenSettings, None),
             KeyBinding::new(&format!("{modifier}-k"), FocusSearch, None),
+            KeyBinding::new(&format!("{modifier}-f"), FindMessages, None),
             KeyBinding::new("escape", ClosePanel, None),
         ]);
         cx.open_window(

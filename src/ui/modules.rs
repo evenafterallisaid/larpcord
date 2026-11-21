@@ -5,13 +5,12 @@ pub(super) const THEMES_TAB: usize = 5;
 
 impl Larpcord {
     pub(super) fn modules_settings(&self, themes: bool, cx: &mut Context<Self>) -> AnyElement {
-        let mut body = column()
-            .gap_4()
-            .child(
-                div()
-                    .text_size(px(26.))
-                    .child(if themes { "Themes" } else { "Modules" }),
-            );
+        let mut body = column().gap_4().child(
+            div()
+                .text_size(px(23.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(if themes { "Themes" } else { "Modules" }),
+        );
         body = body.child(
             row()
                 .gap_2()
@@ -75,10 +74,14 @@ impl Larpcord {
                 }),
         );
         body = body.child(
-            div()
+            row()
                 .px_3()
-                .rounded_lg()
+                .gap_2()
+                .border_1()
+                .border_color(self.color(LINE))
+                .rounded_md()
                 .bg(self.color(PANEL))
+                .child(icon("search", 15.).text_color(self.color(MUTED)))
                 .child(self.catalog_search.clone()),
         );
         if let Some((notice, error)) = &self.catalog_notice {
@@ -93,6 +96,7 @@ impl Larpcord {
         };
         let mut found = false;
         if self.catalog_discover {
+            let mut grid = div().flex().flex_row().flex_wrap().gap_3();
             for entry in &self.catalog.entries {
                 let Ok(module) = entry.module() else {
                     continue;
@@ -111,32 +115,40 @@ impl Larpcord {
                 let id = module.id().to_string();
                 let entry = entry.clone();
                 let install = action == "Install" || action == "Update";
-                body = body.child(
-                    self.module_card(&module).child(
-                        row()
-                            .gap_2()
-                            .child(
-                                button(SharedString::from(format!("install-{id}")), action).when(
-                                    install,
-                                    |s| {
-                                        s.on_click(cx.listener(move |this, _, _, cx| {
-                                            this.install_catalog(&entry, cx)
-                                        }))
-                                    },
-                                ),
-                            )
-                            .when(!install && installed.is_some(), |s| {
-                                s.child(
-                                    button(SharedString::from(format!("manage-{id}")), "Manage")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.catalog_discover = false;
-                                            cx.notify();
-                                        })),
+                grid = grid.child(
+                    self.module_card(&module)
+                        .flex_basis(px(255.))
+                        .flex_grow()
+                        .min_w_0()
+                        .child(
+                            row()
+                                .gap_2()
+                                .child(
+                                    button(SharedString::from(format!("install-{id}")), action)
+                                        .when(install, |s| {
+                                            s.on_click(cx.listener(move |this, _, _, cx| {
+                                                this.install_catalog(&entry, cx)
+                                            }))
+                                        }),
                                 )
-                            }),
-                    ),
+                                .when(!install && installed.is_some(), |s| {
+                                    s.child(
+                                        button(
+                                            SharedString::from(format!("manage-{id}")),
+                                            "Manage",
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.catalog_discover = false;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                }),
+                        ),
                 );
             }
+            body = body.child(grid);
         } else {
             if themes && query.is_empty() {
                 found = true;
@@ -168,59 +180,66 @@ impl Larpcord {
                         ),
                     ));
             }
+            let mut grid = div().flex().flex_row().flex_wrap().gap_3();
             for module in self.modules.modules.iter().filter(|m| matches(m)) {
                 found = true;
                 let enabled = module.enabled;
                 let id = module.id().to_string();
                 let remove_id = id.clone();
-                body = body.child(
-                    self.module_card(module).child(
-                        row()
-                            .gap_2()
-                            .child(
-                                button(
-                                    SharedString::from(format!("enable-module-{id}")),
-                                    match (themes, enabled) {
-                                        (true, true) => "Reset to built-in",
-                                        (true, false) => "Apply theme",
-                                        (false, true) => "Disable",
-                                        (false, false) => "Enable with these permissions",
-                                    },
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        if this.modules_loading {
-                                            return;
-                                        }
-                                        if themes && !enabled {
-                                            this.disable_theme_modules();
-                                        }
-                                        this.modules.set_enabled(
-                                            &id,
-                                            !enabled,
-                                            &mut this.settings.module_grants,
-                                        );
-                                        this.refresh_messages();
-                                        this.persist(cx);
-                                    },
-                                )),
-                            )
-                            .when(module.from_catalog, |s| {
-                                s.child(
+                grid = grid.child(
+                    self.module_card(module)
+                        .flex_basis(px(255.))
+                        .flex_grow()
+                        .min_w_0()
+                        .child(
+                            row()
+                                .gap_2()
+                                .flex_wrap()
+                                .child(
                                     button(
-                                        SharedString::from(format!("remove-{remove_id}")),
-                                        "Uninstall",
+                                        SharedString::from(format!("enable-module-{id}")),
+                                        match (themes, enabled) {
+                                            (true, true) => "Reset to built-in",
+                                            (true, false) => "Apply theme",
+                                            (false, true) => "Disable",
+                                            (false, false) => "Enable with these permissions",
+                                        },
                                     )
                                     .on_click(cx.listener(
                                         move |this, _, _, cx| {
-                                            this.uninstall_catalog(&remove_id, cx)
+                                            if this.modules_loading {
+                                                return;
+                                            }
+                                            if themes && !enabled {
+                                                this.disable_theme_modules();
+                                            }
+                                            this.modules.set_enabled(
+                                                &id,
+                                                !enabled,
+                                                &mut this.settings.module_grants,
+                                            );
+                                            this.refresh_messages();
+                                            this.persist(cx);
                                         },
                                     )),
                                 )
-                            }),
-                    ),
+                                .when(module.from_catalog, |s| {
+                                    s.child(
+                                        button(
+                                            SharedString::from(format!("remove-{remove_id}")),
+                                            "Uninstall",
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.uninstall_catalog(&remove_id, cx)
+                                            }),
+                                        ),
+                                    )
+                                }),
+                        ),
                 );
             }
+            body = body.child(grid);
             for error in self.modules.errors.iter().take(32) {
                 body = body.child(label(error.clone()).text_color(rgb(0xf0b7c3)));
             }
@@ -243,25 +262,76 @@ impl Larpcord {
             .collect::<Vec<_>>()
             .join(" · ");
         column()
-            .p_4()
-            .gap_3()
+            .p_3()
+            .gap_2()
             .rounded_lg()
             .border_1()
             .border_color(self.color(LINE))
+            .bg(self.color(SIDEBAR))
             .child(
                 row()
-                    .justify_between()
                     .gap_2()
                     .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(module.name().to_string()),
+                        row()
+                            .size(px(32.))
+                            .flex_shrink_0()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(self.color(SURFACE))
+                            .child(
+                                icon(
+                                    if module.is_theme() {
+                                        "grid"
+                                    } else {
+                                        "sparkles"
+                                    },
+                                    17.,
+                                )
+                                .text_color(self.color(LILAC)),
+                            ),
                     )
-                    .child(label(format!("v{}", module.version()))),
+                    .child(
+                        column()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(module.name().to_string()),
+                            )
+                            .child(
+                                label(format!(
+                                    "{} · v{}",
+                                    if module.is_composer_tool() {
+                                        "Composer tool"
+                                    } else if module.is_theme() {
+                                        "Theme"
+                                    } else {
+                                        "Module"
+                                    },
+                                    module.version()
+                                ))
+                                .text_size(px(11.)),
+                            ),
+                    )
+                    .when(module.enabled, |s| {
+                        s.child(
+                            label("Active")
+                                .text_size(px(11.))
+                                .text_color(self.color(LILAC)),
+                        )
+                    }),
             )
-            .child(label(module.description().to_string()))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.))
+                    .line_height(px(19.))
+                    .child(module.description().to_string()),
+            )
             .when(!permissions.is_empty() && !module.is_theme(), |s| {
-                s.child(label(permissions).text_size(px(11.)))
+                s.child(label(permissions).text_size(px(11.)).line_height(px(16.)))
             })
             .when(module.is_theme(), |s| {
                 let tokens =

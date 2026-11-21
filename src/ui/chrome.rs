@@ -147,11 +147,14 @@ impl Larpcord {
             .to_string();
         row()
             .debug_selector(|| "window-chrome".into())
+            .relative()
             .h(px(36.))
             .flex_shrink_0()
             .px_2()
             .gap_1()
-            .bg(rgb(PANEL))
+            .bg(self.color(PANEL))
+            .border_b_1()
+            .border_color(self.color(LINE))
             .when(cfg!(target_os = "macos"), |s| s.pl(px(86.)))
             .on_mouse_down(MouseButton::Left, |event, window, _| {
                 if event.click_count == 2 {
@@ -184,22 +187,16 @@ impl Larpcord {
                         }
                     })),
             )
-            .child(div().flex_1())
             .child(
-                row()
-                    .min_w_0()
-                    .max_w(relative(0.45))
-                    .gap_2()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(MUTED))
-                    .child(
-                        img(ImageSource::Resource(Resource::Embedded(
-                            "mascot.png".into(),
-                        )))
-                        .size(px(16.)),
-                    )
-                    .child(div().min_w_0().truncate().child(title)),
+                row().absolute().inset_0().justify_center().child(
+                    div()
+                        .max_w(relative(0.45))
+                        .truncate()
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(self.color(MUTED))
+                        .child(title),
+                ),
             )
             .child(div().flex_1())
             .child(
@@ -254,12 +251,12 @@ impl Larpcord {
             .mb_2()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(LINE))
+            .border_color(self.color(LINE))
             .overflow_hidden()
             .child(self.nameplate_art(&self.store.user, None, 52.))
             .px_2()
             .gap_2()
-            .bg(rgb(PANEL))
+            .bg(self.color(PANEL))
             .child(
                 div()
                     .id("self-avatar")

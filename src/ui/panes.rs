@@ -1,6 +1,6 @@
 use super::*;
 
-const RAIL: f32 = 72.;
+pub(super) const RAIL: f32 = 64.;
 const DIVIDER: f32 = 6.;
 const MIN_CHAT: f32 = 300.;
 const MIN_CHANNELS: f32 = 160.;
@@ -90,7 +90,14 @@ impl Larpcord {
             .flex_shrink_0()
             .justify_center()
             .cursor(CursorStyle::ResizeLeftRight)
-            .hover(|s| s.bg(self.color(ACCENT)))
+            .group(id)
+            .child(
+                div()
+                    .w(px(1.))
+                    .h_full()
+                    .bg(self.color(LINE))
+                    .group_hover(id, |s| s.bg(self.color(LILAC))),
+            )
             .on_drag(pane, |_, _, _, cx| cx.new(|_| ResizePreview))
             .on_drag_move(
                 cx.listener(move |this, event: &DragMoveEvent<Pane>, window, cx| {

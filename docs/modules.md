@@ -1,8 +1,8 @@
 # native modules, api 1
 
-modules are local, opt-in extensions inside larpcord. api 1 is a declarative host for message labels, semantic theme colors and opt-in native presentation features. it does not execute javascript, wasm, native libraries or shell commands. no runtime, jit, filesystem watcher or background polling is added. executable adapters can use this same registry and permission boundary in a later api.
+modules are opt-in extensions inside larpcord. api 1 supports declarative message labels, theme colors, native presentation features and locally installed Wasm composer tools. the interpreter runs on demand on a background worker.
 
-open settings > modules > open folder. each subdirectory holds one `module.json`. reload modules discovers changes without restarting. the bundled **media labels** example is available without installing anything, disabled by default. local modules appear with their names, versions, descriptions and declared permissions. enabling stores the manifest's sha256 digest. any byte change requires enabling again. disabling immediately removes its hooks and grant. malformed modules are skipped with a visible error; they do not break chat.
+open Settings → Modules → Installed → Open folder. each subdirectory holds one `module.json`. Reload local files discovers changes without restarting. the bundled Media Labels and Trim Draft modules appear in Installed and start disabled. local modules appear with their names, versions, descriptions and declared permissions. a grant identifies the exact manifest bytes and, for a composer tool, the Wasm bytes. any byte change requires enabling again. disabling immediately removes the hooks and grant.
 
 ```json
 {
@@ -24,7 +24,15 @@ open settings > modules > open folder. each subdirectory holds one `module.json`
 
 limits: 32 modules including the bundled example, 16 kib per manifest, 16 message rules per module, three labels per visible message, 32-byte labels and 128-byte text patterns. directory discovery inspects at most 128 entries. symlink manifests/directories, unknown fields, unsupported api versions and undeclared permissions are rejected. reload file work runs on a background executor. disabled modules do not evaluate hooks. native declarative evaluation is bounded and synchronous; any future executable backend must run away from painting, with independent cpu, memory and output limits.
 
-these are new larpcord modules, not direct vencord/equicord compatibility. an adapter can reuse a plugin's ideas and pure logic, but a plugin that patches discord's javascript/react internals needs a native port. executable plugins, arbitrary ui panels, outbound event hooks, writable plugin state and automatic downloads are intentionally outside this first api.
+vencord/equicord plugins that patch discord's javascript/react internals need a native port to use these hooks.
+
+## composer tools
+
+to try the bundled tool, enable **Trim draft** under Installed. write a draft, open the sparkle button in the composer, and choose **Trim draft**. select **Apply to draft** after reviewing the output. sending remains a separate action. changing channels, changing the draft or losing the module grant invalidates a pending proposal.
+
+to install your own tool, add `"composer_tool": true` and `"permissions": ["composer_draft"]` to its `module.json` and put a compiled `composer.wasm` next to it. composer tools use only the draft capability and can be installed from local files. [Trim draft source and manifest](../examples/modules/trim-draft)
+
+the Wasm ABI takes UTF-8 input at offset zero in a memory export named `memory`. export `transform(i32) -> i32`, where the argument is the input byte count and the return value is the output byte count, also at offset zero. input and output are bounded to 16 KiB. the worker gives each invocation a fresh instance with 2 MiB of linear memory and 500,000 interpreter fuel units. imports and start functions are rejected. tools receive only the selected draft text and return only replacement text. this follows Serein's bounded worker and review patterns with a Larpcord-specific ABI. [Serein's Wasm runtime](https://github.com/ViceVerse-cz/Serein/blob/bedb57c/crates/extensions/src/runtime.rs)
 
 ## discover and install
 

@@ -23,3 +23,7 @@ Unicode emoji names and aliases in assets/emoji-aliases.tsv are derived from git
 ## resvg
 
 Remote Discord badge SVGs are rasterized with resvg 0.45.1 under MIT. Its notice is in licenses/RESVG-MIT.txt. External image and file resolution is disabled.
+
+## Wasmi
+
+Wasmi 2.0.2 executes local composer tools. It is copyright 2018–2024 Robin Freyler, and the MIT notice is in `licenses/WASMI-MIT.txt`.
