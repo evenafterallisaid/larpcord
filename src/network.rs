@@ -56,6 +56,7 @@ pub enum Event {
         attempt: u64,
         event: crate::auth::AuthEvent,
     },
+    SignInRequired,
     Status(String),
     Dispatch(String, Value),
     History {
@@ -271,6 +272,10 @@ impl Api {
                 .await
             {
                 Ok(_) => return true,
+                Err(error) if error.status == Some(reqwest::StatusCode::UNAUTHORIZED) => {
+                    emit(events, generation, Event::SignInRequired).await;
+                    return false;
+                }
                 Err(error) if error.retryable => {
                     emit(events, generation, Event::Status("Reconnecting".into())).await;
                     emit(
@@ -741,7 +746,11 @@ impl Api {
                 continue;
             }
             if status.as_u16() == 401 {
-                return Err("Your session has expired. Sign in again.".into());
+                return Err(RequestFailure {
+                    message: "Your session has expired. Sign in again.".into(),
+                    retryable: false,
+                    status: Some(status),
+                });
             }
             if status.as_u16() == 403 {
                 return Err("Discord did not allow access to this channel or action.".into());
@@ -1179,13 +1188,15 @@ async fn gateway(
         }
         match result {
             Ok(()) => attempts = 0,
+            Err(ConnectionError::Authentication) => {
+                emit(&events, generation, Event::SignInRequired).await;
+                return;
+            }
             Err(ConnectionError::Fatal) => {
                 emit(
                     &events,
                     generation,
-                    Event::Error(
-                        "Discord ended this session. Open settings and connect again.".into(),
-                    ),
+                    Event::Error("Discord ended this connection. Try signing in again.".into()),
                 )
                 .await;
                 emit(&events, generation, Event::Status("Disconnected".into())).await;
@@ -1200,6 +1211,7 @@ async fn gateway(
 }
 
 enum ConnectionError {
+    Authentication,
     Fatal,
     Transient,
 }
@@ -1293,7 +1305,8 @@ where
                     Frame::Close(close) => {
                         if let Some(close) = close {
                             let code: u16 = close.code.into();
-                            if matches!(code, 4004 | 4010..=4014) { return Err(ConnectionError::Fatal); }
+                            if code == 4004 { return Err(ConnectionError::Authentication); }
+                            if matches!(code, 4010..=4014) { return Err(ConnectionError::Fatal); }
                             if matches!(code, 4007 | 4009) { *session = Session::default(); }
                         }
                         return Err(ConnectionError::Transient);
@@ -1918,7 +1931,7 @@ mod tests {
             drive_watched_connection(socket, &api, &events, 1, &mut session, &mut viewed),
         )
         .await;
-        assert!(matches!(result, Ok(Err(ConnectionError::Fatal))));
+        assert!(matches!(result, Ok(Err(ConnectionError::Authentication))));
         assert_eq!(server.await.unwrap(), 3);
     }
 
@@ -1993,18 +2006,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_credentials_stop_retrying_and_get_a_useful_status() {
+    async fn expired_credentials_stop_retrying_and_request_a_new_sign_in() {
         let (endpoint, server) = validation_server(vec![401]).await;
         let mut api = Api::new(Zeroizing::new("test-only".into())).unwrap();
         api.endpoint = Some(endpoint);
         let (events, receiver) = async_channel::bounded(8);
         assert!(!api.validate(&events, 7).await);
-        assert!(
-            matches!(receiver.recv().await.unwrap().event, Event::Status(status) if status == "Connection failed")
-        );
-        assert!(
-            matches!(receiver.recv().await.unwrap().event, Event::Error(error) if error.contains("expired"))
-        );
+        let envelope = receiver.recv().await.unwrap();
+        assert_eq!(envelope.generation, 7);
+        assert!(matches!(envelope.event, Event::SignInRequired));
         server.await.unwrap();
     }
 

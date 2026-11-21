@@ -714,6 +714,9 @@ impl Larpcord {
     }
 
     fn login(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.preview_only {
+            return;
+        }
         let token = Zeroizing::new(self.token.read(cx).content.trim().to_string());
         if token.len() < 30 || !token.is_ascii() || token.chars().any(char::is_whitespace) {
             self.error = Some("Paste a valid Discord session token to connect.".into());
@@ -725,9 +728,15 @@ impl Larpcord {
     }
 
     fn open_login(&mut self, cx: &mut Context<Self>) {
+        if self.preview_only {
+            return;
+        }
         self.close_picker();
+        self.close_composer_tools();
+        self.reset_conversation_search(cx);
         self.login_open = true;
         self.settings_tab = None;
+        self.panel_exit = None;
         self.qr_attempt += 1;
         self.qr = QrState::Generating;
         self.command(Command::QrStart {
@@ -1528,6 +1537,13 @@ impl Larpcord {
                         self.connect(token, cx);
                     }
                 }
+            }
+            Event::SignInRequired => {
+                self.status = "Disconnected".into();
+                self.error =
+                    Some("Your Discord session expired. Scan a new code to sign in.".into());
+                self.loading.clear();
+                self.open_login(cx);
             }
             Event::OpenedDm { user, result } => {
                 if self.opening_dm.as_ref() != Some(&user) {
@@ -3258,15 +3274,25 @@ impl Larpcord {
                         .py_2()
                         .gap_2()
                         .bg(rgb(0x292b30))
-                        .child(label("Preview workspace").flex_1().text_size(px(11.)))
                         .child(
-                            button("connect-sidebar", "Log in")
-                                .py_1()
-                                .px_2()
-                                .text_size(px(11.))
-                                .bg(rgb(0x5865f2))
-                                .on_click(cx.listener(|this, _, _, cx| this.open_login(cx))),
-                        ),
+                            label(if self.preview_only {
+                                "Offline preview"
+                            } else {
+                                "Preview workspace"
+                            })
+                            .flex_1()
+                            .text_size(px(11.)),
+                        )
+                        .when(!self.preview_only, |s| {
+                            s.child(
+                                button("connect-sidebar", "Log in")
+                                    .py_1()
+                                    .px_2()
+                                    .text_size(px(11.))
+                                    .bg(rgb(0x5865f2))
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_login(cx))),
+                            )
+                        }),
                 )
             })
     }
@@ -4543,7 +4569,18 @@ impl Larpcord {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child("Your account"),
                 );
-                if self.preview || self.status == "Disconnected" {
+                if self.preview_only {
+                    body = body.child(label(
+                        "Open the regular Larpcord app to sign in to Discord.",
+                    ));
+                } else if self.preview
+                    || matches!(self.status.as_str(), "Disconnected" | "Connection failed")
+                {
+                    body = body.child(
+                        button("account-qr-login", "Sign in with QR code")
+                            .bg(rgb(0x5865f2))
+                            .on_click(cx.listener(|this, _, _, cx| this.open_login(cx))),
+                    );
                     body = body.child(column().mt_4().p_4().rounded_xl().border_1().border_color(self.color(LINE)).bg(self.color(SURFACE)).gap_3()
                         .child(div().text_size(px(13.)).child("Discord session token"))
                         .child(row().px_2().rounded_lg().bg(self.color(PANEL)).child(self.token.clone()))
@@ -4576,21 +4613,23 @@ impl Larpcord {
                             ),
                     );
                 }
-                body = body.child(
-                    self.setting_toggle(
-                        "remember",
-                        "Remember this session",
-                        "Save future logins in the operating system credential store.",
-                        self.settings.remember_session,
+                body = body.when(!self.preview_only, |body| {
+                    body.child(
+                        self.setting_toggle(
+                            "remember",
+                            "Remember this session",
+                            "Save future logins in the operating system credential store.",
+                            self.settings.remember_session,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings.remember_session = !this.settings.remember_session;
+                            if !this.settings.remember_session {
+                                this.command(Command::Forget);
+                            }
+                            this.persist(cx);
+                        })),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings.remember_session = !this.settings.remember_session;
-                        if !this.settings.remember_session {
-                            this.command(Command::Forget);
-                        }
-                        this.persist(cx);
-                    })),
-                );
+                });
             }
             1 => {
                 body = body
@@ -5023,7 +5062,6 @@ impl Render for Larpcord {
                 s.child(self.message_menu_panel(cx))
             })
             .when(self.settings_tab.is_some(), |s| s.child(self.settings(cx)))
-            .when(self.login_open, |s| s.child(self.login_screen(cx)))
             .when_some(
                 self.profile.clone().filter(|_| !self.profile_inspector),
                 |s, user| s.child(self.profile_panel(&user, Some(window.viewport_size()), cx)),
@@ -5032,6 +5070,7 @@ impl Render for Larpcord {
             .when_some(self.component_menu.clone(), |s, (message, component)| {
                 s.child(self.component_menu_panel(&message, &component, cx))
             })
+            .when(self.login_open, |s| s.child(self.login_screen(cx)))
     }
 }
 
