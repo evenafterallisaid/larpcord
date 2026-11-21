@@ -1,5 +1,5 @@
 use super::*;
-use alhazen_gpui::{PlayerConfig, PlayerEvent, Source, VideoPlayer, video_view};
+use alhazen_gpui::{PlayerConfig, PlayerEvent, PlayerState, Source, VideoPlayer, video_view};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -26,6 +26,23 @@ impl Player {
         match self {
             Self::Video(view) => view.clone().into_any_element(),
             Self::Image(view) => view.clone().into_any_element(),
+        }
+    }
+    fn set_poster(&self, poster: Option<std::sync::Arc<RenderImage>>, cx: &mut App) {
+        let Some(poster) = poster else { return };
+        match self {
+            Self::Video(view) => view.update(cx, |view, cx| {
+                if !view.has_frame && view.poster.is_none() {
+                    view.poster = Some(poster);
+                    cx.notify();
+                }
+            }),
+            Self::Image(view) => view.update(cx, |view, cx| {
+                if view.image.is_none() {
+                    view.image = Some(poster);
+                    cx.notify();
+                }
+            }),
         }
     }
 }
@@ -101,22 +118,38 @@ impl Render for ImageLoop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.set_active(window.is_window_active(), cx);
         crate::media::retire(std::mem::take(&mut self.retired), window, 3);
-        div().size_full().when_some(self.image.clone(), |s, image| {
-            s.child(img(image).size_full().object_fit(if self.cover {
-                ObjectFit::Cover
-            } else {
-                ObjectFit::ScaleDown
-            }))
-        })
+        div()
+            .size_full()
+            .when_some(self.image.clone(), |s, image| {
+                s.child(img(image).size_full().object_fit(if self.cover {
+                    ObjectFit::Cover
+                } else {
+                    ObjectFit::ScaleDown
+                }))
+            })
+            .when(self.image.is_none() && !self.cover, |s| {
+                s.child(gif_placeholder(if self.failed {
+                    "GIF unavailable"
+                } else {
+                    "Loading GIF…"
+                }))
+            })
     }
 }
 pub(super) struct Loop {
     player: Entity<VideoPlayer>,
     active: bool,
+    started: bool,
+    has_frame: bool,
+    poster: Option<std::sync::Arc<RenderImage>>,
     _subscriptions: Vec<Subscription>,
 }
 impl Loop {
-    fn new(source: Source, cx: &mut Context<Self>) -> Self {
+    fn new(
+        source: Source,
+        poster: Option<std::sync::Arc<RenderImage>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let player = cx.new(|cx| {
             VideoPlayer::new(
                 source,
@@ -134,35 +167,74 @@ impl Loop {
         });
         let subscriptions = vec![
             cx.observe(&player, |_, _, cx| cx.notify()),
-            cx.subscribe(&player, |this, _, event: &PlayerEvent, cx| {
-                if matches!(event, PlayerEvent::Ended) && this.active {
-                    this.player.update(cx, |p, cx| {
-                        p.seek(std::time::Duration::ZERO, cx);
-                        p.play(cx);
-                    });
+            cx.subscribe(&player, |this, _, event: &PlayerEvent, cx| match event {
+                PlayerEvent::StateChanged(_) => this.start_when_ready(cx),
+                PlayerEvent::FrameReady if !this.has_frame => {
+                    this.has_frame = true;
+                    this.poster = None;
+                    cx.notify();
                 }
+                // The player rewinds a seekable clip when play is called at the end.
+                PlayerEvent::Ended if this.active => {
+                    this.player.update(cx, |p, cx| p.play(cx));
+                }
+                _ => {}
             }),
         ];
         Self {
             player,
             active: false,
+            started: false,
+            has_frame: false,
+            poster,
             _subscriptions: subscriptions,
         }
     }
     fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
-        if self.active != active {
-            self.active = active;
-            self.player
-                .update(cx, |p, cx| if active { p.play(cx) } else { p.pause(cx) });
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        if active {
+            self.start_when_ready(cx);
+        } else if std::mem::take(&mut self.started) {
+            self.player.update(cx, |p, cx| p.pause(cx));
+        }
+    }
+
+    fn start_when_ready(&mut self, cx: &mut Context<Self>) {
+        if self.active && !self.started && self.player.read(cx).player().is_some() {
+            self.started = true;
+            self.player.update(cx, |p, cx| p.play(cx));
         }
     }
 }
 impl Render for Loop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.set_active(window.is_window_active(), cx);
-        video_view(self.player.clone()).size_full()
+        let failed = matches!(self.player.read(cx).state(), PlayerState::Error(_));
+        div()
+            .relative()
+            .size_full()
+            .when(!self.has_frame, |s| {
+                if let Some(poster) = self.poster.clone() {
+                    s.child(img(poster).size_full().object_fit(ObjectFit::Contain))
+                } else {
+                    s.child(gif_placeholder(if failed {
+                        "GIF unavailable"
+                    } else {
+                        "Loading GIF…"
+                    }))
+                }
+            })
+            .child(video_view(self.player.clone()).absolute().inset_0())
     }
 }
+
+fn gif_placeholder(text: &'static str) -> Div {
+    row().size_full().justify_center().child(label(text))
+}
+
 impl Pool {
     pub(super) fn frame(pool: &SharedPool, window: &mut Window, cx: &mut App, active: bool) {
         {
@@ -255,19 +327,16 @@ impl Larpcord {
                 let player = if crate::media::animation::image_url(url) {
                     Player::Image(cx.new(|_| ImageLoop::new(url.to_string(), still.clone(), false)))
                 } else {
-                    Player::Video(cx.new(|cx| Loop::new(crate::video::source(url).unwrap(), cx)))
+                    Player::Video(
+                        cx.new(|cx| {
+                            Loop::new(crate::video::source(url).unwrap(), still.clone(), cx)
+                        }),
+                    )
                 };
                 pool.items.insert(url.to_string(), player);
             }
             pool.items.get(url).map(|player| {
-                if let Player::Image(view) = player {
-                    view.update(cx, |view, cx| {
-                        if view.image.is_none() && still.is_some() {
-                            view.image = still.clone();
-                            cx.notify();
-                        }
-                    });
-                }
+                player.set_poster(still, cx);
                 player.set_active(true, cx);
                 player.element()
             })
@@ -283,9 +352,17 @@ impl Larpcord {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let still = poster
-            .and_then(|p| p.proxy_url.as_deref().or(p.url.as_deref()))
-            .filter(|u| crate::media::cdn_url(u) || crate::media::gif_preview(u))
-            .and_then(|u| self.media.get(u));
+            .and_then(|poster| {
+                [poster.proxy_url.as_deref(), poster.url.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .find_map(|url| self.media.get(url))
+            })
+            .or_else(|| {
+                crate::media::animation::image_url(url)
+                    .then(|| self.media.get(url))
+                    .flatten()
+            });
         let dimensions = dimensions
             .or_else(|| poster.and_then(|p| p.width.zip(p.height)))
             .filter(|(w, h)| *w > 0 && *h > 0)
@@ -301,9 +378,13 @@ impl Larpcord {
         } else {
             self.gif_player(url, still.clone(), cx)
         };
+        let original = url.to_string();
         div()
             .id(SharedString::from(format!("gif-{url}")))
             .debug_selector(|| "autoplay-gif".into())
+            .cursor_pointer()
+            .tooltip(|_, cx| cx.new(|_| Hint("Open GIF".into())).into())
+            .on_click(move |_, _, cx| open_https(&original, cx))
             .w(px(width))
             .h(px(height))
             .max_w_full()
@@ -316,14 +397,7 @@ impl Larpcord {
                 } else if let Some(image) = still {
                     s.child(img(image).size_full().object_fit(ObjectFit::Contain))
                 } else {
-                    s.flex()
-                        .items_center()
-                        .justify_center()
-                        .child(label(if self.motion() {
-                            "Loading GIF…"
-                        } else {
-                            "GIF · reduced motion"
-                        }))
+                    s.child(gif_placeholder("Open GIF"))
                 }
             })
             .into_any_element()
@@ -338,11 +412,10 @@ type GifEmbed<'a> = (
 pub(super) fn embed_gif(embed: &crate::model::Embed) -> Option<GifEmbed<'_>> {
     if embed.kind == "gifv"
         && let Some(video) = embed.video.as_ref()
-        && let Some(url) = video
-            .proxy_url
-            .as_deref()
-            .or(video.url.as_deref())
-            .filter(|u| crate::video::source(u).is_some())
+        && let Some(url) = [video.proxy_url.as_deref(), video.url.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|url| crate::video::source(url).is_some())
     {
         return Some((
             url,
@@ -402,45 +475,61 @@ pub(super) fn image_source(image: &crate::model::EmbedMedia) -> Option<&str> {
         .filter(|u| crate::media::cdn_url(u))
         .or_else(|| image.url.as_deref().filter(|u| crate::media::cdn_url(u)))
 }
+pub(super) fn direct_gif(message: &Message) -> Option<&str> {
+    let url = message.content.trim();
+    (message.flags & 4 == 0
+        && url.split_whitespace().count() == 1
+        && crate::media::animation::image_url(url)
+        && !message
+            .embeds
+            .iter()
+            .take(10)
+            .any(|embed| embed_matches_link(embed, url))
+        && !message
+            .attachments
+            .iter()
+            .any(|file| file.url == url || file.proxy_url.as_deref() == Some(url)))
+    .then_some(url)
+}
+
 pub(super) fn media_only(message: &Message) -> bool {
     if message.flags & 4 != 0 {
         return false;
     }
     let text = message.content.trim();
-    !text.is_empty()
-        && message.embeds.iter().any(|embed| {
-            (embed_gif(embed).is_some() || embed_image(embed).is_some())
-                && (embed.url.as_deref() == Some(text)
-                    || [embed.image.as_ref(), embed.thumbnail.as_ref()]
-                        .into_iter()
-                        .flatten()
-                        .any(|image| {
-                            image.url.as_deref() == Some(text)
-                                || image.proxy_url.as_deref() == Some(text)
-                        }))
-        })
+    gif_link(text, &message.embeds)
+        || (!text.is_empty()
+            && message
+                .embeds
+                .iter()
+                .take(10)
+                .any(|embed| embed_image(embed).is_some() && embed_matches_link(embed, text)))
 }
 pub(super) fn gif_only(message: &Message) -> bool {
-    message.flags & 4 == 0 && gif_link(&message.content, &message.embeds)
+    message.flags & 4 == 0
+        && (gif_link(&message.content, &message.embeds) || direct_gif(message).is_some())
 }
 pub(super) fn gif_link(content: &str, embeds: &[crate::model::Embed]) -> bool {
     let text = content.trim();
     !text.is_empty()
-        && embeds.iter().any(|embed| {
-            embed_gif(embed).is_some()
-                && (embed.url.as_deref() == Some(text)
-                    || [
-                        embed.image.as_ref(),
-                        embed.thumbnail.as_ref(),
-                        embed.video.as_ref(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .any(|m| {
-                        m.url.as_deref() == Some(text) || m.proxy_url.as_deref() == Some(text)
-                    }))
-        })
+        && embeds
+            .iter()
+            .take(10)
+            .any(|embed| embed_gif(embed).is_some() && embed_matches_link(embed, text))
 }
+
+fn embed_matches_link(embed: &crate::model::Embed, text: &str) -> bool {
+    embed.url.as_deref() == Some(text)
+        || [
+            embed.image.as_ref(),
+            embed.thumbnail.as_ref(),
+            embed.video.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|media| media.url.as_deref() == Some(text) || media.proxy_url.as_deref() == Some(text))
+}
+
 impl Larpcord {
     pub(super) fn send_gif(
         &mut self,
@@ -548,7 +637,55 @@ mod tests {
         assert!(embed_gif(&message.embeds[0]).is_none());
         assert!(!gif_only(&message));
         message.embeds.clear();
-        assert!(!gif_only(&message));
+        assert_eq!(super::direct_gif(&message), Some(message.content.as_str()));
+        assert!(gif_only(&message));
+        message.flags = 4;
+        assert!(super::direct_gif(&message).is_none());
+        message.flags = 0;
+        message.content = "https://untrusted.invalid/a.gif".into();
+        assert!(super::direct_gif(&message).is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn gifv_falls_back_to_an_approved_video_when_the_proxy_is_invalid() {
+        let direct = "https://cdn.discordapp.com/attachments/1/2/loop.mp4";
+        let message: Message = serde_json::from_value(serde_json::json!({
+            "id": "6",
+            "channel_id": "campfire",
+            "content": direct,
+            "author": {"id": "x"},
+            "embeds": [{
+                "type": "gifv",
+                "video": {"url": direct, "proxy_url": "https://untrusted.invalid/loop.mp4", "width": 320, "height": 200}
+            }]
+        })).unwrap();
+        let (source, _, dimensions) = embed_gif(&message.embeds[0]).unwrap();
+        assert_eq!(source, direct);
+        assert_eq!(dimensions, Some((320, 200)));
+        assert!(super::media_only(&message));
+    }
+
+    #[gpui::test]
+    fn active_gifv_starts_when_the_native_decoder_finishes_opening(cx: &mut TestAppContext) {
+        use super::{Loop, Source};
+        use std::{path::Path, time::Duration};
+
+        let player = cx.new(|cx| {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video.mp4");
+            let mut player = Loop::new(Source::File(path), None, cx);
+            assert!(player.player.read(cx).player().is_none());
+            player.set_active(true, cx);
+            assert!(!player.started);
+            player
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(40));
+        cx.run_until_parked();
+        player.update(cx, |view, cx| {
+            assert!(view.player.read(cx).is_playing());
+            view.set_active(false, cx);
+            assert!(!view.player.read(cx).is_playing());
+        });
     }
     #[::core::prelude::v1::test]
     fn linked_images_are_plain_tiles_but_rich_embeds_and_suppressed_links_stay_intact() {

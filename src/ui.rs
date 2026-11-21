@@ -152,7 +152,7 @@ pub struct Larpcord {
     profile: Option<Profile>,
     profile_inspector: bool,
     profile_expanded: bool,
-    panel_exit: Option<panels::Exit>,
+    panel_exits: std::collections::HashMap<panels::Panel, Task<()>>,
     profile_anchor: Option<Point<Pixels>>,
     profile_tab: u8,
     profile_guild: Option<String>,
@@ -642,7 +642,7 @@ impl Larpcord {
             profile: None,
             profile_inspector: false,
             profile_expanded: false,
-            panel_exit: None,
+            panel_exits: Default::default(),
             profile_anchor: None,
             profile_tab: 0,
             profile_guild: None,
@@ -683,14 +683,14 @@ impl Larpcord {
         if self.settings_tab.is_none() {
             self.previous_focus = window.focused(cx);
         }
-        self.panel_exit = None;
+        self.cancel_panel_exit(panels::Panel::Settings);
         self.select_settings_tab(tab, cx);
         window.focus(&self.modal_focus);
         cx.notify();
     }
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.panel_exit = None;
+        self.cancel_panel_exit(panels::Panel::Settings);
         self.settings_tab = None;
         if let Some(focus) = self.previous_focus.take() {
             window.focus(&focus);
@@ -736,7 +736,7 @@ impl Larpcord {
         self.reset_conversation_search(cx);
         self.login_open = true;
         self.settings_tab = None;
-        self.panel_exit = None;
+        self.panel_exits.clear();
         self.qr_attempt += 1;
         self.qr = QrState::Generating;
         self.command(Command::QrStart {
@@ -799,6 +799,8 @@ impl Larpcord {
         self.typing_styles.clear();
         self.typing_task = None;
         self.typing_sent = None;
+        self.cancel_panel_exit(panels::Panel::Profile);
+        self.cancel_panel_exit(panels::Panel::ProfileDetails);
         self.profile = None;
         self.component_menu = None;
         self.video = None;
@@ -872,6 +874,8 @@ impl Larpcord {
         self.typing_styles.clear();
         self.typing_task = None;
         self.typing_sent = None;
+        self.cancel_panel_exit(panels::Panel::Profile);
+        self.cancel_panel_exit(panels::Panel::ProfileDetails);
         self.profile = None;
         self.component_menu = None;
         self.video = None;
@@ -923,8 +927,7 @@ impl Larpcord {
             return;
         }
         if self.profile_inspector {
-            self.profile = None;
-            self.profile_inspector = false;
+            self.dismiss_profile(window, cx);
         }
         self.home_page = false;
         self.navigation.visit(id.clone());
@@ -3321,7 +3324,8 @@ impl Larpcord {
         cx: &mut Context<Self>,
     ) {
         let replacing_popup = self.profile_is_modal();
-        self.panel_exit = None;
+        self.cancel_panel_exit(panels::Panel::Profile);
+        self.cancel_panel_exit(panels::Panel::ProfileDetails);
         self.profile_inspector = false;
         self.profile_expanded = false;
         self.profile_anchor = Some(window.mouse_position());
@@ -3540,7 +3544,9 @@ impl Larpcord {
                     })),
             );
         }
-        if !content.is_empty() && !gif::media_only(message) {
+        if let Some(url) = gif::direct_gif(message) {
+            body = body.child(self.gif_card(url, None, None, cx));
+        } else if !content.is_empty() && !gif::media_only(message) {
             body = body.child(
                 div()
                     .debug_selector(|| "message-content".into())
@@ -3955,10 +3961,17 @@ impl Larpcord {
                             },
                         )
                         .when(self.members_open, |s| s.bg(self.color(SURFACE)))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.members_open = !this.members_open;
-                            this.subscribe_members();
-                            cx.notify();
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if this.panel_closing(panels::Panel::Members) {
+                                this.cancel_panel_exit(panels::Panel::Members);
+                                cx.notify();
+                            } else if this.members_open {
+                                this.animate_panel_close(panels::Panel::Members, window, cx);
+                            } else {
+                                this.members_open = true;
+                                this.subscribe_members();
+                                cx.notify();
+                            }
                         })),
                     )
                 },
@@ -3975,12 +3988,16 @@ impl Larpcord {
                                 s.bg(self.color(SURFACE)).text_color(self.color(TEXT))
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                if this.profile_inspector {
-                                    this.profile = None;
-                                    this.profile_inspector = false;
+                                if this.panel_closing(panels::Panel::Profile)
+                                    && this.profile_inspector
+                                {
+                                    this.cancel_panel_exit(panels::Panel::Profile);
+                                } else if this.profile_inspector {
+                                    this.animate_panel_close(panels::Panel::Profile, window, cx);
                                 } else {
                                     this.open_profile(user.clone(), window, cx);
                                     this.profile_inspector = true;
+                                    this.previous_focus = None;
                                     window.focus(&this.composer.focus_handle(cx));
                                 }
                                 cx.notify();
@@ -4343,12 +4360,24 @@ impl Larpcord {
                     .items_start()
                     .child(content)
                     .when(widths.members > 0., |s| {
+                        let width = px(widths.members);
+                        let members = if let Some(group) = channel.filter(|c| c.kind == 3) {
+                            self.group_members(group, width, cx)
+                        } else {
+                            self.member_rail(width, cx)
+                        };
                         s.child(self.pane_divider(panes::Pane::Members, cx)).child(
-                            if let Some(group) = channel.filter(|c| c.kind == 3) {
-                                self.group_members(group, px(widths.members), cx)
-                            } else {
-                                self.member_rail(px(widths.members), cx)
-                            },
+                            div()
+                                .w(width)
+                                .h_full()
+                                .flex_shrink_0()
+                                .overflow_hidden()
+                                .child(self.panel_transition(
+                                    div().relative().size_full().child(members),
+                                    panels::Panel::Members,
+                                    "members-enter",
+                                    |s, t| s.left(px(14. * (1. - t))).opacity(t),
+                                )),
                         )
                     })
                     .when_some(
@@ -4744,11 +4773,17 @@ impl Larpcord {
             .absolute()
             .inset_0()
             .top(px(32.))
-            .bg(rgba(0x00000099))
             .items_center()
             .justify_center()
+            .child(self.panel_transition(
+                div().absolute().inset_0().bg(rgba(0x00000099)),
+                panels::Panel::Settings,
+                "settings-scrim",
+                |s, t| s.opacity(t),
+            ))
             .child(
                 row()
+                    .relative()
                     .w(relative(0.9))
                     .max_w(px(1000.))
                     .h(relative(0.9))
@@ -4889,11 +4924,17 @@ impl Larpcord {
                                         )
                                     }),
                             ),
-                    ),
+                    )
+                    .map(|s| {
+                        self.panel_transition(
+                            s,
+                            panels::Panel::Settings,
+                            "settings-enter",
+                            |s, t| s.top(px(12. * (1. - t))).opacity(t),
+                        )
+                    }),
             )
-            .map(|element| {
-                self.panel_transition(element, panels::Panel::Settings, "settings-enter")
-            })
+            .into_any_element()
     }
 }
 
@@ -5012,7 +5053,7 @@ impl Render for Larpcord {
                 } else if this.settings_tab.is_some() {
                     this.animate_panel_close(panels::Panel::Settings, window, cx);
                 } else if this.conversation_search_open {
-                    this.close_conversation_search(window, cx);
+                    this.animate_panel_close(panels::Panel::Search, window, cx);
                 } else if this.composer_tools_open {
                     this.close_composer_tools();
                     cx.notify();
@@ -5321,6 +5362,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn collapsing_a_full_profile_keeps_the_preview_open(cx: &mut TestAppContext) {
+        use super::panels::Panel;
+        use std::time::Duration;
+
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        let viewport = cx.update(|window, _| {
+            window.activate_window();
+            window.viewport_size()
+        });
+        view.update(cx, |v, cx| {
+            v.settings.animations = true;
+            v.profile = Some(v.demo_profile(Profile {
+                user: v.store.user.clone(),
+                ..Default::default()
+            }));
+            v.profile_expanded = true;
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let collapse = cx.debug_bounds("collapse-profile").unwrap();
+        cx.simulate_mouse_move(collapse.center(), None, Modifiers::default());
+        cx.simulate_click(collapse.center(), Modifiers::default());
+        cx.update(|window, cx| {
+            let v = view.read(cx);
+            assert!(
+                v.panel_closing(Panel::ProfileDetails),
+                "collapse {collapse:?} in {viewport:?}; active {}; expanded {}; closing profile {}",
+                window.is_window_active(),
+                v.profile_expanded,
+                v.panel_closing(Panel::Profile)
+            );
+        });
+        cx.executor().advance_clock(Duration::from_millis(150));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let v = view.read(cx);
+            assert!(!v.profile_expanded);
+            assert!(v.profile_is_modal());
+        });
+    }
+
+    #[gpui::test]
     fn account_avatar_opens_an_animated_profile_preview(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
         let viewport = cx.update(|window, _| {
@@ -5349,12 +5432,55 @@ mod tests {
         cx.update(|_, cx| {
             let view = view.read(cx);
             assert!(view.profile_is_modal());
-            assert!(view.panel_exit.is_some());
+            assert!(view.panel_closing(super::panels::Panel::Profile));
         });
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(150));
         cx.run_until_parked();
         cx.update(|_, cx| assert!(!view.read(cx).profile_is_modal()));
+    }
+
+    #[gpui::test]
+    fn members_and_search_can_close_independently_without_changing_the_draft(
+        cx: &mut TestAppContext,
+    ) {
+        use super::panels::Panel;
+        use std::time::Duration;
+
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        let viewport = cx.update(|window, _| {
+            window.activate_window();
+            window.viewport_size()
+        });
+        view.update(cx, |v, cx| {
+            v.settings.animations = true;
+            v.composer
+                .update(cx, |input, cx| input.set("keep this draft", cx));
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let members = cx.debug_bounds("member-pane-divider").unwrap();
+        let search = cx.debug_bounds("conversation-search").unwrap();
+        cx.simulate_click(search.center(), Modifiers::default());
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        assert!(cx.debug_bounds("conversation-search-panel").is_some());
+        cx.update(|window, cx| {
+            view.update(cx, |v, cx| {
+                v.animate_panel_close(Panel::Members, window, cx);
+                v.animate_panel_close(Panel::Search, window, cx);
+            });
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        assert_eq!(cx.debug_bounds("member-pane-divider"), Some(members));
+        assert!(cx.debug_bounds("conversation-search-panel").is_some());
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(150));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let v = view.read(cx);
+            assert!(!v.members_open && !v.conversation_search_open);
+            assert_eq!(v.pane_widths(viewport.width).members, 0.);
+            assert_eq!(v.composer.read(cx).content.as_ref(), "keep this draft");
+        });
     }
 
     #[gpui::test]

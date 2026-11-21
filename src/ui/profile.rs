@@ -1,4 +1,4 @@
-use super::*;
+use super::{panels::Panel, *};
 
 pub(super) const INSPECTOR_WIDTH: f32 = 292.;
 const PREVIEW_WIDTH: f32 = 344.;
@@ -608,7 +608,14 @@ impl Larpcord {
                     .absolute()
                     .inset_0()
                     .top(TITLEBAR)
-                    .when(placement.is_none(), |s| s.bg(rgba(0x00000099)))
+                    .when(placement.is_none(), |s| {
+                        s.child(self.panel_transition(
+                            div().absolute().inset_0().bg(rgba(0x00000099)),
+                            Panel::Profile,
+                            "profile-scrim",
+                            |s, t| s.opacity(t),
+                        ))
+                    })
                     .items_center()
                     .justify_center()
                     .on_mouse_down(
@@ -634,6 +641,7 @@ impl Larpcord {
             })
             .child(
                 row()
+                    .relative()
                     .items_start()
                     .gap(px(if expanded {
                         12. + frame_side.min(68.)
@@ -662,31 +670,51 @@ impl Larpcord {
                     )
                     .when(expanded, |s| {
                         s.child(self.expanded_profile_details(profile, cx))
+                    })
+                    .map(|s| {
+                        self.panel_transition(
+                            s,
+                            Panel::Profile,
+                            if expanded {
+                                "profile-expanded-enter"
+                            } else if inspector {
+                                "profile-inspector-enter"
+                            } else {
+                                "profile-preview-enter"
+                            },
+                            move |s, t| {
+                                let offset = px(10. * (1. - t));
+                                let s = s.opacity(t);
+                                if inspector {
+                                    s.left(offset)
+                                } else {
+                                    s.top(placement.map_or(px(0.), |area| area.origin.y) + offset)
+                                }
+                            },
+                        )
                     }),
             )
-            .map(|element| {
-                self.panel_transition(
-                    element,
-                    super::panels::Panel::Profile,
-                    if expanded {
-                        "profile-expanded-enter"
-                    } else if inspector {
-                        "profile-inspector-enter"
-                    } else {
-                        "profile-preview-enter"
-                    },
-                )
-            })
+            .into_any_element()
     }
 
     pub(super) fn dismiss_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.panel_exit = None;
+        self.cancel_panel_exit(Panel::Profile);
+        self.cancel_panel_exit(Panel::ProfileDetails);
+        let restore_focus = !self.profile_inspector;
         self.profile = None;
         self.profile_inspector = false;
         self.profile_expanded = false;
         self.profile_anchor = None;
-        if let Some(focus) = self.previous_focus.take() {
+        if restore_focus && let Some(focus) = self.previous_focus.take() {
             window.focus(&focus);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn collapse_profile(&mut self, cx: &mut Context<Self>) {
+        self.profile_expanded = false;
+        if self.profile_tab == ACTIVITY_TAB {
+            self.profile_tab = 0;
         }
         cx.notify();
     }
@@ -982,6 +1010,7 @@ impl Larpcord {
                         .font_weight(FontWeight::SEMIBOLD)
                         .bg(self.color(PANEL))
                         .on_click(cx.listener(|this, _, window, cx| {
+                            this.cancel_panel_exit(Panel::Profile);
                             if this.profile_inspector {
                                 this.previous_focus = window.focused(cx);
                             }
@@ -1040,6 +1069,7 @@ impl Larpcord {
             .and_then(|p| p.activity.as_deref());
         let own = profile.user.id == self.store.user.id;
         column()
+            .relative()
             .debug_selector(|| "expanded-profile-details".into())
             .w(px(348.))
             .h_full()
@@ -1071,15 +1101,11 @@ impl Larpcord {
                     )
                     .child(
                         button("collapse-profile", "Back to preview")
+                            .debug_selector(|| "collapse-profile".into())
                             .text_size(px(11.))
                             .flex_shrink_0()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.panel_exit = None;
-                                this.profile_expanded = false;
-                                if this.profile_tab == ACTIVITY_TAB {
-                                    this.profile_tab = 0;
-                                }
-                                cx.notify();
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.animate_panel_close(Panel::ProfileDetails, window, cx);
                             })),
                     ),
             )
@@ -1107,7 +1133,11 @@ impl Larpcord {
                         )
                     }),
             )
-            .into_any_element()
+            .map(|s| {
+                self.panel_transition(s, Panel::ProfileDetails, "profile-details-enter", |s, t| {
+                    s.left(px(10. * (1. - t))).opacity(t)
+                })
+            })
     }
 
     fn profile_status(

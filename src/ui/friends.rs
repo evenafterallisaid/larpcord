@@ -8,8 +8,9 @@ impl Larpcord {
         self.read_task = None;
         self.opening_dm = None;
         self.selected_guild = None;
-        self.profile = None;
-        self.profile_inspector = false;
+        if self.profile.is_some() {
+            self.dismiss_profile(window, cx);
+        }
         self.close_picker();
         self.command(Command::ViewGuild(None));
         window.focus(&self.friend_search.focus_handle(cx));

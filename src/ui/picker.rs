@@ -162,7 +162,11 @@ impl Larpcord {
     }
     pub(super) fn toggle_picker(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         if self.emoji_open && self.picker.tab == tab {
-            self.animate_panel_close(super::panels::Panel::Picker, window, cx);
+            if self.panel_closing(super::panels::Panel::Picker) {
+                self.cancel_panel_exit(super::panels::Panel::Picker);
+            } else {
+                self.animate_panel_close(super::panels::Panel::Picker, window, cx);
+            }
         } else {
             self.cancel_panel_exit(super::panels::Panel::Picker);
             self.emoji_open = true;
@@ -1230,27 +1234,17 @@ impl Larpcord {
                             ),
                     )
                     .map(|s| {
-                        if self.motion() {
-                            s.with_animation(
-                                "picker-enter",
-                                Animation::new(std::time::Duration::from_millis(180))
-                                    .with_easing(ease_out_quint()),
-                                |s, t| s.bottom(px(76. - 8. * (1. - t))).opacity(t),
-                            )
-                            .into_any_element()
-                        } else {
-                            s.into_any_element()
-                        }
+                        self.panel_transition(
+                            s,
+                            super::panels::Panel::Picker,
+                            "picker-enter",
+                            |s, t| s.bottom(px(76. - 8. * (1. - t))).opacity(t),
+                        )
                     }),
             )
-            .map(|element| {
-                self.panel_transition(
-                    element,
-                    super::panels::Panel::Picker,
-                    "expression-picker-enter",
-                )
-            })
+            .into_any_element()
     }
+
     pub(super) fn sticker_draft(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(sticker) = &self.selected_sticker else {
             return div().into_any_element();

@@ -1,96 +1,102 @@
 use super::*;
 use std::time::Duration;
 
+const ENTER_DURATION: Duration = Duration::from_millis(180);
 const EXIT_DURATION: Duration = Duration::from_millis(125);
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub(super) enum Panel {
     Profile,
+    ProfileDetails,
     Settings,
     Picker,
-}
-
-pub(super) struct Exit {
-    panel: Panel,
-    _task: Task<()>,
+    Search,
+    Members,
 }
 
 impl Larpcord {
     pub(super) fn cancel_panel_exit(&mut self, panel: Panel) {
-        if self
-            .panel_exit
-            .as_ref()
-            .is_some_and(|exit| exit.panel == panel)
-        {
-            self.panel_exit = None;
-        }
+        self.panel_exits.remove(&panel);
     }
+
+    pub(super) fn panel_closing(&self, panel: Panel) -> bool {
+        self.panel_exits.contains_key(&panel)
+    }
+
     pub(super) fn animate_panel_close(
         &mut self,
         panel: Panel,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if panel == Panel::Profile {
+            self.cancel_panel_exit(Panel::ProfileDetails);
+        }
         if !self.motion() {
             self.finish_panel_close(panel, window, cx);
             return;
         }
-        if self
-            .panel_exit
-            .as_ref()
-            .is_some_and(|exit| exit.panel == panel)
-        {
+        if self.panel_closing(panel) {
             return;
         }
-        self.panel_exit = Some(Exit {
+        self.panel_exits.insert(
             panel,
-            _task: cx.spawn_in(window, async move |view, cx| {
+            cx.spawn_in(window, async move |view, cx| {
                 cx.background_executor().timer(EXIT_DURATION).await;
                 let _ = view.update_in(cx, |this, window, cx| {
                     this.finish_panel_close(panel, window, cx)
                 });
             }),
-        });
+        );
         cx.notify();
     }
 
     fn finish_panel_close(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
-        self.panel_exit = None;
+        self.cancel_panel_exit(panel);
         match panel {
             Panel::Profile => self.dismiss_profile(window, cx),
+            Panel::ProfileDetails => self.collapse_profile(cx),
             Panel::Settings => self.close_settings(window, cx),
             Panel::Picker => {
                 self.close_picker();
                 window.focus(&self.composer.focus_handle(cx));
                 cx.notify();
             }
+            Panel::Search => self.close_conversation_search(window, cx),
+            Panel::Members => {
+                self.members_open = false;
+                self.subscribe_members();
+                cx.notify();
+            }
         }
     }
 
-    pub(super) fn panel_transition<E: IntoElement + Styled + 'static>(
+    pub(super) fn panel_transition<E: IntoElement + 'static>(
         &self,
         element: E,
         panel: Panel,
         enter: &'static str,
+        effect: impl Fn(E, f32) -> E + 'static,
     ) -> AnyElement {
-        if self.motion()
-            && self
-                .panel_exit
-                .as_ref()
-                .is_some_and(|exit| exit.panel == panel)
-        {
-            let exit = match panel {
-                Panel::Profile => "profile-exit",
-                Panel::Settings => "settings-exit",
-                Panel::Picker => "picker-exit",
-            };
+        if !self.motion() {
+            return element.into_any_element();
+        }
+        if self.panel_closing(panel) {
             element
-                .with_animation(exit, Animation::new(EXIT_DURATION), |s, t| {
-                    s.opacity(1. - t)
-                })
+                .with_animation(
+                    ElementId::NamedInteger(enter.into(), 1),
+                    Animation::new(EXIT_DURATION).with_easing(ease_in_out),
+                    move |s, t| effect(s, 1. - t),
+                )
                 .into_any_element()
         } else {
-            fade_in(element, enter, self.motion())
+            element
+                .with_animation(
+                    enter,
+                    Animation::new(ENTER_DURATION).with_easing(ease_out_quint()),
+                    effect,
+                )
+                .into_any_element()
         }
     }
 }

@@ -1,9 +1,10 @@
-use super::*;
+use super::{panels::Panel, *};
 
 const MAX_RESULTS: usize = 20;
 
 impl Larpcord {
     pub(super) fn reset_conversation_search(&mut self, cx: &mut Context<Self>) {
+        self.cancel_panel_exit(Panel::Search);
         self.conversation_search_open = false;
         self.searched_message = None;
         self.conversation_search
@@ -24,6 +25,7 @@ impl Larpcord {
         }
         self.close_composer_tools();
         self.close_picker();
+        self.cancel_panel_exit(Panel::Search);
         self.conversation_search_open = true;
         self.searched_message = None;
         window.focus(&self.conversation_search.focus_handle(cx));
@@ -35,6 +37,7 @@ impl Larpcord {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_panel_exit(Panel::Search);
         self.conversation_search_open = false;
         window.focus(&self.composer.focus_handle(cx));
         cx.notify();
@@ -44,8 +47,8 @@ impl Larpcord {
         toolbar_button("conversation-search", "search", "Search loaded messages")
             .when(self.conversation_search_open, |s| s.bg(self.color(SURFACE)))
             .on_click(cx.listener(|this, _, window, cx| {
-                if this.conversation_search_open {
-                    this.close_conversation_search(window, cx);
+                if this.conversation_search_open && !this.panel_closing(Panel::Search) {
+                    this.animate_panel_close(Panel::Search, window, cx);
                 } else {
                     this.open_conversation_search(window, cx);
                 }
@@ -88,7 +91,7 @@ impl Larpcord {
                         toolbar_button("close-conversation-search", "close", "Close search")
                             .size(px(26.))
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.close_conversation_search(window, cx)
+                                this.animate_panel_close(Panel::Search, window, cx);
                             })),
                     ),
             )
@@ -197,6 +200,10 @@ impl Larpcord {
                             }))
                     })),
             )
-            .into_any_element()
+            .map(|s| {
+                self.panel_transition(s, Panel::Search, "conversation-search-enter", |s, t| {
+                    s.top(px(55. - 7. * (1. - t))).opacity(t)
+                })
+            })
     }
 }
