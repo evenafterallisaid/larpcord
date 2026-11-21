@@ -267,9 +267,12 @@ impl Larpcord {
     }
 
     pub(super) fn edit_profile_settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut panel = column()
-            .gap_4()
-            .child(div().text_size(px(26.)).child("Edit profile"));
+        let mut panel = column().gap_4().child(
+            div()
+                .text_size(px(23.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Edit profile"),
+        );
         if self.preview || self.status != "Connected" {
             return panel
                 .child(label("Connect Discord to edit your account profile."))
@@ -324,104 +327,172 @@ impl Larpcord {
                 None
             }
         });
+        let accent = fields
+            .color()
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| before.accent());
+        let backdrop = self.color(SIDEBAR);
         let preview = column()
-            .w_full()
-            .overflow_hidden()
-            .rounded_xl()
-            .bg(self.color(SURFACE))
+            .flex_basis(px(216.))
+            .flex_grow()
+            .min_w(px(200.))
+            .gap_2()
             .child(
                 div()
-                    .relative()
-                    .h(px(104.))
-                    .bg(rgb(fields.color().ok().flatten().unwrap_or(0x39334c)))
-                    .when_some(banner, |s, image| {
-                        s.child(
-                            img(image)
-                                .absolute()
-                                .inset_0()
-                                .size_full()
-                                .object_fit(ObjectFit::Cover),
-                        )
-                    }),
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(self.color(MUTED))
+                    .child("Profile preview"),
             )
             .child(
                 column()
-                    .p_3()
-                    .gap_2()
+                    .relative()
+                    .overflow_hidden()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(self.color(LINE))
+                    .bg(backdrop)
                     .child(
-                        row()
-                            .gap_3()
+                        div()
+                            .relative()
+                            .h(px(100.))
+                            .flex_shrink_0()
+                            .bg(linear_gradient(
+                                112.,
+                                linear_color_stop(backdrop.blend(rgba((accent << 8) | 0x80)), 0.),
+                                linear_color_stop(backdrop.blend(rgba((accent << 8) | 0x32)), 1.),
+                            ))
+                            .when_some(banner, |s, image| {
+                                s.child(
+                                    img(image)
+                                        .absolute()
+                                        .inset_0()
+                                        .size_full()
+                                        .object_fit(ObjectFit::Cover),
+                                )
+                            }),
+                    )
+                    .child(
+                        column()
+                            .p_3()
+                            .pt(px(40.))
+                            .gap_1()
                             .child(
                                 div()
-                                    .size(px(44.))
-                                    .rounded_full()
-                                    .overflow_hidden()
-                                    .bg(self.color(PANEL))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .map(|e| {
-                                        if let Some(avatar) = avatar {
-                                            e.child(
-                                                img(avatar)
-                                                    .size_full()
-                                                    .rounded_full()
-                                                    .object_fit(ObjectFit::Cover),
-                                            )
-                                        } else {
-                                            e.child(
-                                                before
-                                                    .user
-                                                    .username
-                                                    .chars()
-                                                    .next()
-                                                    .unwrap_or('?')
-                                                    .to_string(),
-                                            )
-                                        }
+                                    .truncate()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_size(px(18.))
+                                    .child(if fields.name.trim().is_empty() {
+                                        before.user.username.clone()
+                                    } else {
+                                        fields.name.clone()
                                     }),
                             )
                             .child(
-                                column()
-                                    .min_w_0()
-                                    .child(div().font_weight(FontWeight::BOLD).child(
-                                        if fields.name.trim().is_empty() {
-                                            before.user.username.clone()
-                                        } else {
-                                            fields.name.clone()
-                                        },
-                                    ))
-                                    .child(label(fields.pronouns.clone())),
-                            ),
+                                div()
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .text_color(self.color(MUTED))
+                                    .child(if fields.pronouns.trim().is_empty() {
+                                        format!("@{}", before.user.username)
+                                    } else {
+                                        format!("@{} · {}", before.user.username, fields.pronouns)
+                                    }),
+                            )
+                            .when(!fields.bio.trim().is_empty(), |s| {
+                                s.child(
+                                    column()
+                                        .mt_2()
+                                        .p_2()
+                                        .gap_1()
+                                        .bg(self.color(PANEL))
+                                        .rounded_md()
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(self.color(MUTED))
+                                                .child("About me"),
+                                        )
+                                        .child(self.rich_text(&fields.bio)),
+                                )
+                            }),
                     )
-                    .when(!fields.bio.is_empty(), |s| {
-                        s.child(self.rich_text(&fields.bio))
-                    }),
+                    .child(
+                        row()
+                            .absolute()
+                            .top(px(66.))
+                            .left(px(12.))
+                            .size(px(68.))
+                            .rounded_full()
+                            .justify_center()
+                            .bg(backdrop)
+                            .child(
+                                row()
+                                    .size(px(60.))
+                                    .rounded_full()
+                                    .overflow_hidden()
+                                    .justify_center()
+                                    .bg(self.color(SURFACE))
+                                    .map(|s| match avatar {
+                                        Some(image) => s.child(
+                                            img(image)
+                                                .size_full()
+                                                .rounded_full()
+                                                .object_fit(ObjectFit::Cover),
+                                        ),
+                                        None => s.child(
+                                            before
+                                                .user
+                                                .username
+                                                .chars()
+                                                .next()
+                                                .unwrap_or('?')
+                                                .to_string(),
+                                        ),
+                                    }),
+                            ),
+                    ),
             );
-        panel = panel.child(preview);
         if editor.needs_reload {
             return panel
+                .child(preview)
                 .child(
                     button("reload-account-profile", "Reload from Discord")
                         .on_click(cx.listener(|this, _, _, cx| this.load_profile_editor(cx))),
                 )
                 .into_any_element();
         }
+        let mut form = column()
+            .gap_3()
+            .flex_basis(px(300.))
+            .flex_grow()
+            .min_w(px(240.));
         for (caption, input) in [
             ("Display name", &editor.name),
             ("Pronouns", &editor.pronouns),
-            ("About me · Enter adds a line in the preview", &editor.bio),
-            ("Profile color · hex", &editor.color),
+            ("About me", &editor.bio),
+            ("Profile color (hex)", &editor.color),
         ] {
-            panel = panel.child(
-                column().gap_1().child(label(caption)).child(
-                    div()
-                        .rounded_lg()
-                        .px_3()
-                        .overflow_hidden()
-                        .bg(self.color(PANEL))
-                        .child(input.clone()),
-                ),
+            form = form.child(
+                column()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(caption),
+                    )
+                    .child(
+                        div()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(self.color(LINE))
+                            .px_3()
+                            .overflow_hidden()
+                            .bg(self.color(PANEL))
+                            .child(input.clone()),
+                    ),
             );
         }
         for (kind, can_change, edit, has_image) in [
@@ -443,11 +514,17 @@ impl Larpcord {
             ),
         ] {
             let name = kind.label();
-            panel = panel.child(
+            form = form.child(
                 row()
                     .gap_2()
                     .flex_wrap()
-                    .child(label(name))
+                    .child(
+                        div()
+                            .w(px(44.))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(name),
+                    )
                     .when(can_change, |s| {
                         s.child(
                             button(SharedString::from(format!("choose-{name}")), "Choose image")
@@ -500,19 +577,32 @@ impl Larpcord {
             );
         }
         panel
-            .child(label(
-                "PNG, JPEG or WebP. Images are cropped to fit the preview.",
-            ))
             .child(
-                button(
-                    "save-account-profile",
-                    if busy {
-                        "Preparing image…"
-                    } else {
-                        "Save profile"
-                    },
-                )
-                .on_click(cx.listener(|this, _, window, cx| this.save_profile(window, cx))),
+                row()
+                    .items_start()
+                    .flex_wrap()
+                    .gap_4()
+                    .child(form)
+                    .child(preview),
+            )
+            .child(
+                row()
+                    .justify_between()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(label("Image formats: PNG, JPEG or WebP.").text_size(px(11.)))
+                    .child(
+                        button(
+                            "save-account-profile",
+                            if busy {
+                                "Preparing image…"
+                            } else {
+                                "Save profile"
+                            },
+                        )
+                        .bg(self.color(SURFACE))
+                        .on_click(cx.listener(|this, _, window, cx| this.save_profile(window, cx))),
+                    ),
             )
             .into_any_element()
     }

@@ -3320,6 +3320,7 @@ impl Larpcord {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let replacing_popup = self.profile_is_modal();
         self.panel_exit = None;
         self.profile_inspector = false;
         self.profile_expanded = false;
@@ -3330,7 +3331,9 @@ impl Larpcord {
             self.close_conversation_search(window, cx);
         }
         self.close_picker();
-        self.previous_focus = window.focused(cx);
+        if !replacing_popup {
+            self.previous_focus = window.focused(cx);
+        }
         window.focus(&self.modal_focus);
         self.profile_error = None;
         self.profile_request += 1;
@@ -3367,10 +3370,17 @@ impl Larpcord {
                     .is_some_and(|g| g.roles.is_empty()),
             });
         }
-        self.profile = Some(cached.unwrap_or(Profile {
-            user,
-            guild_member: member,
-            ..Profile::default()
+        self.profile = Some(cached.unwrap_or_else(|| {
+            let profile = Profile {
+                user,
+                guild_member: member,
+                ..Profile::default()
+            };
+            if self.preview {
+                self.demo_profile(profile)
+            } else {
+                profile
+            }
         }));
         cx.notify();
     }
@@ -5278,6 +5288,36 @@ mod tests {
         assert!(((card.left() + details.right()) / 2. - viewport.width / 2.).abs() < px(1.));
         cx.simulate_click(point(px(12.), px(64.)), Modifiers::default());
         cx.update(|_, cx| assert!(view.read(cx).profile.is_none()));
+    }
+
+    #[gpui::test]
+    fn profile_status_and_full_profile_controls_fit_a_small_window(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        let viewport = size(px(960.), px(580.));
+        cx.simulate_resize(viewport);
+        view.update(cx, |v, cx| {
+            v.settings.animations = false;
+            v.store.presences.update(&serde_json::json!({
+                "user_id":"clover", "status":"online", "activities":[
+                    {"type":4,"state":"A long status has enough room to wrap without getting in the way of the display name."},
+                    {"type":0,"name":"A quiet game"}
+                ]
+            }));
+            v.profile = Some(v.demo_profile(Profile { user: v.store.users["clover"].clone(), ..Default::default() }));
+            v.profile_anchor = Some(point(viewport.width - px(20.), viewport.height - px(24.)));
+            cx.notify();
+        });
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let card = cx.debug_bounds("profile-card").unwrap();
+        let status = cx.debug_bounds("profile-status-bubble").unwrap();
+        let identity = cx.debug_bounds("profile-identity").unwrap();
+        assert!(status.right() < card.right() && status.bottom() <= identity.top());
+        let expand = cx.debug_bounds("expand-profile").unwrap();
+        cx.simulate_click(expand.center(), Modifiers::default());
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let details = cx.debug_bounds("expanded-profile-details").unwrap();
+        assert!(details.right() < viewport.width && details.bottom() < viewport.height);
+        assert!(cx.debug_bounds("profile-tab-3").is_some());
     }
 
     #[gpui::test]
