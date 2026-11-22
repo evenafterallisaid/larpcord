@@ -36,6 +36,12 @@ pub fn catalog_number(id: &str) -> Option<u32> {
     if let Some(id) = id.strip_prefix("catalog-") {
         return id.parse().ok();
     }
+    if matches!(
+        id,
+        "orb_profile_badge" | "orbs_apprentice" | "orb_apprentice"
+    ) {
+        return Some(16);
+    }
     if id == "premium" || id.starts_with("premium_tenure_") {
         return Some(1);
     }

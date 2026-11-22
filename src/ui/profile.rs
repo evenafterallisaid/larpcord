@@ -359,30 +359,6 @@ impl Larpcord {
                 )
             })
             .and_then(|url| self.banner_media(&url, true, cx));
-        let mut roles = self
-            .profile_guild
-            .as_ref()
-            .and_then(|id| self.store.guilds.iter().find(|g| &g.id == id))
-            .map(|g| {
-                g.roles
-                    .iter()
-                    .filter(|r| member.is_some_and(|m| m.roles.contains(&r.id)) && r.id != g.id)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        roles.sort_by(|a, b| b.position.cmp(&a.position).then(a.name.cmp(&b.name)));
-        let created = user
-            .id
-            .parse::<u64>()
-            .ok()
-            .and_then(|id| {
-                chrono::DateTime::from_timestamp_millis(((id >> 22) + 1420070400000) as i64)
-            })
-            .map(|t| t.format("%b %d, %Y").to_string());
-        let joined = member
-            .and_then(|m| m.joined_at.as_deref())
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| t.format("%b %d, %Y").to_string());
         let mut effect_layers = Vec::new();
         if let Some(effect) = profile.effect_asset.as_ref() {
             // reduced-motion assets remain the fallback; animated layers exist only while open.
@@ -415,17 +391,12 @@ impl Larpcord {
                         let started = self.profile_started;
                         let layer = layer.clone();
                         let animated = self.motion();
+                        let frame_ends = self.profile_frame_ends(&image);
+                        let duration = frame_ends.last().copied().unwrap_or(0.);
                         effect_layers.push(
                             canvas(
                                 move |_, _, _| (),
                                 move |bounds, _, window, _| {
-                                    let delays = (0..image.frame_count())
-                                        .map(|n| {
-                                            let (num, den) = image.delay(n).numer_denom_ms();
-                                            (num as f32 / den.max(1) as f32).max(10.)
-                                        })
-                                        .collect::<Vec<_>>();
-                                    let duration = delays.iter().sum::<f32>();
                                     let elapsed = started.elapsed().as_secs_f32() * 1000.;
                                     let phase = if animated && image.frame_count() > 1 {
                                         layer.phase(elapsed, duration)
@@ -440,12 +411,10 @@ impl Larpcord {
                                     {
                                         window.request_animation_frame();
                                     }
-                                    if let Some(mut time) = phase {
-                                        let mut frame = 0;
-                                        while frame + 1 < delays.len() && time >= delays[frame] {
-                                            time -= delays[frame];
-                                            frame += 1;
-                                        }
+                                    if let Some(time) = phase {
+                                        let frame = frame_ends
+                                            .partition_point(|end| *end <= time)
+                                            .min(frame_ends.len().saturating_sub(1));
                                         let _ = window.paint_image(
                                             bounds,
                                             Corners::default(),
@@ -468,7 +437,6 @@ impl Larpcord {
             }
         }
         let card_id = user.id.clone();
-        let about = self.profile_about(profile, roles, created, joined, expanded, cx);
         let card = column()
             .relative()
             .w_full()
@@ -525,7 +493,7 @@ impl Larpcord {
                             .bg(self.color(PANEL))
                             .overflow_hidden()
                             .child(if expanded || own || self.profile_tab == 0 {
-                                about
+                                self.profile_about(profile, expanded, cx)
                             } else {
                                 self.profile_mutuals(profile, cx)
                             }),
@@ -779,15 +747,58 @@ impl Larpcord {
             .into_any_element()
     }
 
+    fn profile_frame_ends(&self, image: &RenderImage) -> std::sync::Arc<[f32]> {
+        let mut timings = self.profile_effect_timings.borrow_mut();
+        if let Some(cached) = timings.get(&image.id) {
+            return cached.clone();
+        }
+        if timings.len() >= 16 {
+            timings.clear();
+        }
+        let mut end = 0.;
+        let frame_ends: std::sync::Arc<[f32]> = (0..image.frame_count())
+            .map(|frame| {
+                let (num, den) = image.delay(frame).numer_denom_ms();
+                end += (num as f32 / den.max(1) as f32).max(10.);
+                end
+            })
+            .collect();
+        timings.insert(image.id, frame_ends.clone());
+        frame_ends
+    }
+
     fn profile_about(
         &self,
         profile: &Profile,
-        roles: Vec<&crate::model::Role>,
-        created: Option<String>,
-        joined: Option<String>,
         expanded: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let user = &profile.user;
+        let member = profile.guild_member.as_ref();
+        let mut roles = self
+            .profile_guild
+            .as_ref()
+            .and_then(|id| self.store.guilds.iter().find(|g| &g.id == id))
+            .map(|g| {
+                g.roles
+                    .iter()
+                    .filter(|r| member.is_some_and(|m| m.roles.contains(&r.id)) && r.id != g.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        roles.sort_by(|a, b| b.position.cmp(&a.position).then(a.name.cmp(&b.name)));
+        let created = user
+            .id
+            .parse::<u64>()
+            .ok()
+            .and_then(|id| {
+                chrono::DateTime::from_timestamp_millis(((id >> 22) + 1420070400000) as i64)
+            })
+            .map(|t| t.format("%b %d, %Y").to_string());
+        let joined = member
+            .and_then(|m| m.joined_at.as_deref())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.format("%b %d, %Y").to_string());
         let bio = profile.bio().filter(|text| !text.trim().is_empty());
         let effect = profile
             .effect_asset

@@ -111,8 +111,6 @@ pub struct Profile {
     #[serde(skip)]
     pub effect_asset: Option<crate::effects::Effect>,
     #[serde(skip)]
-    pub roles: Vec<Role>,
-    #[serde(skip)]
     pub frame_asset: Option<crate::effects::ProfileFrame>,
 }
 
@@ -139,7 +137,33 @@ impl ProfileBadge {
             || (!self.icon.is_empty() && self.icon == other.icon)
             || crate::badges::catalog_number(&self.id)
                 .is_some_and(|id| crate::badges::catalog_number(&other.id) == Some(id))
+            || (self.is_orbs_apprentice() && other.is_orbs_apprentice())
     }
+
+    fn is_orbs_apprentice(&self) -> bool {
+        if crate::badges::catalog_number(&self.id) == Some(16)
+            || self.icon.split(['?', '#']).next().is_some_and(|icon| {
+                let file = icon.rsplit('/').next().unwrap_or(icon);
+                matches!(
+                    file,
+                    "83d8a1eb09a8d64e59233eec5d4d5c2d" | "83d8a1eb09a8d64e59233eec5d4d5c2d.png"
+                )
+            })
+        {
+            return true;
+        }
+        let mut words = self
+            .description
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty());
+        words.next().is_some_and(|word| {
+            word.eq_ignore_ascii_case("orb") || word.eq_ignore_ascii_case("orbs")
+        }) && words
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("apprentice"))
+            && words.next().is_none()
+    }
+
     pub fn image(&self) -> Option<String> {
         if crate::media::cdn_url(&self.icon) && self.icon.len() <= 2048 {
             return Some(self.icon.clone());
@@ -1158,6 +1182,32 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_and_catalog_orbs_apprentice_are_the_same_badge() {
+        let legacy = super::ProfileBadge {
+            id: "orb_profile_badge".into(),
+            icon: "83d8a1eb09a8d64e59233eec5d4d5c2d".into(),
+            ..Default::default()
+        };
+        let catalog = super::ProfileBadge {
+            id: "catalog-16".into(),
+            icon: "https://cdn.discordapp.com/assets/orb-apprentice.png".into(),
+            description: "Orbs — Apprentice".into(),
+            ..Default::default()
+        };
+        let alternate = super::ProfileBadge {
+            id: "alternate-orbs-id".into(),
+            description: "Orbs Apprentice".into(),
+            ..Default::default()
+        };
+        assert!(legacy.same_as(&catalog));
+        assert!(legacy.same_as(&alternate));
+        assert!(!legacy.same_as(&super::ProfileBadge {
+            description: "Orbs Master".into(),
+            ..Default::default()
+        }));
+    }
+
     #[test]
     fn server_profile_theme_takes_precedence_without_changing_global_colors() {
         let profile: Profile = serde_json::from_value(serde_json::json!({

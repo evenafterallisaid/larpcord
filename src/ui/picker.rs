@@ -263,9 +263,39 @@ impl Larpcord {
     }
 
     pub(super) fn remember_emoji(&mut self, token: String, cx: &mut Context<Self>) {
+        if self.reaction_target.is_none() {
+            self.record_account_emoji(&token, false);
+        }
         self.picker.remember(token);
         self.settings.recent_emoji = self.picker.recent.clone();
         self.persist(cx);
+    }
+
+    pub(super) fn record_account_emoji(&mut self, token: &str, reaction: bool) {
+        if !self.preview && self.status == "Connected" {
+            self.command(Command::RecordEmoji {
+                token: token.to_owned(),
+                reaction,
+            });
+        }
+    }
+
+    pub(super) fn apply_emoji_history(
+        &mut self,
+        recents: crate::gif_favorites::Recents,
+        cx: &mut Context<Self>,
+    ) {
+        self.picker.account_recent = recents.messages;
+        self.picker.reaction_recent = recents.reactions;
+        self.picker.account_stickers = recents.stickers;
+        self.picker
+            .sticker_details
+            .retain(|id, _| self.picker.account_stickers.contains(id));
+        if self.emoji_open && self.picker.tab == Tab::Stickers {
+            self.load_recent_stickers();
+        }
+        self.picker.recents_error = None;
+        self.picker_catalog_ready(cx);
     }
 
     pub(super) fn emoji_lock_reason(&self, guild: &Guild, emoji: &Emoji) -> Option<&'static str> {

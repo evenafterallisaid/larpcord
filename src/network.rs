@@ -16,6 +16,7 @@ use tokio_tungstenite::{
 };
 use zeroize::Zeroizing;
 
+use crate::gif_favorites::{Recents, emoji_usage};
 use crate::model::{Channel, Guild, Member, Message, Page, PinPage, Profile, User};
 
 pub enum Event {
@@ -27,8 +28,10 @@ pub enum Event {
     Reacted {
         channel: String,
         message: String,
+        added_emoji: Option<String>,
         result: Result<(), String>,
     },
+    EmojiUsageSaved(Result<Recents, String>),
     EmojiRecents(Result<crate::gif_favorites::Recents, String>),
     StickerDetails(Vec<crate::expressions::Sticker>),
     ProfileBadges {
@@ -85,6 +88,10 @@ pub enum Event {
         request: u64,
         result: Result<Box<Profile>, String>,
     },
+    ProfileRoles {
+        guild: String,
+        roles: Vec<crate::model::Role>,
+    },
     ProfileEffect {
         id: String,
         guild: Option<String>,
@@ -124,6 +131,10 @@ pub enum Command {
         remove: bool,
     },
     EmojiRecents,
+    RecordEmoji {
+        token: String,
+        reaction: bool,
+    },
     StickerDetails(Vec<String>),
     GifFavorites(Option<(crate::expressions::Gif, bool)>),
     CancelGifs,
@@ -238,6 +249,7 @@ struct Api {
     token: Arc<Zeroizing<String>>,
     gate: Arc<Mutex<Instant>>,
     discovery_gate: Arc<Mutex<Instant>>,
+    expression_settings: Arc<Mutex<()>>,
     badge_schema: Arc<tokio::sync::OnceCell<Option<u32>>>,
     effects: Arc<Mutex<EffectCache>>,
     session_id: Arc<std::sync::Mutex<Option<String>>>,
@@ -338,6 +350,7 @@ impl Api {
             token: Arc::new(token),
             gate: Arc::new(Mutex::new(Instant::now())),
             discovery_gate: Arc::new(Mutex::new(Instant::now())),
+            expression_settings: Arc::new(Mutex::new(())),
             badge_schema: Arc::new(tokio::sync::OnceCell::new()),
             effects: Arc::new(Mutex::new(EffectCache::default())),
             session_id: Arc::new(std::sync::Mutex::new(None)),
@@ -391,11 +404,36 @@ impl Api {
         api
     }
 
+    async fn save_emoji_usage(&self, batch: emoji_usage::Batch) -> Result<Recents, String> {
+        let path = "/users/@me/settings-proto/2";
+        let _settings = self.expression_settings.lock().await;
+        let current = self.request::<Value>(Method::GET, path, None).await?;
+        let (version, patch) = emoji_usage::patch(&current, &batch, emoji_usage::now_ms())
+            .ok_or_else(|| "Discord’s emoji settings could not be updated safely.".to_string())?;
+        let saved = self
+            .request::<Value>(
+                Method::PATCH,
+                path,
+                Some(json!({"settings":patch,"required_data_version":version})),
+            )
+            .await?;
+        if !emoji_usage::confirms(&saved, version) {
+            return Err("Discord did not confirm the emoji usage update.".into());
+        }
+        crate::gif_favorites::emoji_recents(&saved)
+            .map_err(|_| "Discord’s updated emoji usage could not be read.".into())
+    }
+
     async fn gif_favorites(
         &self,
         change: Option<(crate::expressions::Gif, bool)>,
     ) -> Result<Vec<crate::expressions::Gif>, String> {
         let path = "/users/@me/settings-proto/2";
+        let _settings = if change.is_some() {
+            Some(self.expression_settings.lock().await)
+        } else {
+            None
+        };
         let current = crate::gif_favorites::Favorites::decode(
             &self.request::<Value>(Method::GET, path, None).await?,
         )?;
@@ -853,6 +891,9 @@ impl Backend {
                 let mut requests = JoinSet::new();
                 let mut gif_request:Option<tokio::task::AbortHandle>=None;
                 let mut auth = JoinSet::new();
+                let mut emoji_saves = JoinSet::new();
+                let mut emoji_batch = emoji_usage::Batch::default();
+                let mut emoji_due: Option<Instant> = None;
                 let mut api = None::<Api>;
                 let mut generation = 0;
                 let (viewed_guild, viewed_rx) = watch::channel::<Viewed>(Viewed::default());
@@ -866,6 +907,18 @@ impl Backend {
                         Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
                         Some(_) = requests.join_next(), if !requests.is_empty() => {}
                         Some(_) = auth.join_next(), if !auth.is_empty() => {}
+                        Some(_) = emoji_saves.join_next(), if !emoji_saves.is_empty() => {}
+                        _ = sleep_until(emoji_due.unwrap_or_else(Instant::now)), if emoji_due.is_some() && emoji_saves.is_empty() => {
+                            emoji_due = None;
+                            let batch = std::mem::take(&mut emoji_batch);
+                            if let Some(client) = api.as_ref().map(Api::discovery) {
+                                let events = events.clone();
+                                emoji_saves.spawn(async move {
+                                    let result = client.save_emoji_usage(batch).await;
+                                    emit(&events, generation, Event::EmojiUsageSaved(result)).await;
+                                });
+                            }
+                        }
                         command = commands.recv() => {
                             let Some(command) = command else { break; };
                             match command {
@@ -893,6 +946,9 @@ impl Backend {
                                     auth.abort_all();
                                     tasks.abort_all();
                                     requests.abort_all();
+                                    emoji_saves.abort_all();
+                                    emoji_batch = emoji_usage::Batch::default();
+                                    emoji_due = None;
                                     generation = new_generation;
                                     let _ = viewed_guild.send(Viewed::default());
                                     match Api::new(token) {
@@ -919,7 +975,16 @@ impl Backend {
                                         Err(error) => emit(&events, generation, Event::Error(error)).await,
                                     }
                                 }
-                                Command::Disconnect => { tasks.abort_all(); requests.abort_all(); auth.abort_all(); api = None; let _ = viewed_guild.send(Viewed::default()); }
+                                Command::Disconnect => {
+                                    tasks.abort_all();
+                                    requests.abort_all();
+                                    auth.abort_all();
+                                    emoji_saves.abort_all();
+                                    emoji_batch = emoji_usage::Batch::default();
+                                    emoji_due = None;
+                                    api = None;
+                                    let _ = viewed_guild.send(Viewed::default());
+                                }
                                 Command::Forget => {
                                     let events = events.clone();
                                     tokio::task::spawn_blocking(move || {
@@ -942,7 +1007,11 @@ impl Backend {
                                 }
                                 Command::React {channel,message,emoji,remove} => {
                                     let Some(client)=api.clone() else {continue;};let events=events.clone();
-                                    requests.spawn(async move {let result=client.react(&channel,&message,&emoji,remove).await;emit(&events,generation,Event::Reacted{channel,message,result}).await;});
+                                    requests.spawn(async move {
+                                        let result=client.react(&channel,&message,&emoji,remove).await;
+                                        let added_emoji=(!remove && result.is_ok()).then_some(emoji);
+                                        emit(&events,generation,Event::Reacted{channel,message,added_emoji,result}).await;
+                                    });
                                 }
                                 Command::StickerDetails(ids) => {
                                     let Some(client)=api.as_ref().map(Api::discovery) else {continue;};
@@ -955,6 +1024,11 @@ impl Backend {
                                             .buffer_unordered(2).filter_map(|s|async move{s}).collect().await;
                                         emit(&events,generation,Event::StickerDetails(stickers)).await;
                                     });
+                                }
+                                Command::RecordEmoji { token, reaction } => {
+                                    if api.is_some() && emoji_batch.record(&token, reaction, emoji_usage::now_ms()) {
+                                        emoji_due.get_or_insert_with(|| Instant::now() + Duration::from_secs(15));
+                                    }
                                 }
                                 Command::EmojiRecents => {
                                     let events=events.clone();
@@ -1027,13 +1101,18 @@ impl Backend {
                                     if !snowflake(&id) || guild.as_ref().is_some_and(|id| !snowflake(id)) { continue; }
                                     let events = events.clone();
                                     requests.spawn(async move {
-                                        let mut result = client.profile(&id, guild.as_deref()).await;
-                                        if let Ok(profile) = &mut result && roles_needed && let Some(guild) = &guild {
-                                            profile.roles = client.request(Method::GET,&format!("/guilds/{guild}/roles"),None).await.unwrap_or_default();
-                                        }
+                                        let result = client.profile(&id, guild.as_deref()).await;
+                                        let loaded = result.is_ok();
                                         let effect_ref = result.as_ref().ok().and_then(|p| p.effect_ref());
                                         let frame_ref=result.as_ref().ok().and_then(|p|p.collectible_ref(3)).map(str::to_string);
                                         emit(&events, generation, Event::Profile {id:id.clone(), guild:guild.clone(), request, result:result.map(Box::new)}).await;
+                                        let roles = async {
+                                            if loaded && roles_needed && let Some(guild) = &guild
+                                                && let Ok(roles) = client.request(Method::GET,&format!("/guilds/{guild}/roles"),None).await
+                                            {
+                                                emit(&events,generation,Event::ProfileRoles{guild:guild.clone(),roles}).await;
+                                            }
+                                        };
                                         let badges=async {
                                             let client=client.discovery();
                                             let account = if own { "@me" } else { &id };
@@ -1053,7 +1132,7 @@ impl Backend {
                                         let frame=match frame_ref {Some(sku)=>client.effect(&sku).await.and_then(|e|e.frame),None=>None};
                                         emit(&events,generation,Event::ProfileEffect{id:id.clone(),guild:guild.clone(),request,effect:effect.map(Box::new),frame:frame.map(Box::new)}).await;
                                         };
-                                        tokio::join!(badges,cosmetics);
+                                        tokio::join!(badges,roles,cosmetics);
                                     });
                                 }
                                 Command::Pins { channel, request, before } => {
@@ -1675,6 +1754,58 @@ mod tests {
         assert_eq!(result.bio(), Some("updated"));
         server.await.unwrap();
     }
+    #[tokio::test]
+    async fn emoji_usage_reads_then_patches_only_the_versioned_emoji_subtree() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut api = Api::new(Zeroizing::new("synthetic-session".into())).unwrap();
+        api.endpoint = Some(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            for method in ["GET", "PATCH"] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut line = String::new();
+                socket.read_line(&mut line).await.unwrap();
+                assert!(line.starts_with(&format!("{method} /users/@me/settings-proto/2 ")));
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut settings = vec![0x0a, 2, 0x18, 8];
+                if method == "PATCH" {
+                    let mut bytes = vec![0; length];
+                    socket.read_exact(&mut bytes).await.unwrap();
+                    let body: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(body["required_data_version"], 8);
+                    let patch = STANDARD.decode(body["settings"].as_str().unwrap()).unwrap();
+                    assert_eq!(patch[0], 0x32);
+                    assert_eq!(usize::from(patch[1]) + 2, patch.len());
+                    settings[3] = 9;
+                    settings.extend(patch);
+                }
+                let body = json!({"settings": STANDARD.encode(settings)}).to_string();
+                socket.get_mut().write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                ).as_bytes()).await.unwrap();
+            }
+        });
+        let mut batch = emoji_usage::Batch::default();
+        assert!(batch.record("😭", false, emoji_usage::now_ms()));
+        let result = api.save_emoji_usage(batch).await.unwrap();
+        assert_eq!(result.messages, ["sob"]);
+        assert!(result.reactions.is_empty());
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn reaction_requests_encode_emoji_and_accept_discord_empty_responses() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

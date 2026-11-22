@@ -162,6 +162,7 @@ pub struct Larpcord {
     profile_guild: Option<String>,
     profile_request: u64,
     profile_started: std::time::Instant,
+    profile_effect_timings: std::cell::RefCell<HashMap<ImageId, std::sync::Arc<[f32]>>>,
     component_menu: Option<(Message, crate::components::Component)>,
     video: Option<Entity<crate::video::Playback>>,
     video_title: String,
@@ -656,6 +657,7 @@ impl Larpcord {
             profile_guild: None,
             profile_request: 0,
             profile_started: std::time::Instant::now(),
+            profile_effect_timings: Default::default(),
             component_menu: None,
             video: None,
             video_title: String::new(),
@@ -1453,9 +1455,13 @@ impl Larpcord {
             Event::Reacted {
                 channel,
                 message,
+                added_emoji,
                 result,
             } => {
                 self.reaction_pending.remove(&(channel, message));
+                if let Some(emoji) = added_emoji {
+                    self.record_account_emoji(&emoji, true);
+                }
                 if let Err(error) = result {
                     self.error = Some(error);
                 }
@@ -1473,22 +1479,14 @@ impl Larpcord {
             Event::EmojiRecents(result) => {
                 self.picker.recents_loading = false;
                 match result {
-                    Ok(recents) => {
-                        self.picker.account_recent = recents.messages;
-                        self.picker.reaction_recent = recents.reactions;
-                        self.picker.account_stickers = recents.stickers;
-                        self.picker
-                            .sticker_details
-                            .retain(|id, _| self.picker.account_stickers.contains(id));
-                        if self.emoji_open && self.picker.tab == crate::expressions::Tab::Stickers {
-                            self.load_recent_stickers();
-                        }
-                        self.picker.recents_error = None;
-                    }
+                    Ok(recents) => self.apply_emoji_history(recents, cx),
                     Err(error) => self.picker.recents_error = Some(error),
                 }
-                self.picker_catalog_ready(cx);
             }
+            Event::EmojiUsageSaved(result) => match result {
+                Ok(recents) => self.apply_emoji_history(recents, cx),
+                Err(error) => self.picker.recents_error = Some(error),
+            },
             Event::GifFavorites(result) => {
                 self.picker.favorites_loading = false;
                 match result {
@@ -1760,27 +1758,38 @@ impl Larpcord {
                     && self.profile_request == request;
                 match result {
                     Ok(profile) => {
-                        if !profile.roles.is_empty()
-                            && let Some(server) = guild
-                                .as_ref()
-                                .and_then(|id| self.store.guilds.iter_mut().find(|g| &g.id == id))
-                        {
-                            server.roles = profile.roles.clone();
-                        }
                         if current {
                             self.profile = Some((*profile).clone());
                         }
-                        if self.profiles.len() >= 32 {
-                            self.profiles.clear();
+                        let key = (id, guild);
+                        if self.profiles.len() >= 32
+                            && !self.profiles.contains_key(&key)
+                            && let Some(oldest) = self
+                                .profiles
+                                .iter()
+                                .min_by_key(|(_, (_, time))| *time)
+                                .map(|(key, _)| key.clone())
+                        {
+                            self.profiles.remove(&oldest);
                         }
                         self.profiles
-                            .insert((id, guild), (*profile, std::time::Instant::now()));
+                            .insert(key, (*profile, std::time::Instant::now()));
                     }
                     Err(error) => {
                         if current {
                             self.profile_error = Some(error);
                         }
                     }
+                }
+            }
+            Event::ProfileRoles { guild, roles } => {
+                if let Some(server) = self
+                    .store
+                    .guilds
+                    .iter_mut()
+                    .find(|g| g.id == guild && g.roles.is_empty())
+                {
+                    server.roles = roles;
                 }
             }
             Event::ProfileEffect {
@@ -5168,8 +5177,8 @@ impl Render for Larpcord {
             })
             .when(self.settings_tab.is_some(), |s| s.child(self.settings(cx)))
             .when_some(
-                self.profile.clone().filter(|_| !self.profile_inspector),
-                |s, user| s.child(self.profile_panel(&user, Some(window.viewport_size()), cx)),
+                self.profile.as_ref().filter(|_| !self.profile_inspector),
+                |s, user| s.child(self.profile_panel(user, Some(window.viewport_size()), cx)),
             )
             .when(self.video.is_some(), |s| s.child(self.video_panel(cx)))
             .when_some(self.component_menu.clone(), |s, (message, component)| {

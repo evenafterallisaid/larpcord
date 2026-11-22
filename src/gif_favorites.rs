@@ -1,4 +1,6 @@
 // normal-client settings-proto/2 interop. retain unrecognized records byte for byte.
+pub mod emoji_usage;
+
 use crate::expressions::Gif;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::collections::{BTreeMap, HashSet};
