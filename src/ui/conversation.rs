@@ -29,22 +29,39 @@ impl Larpcord {
             .into_any_element()
     }
 
-    pub(super) fn reply_preview(&self, message: &Message) -> AnyElement {
-        let cached = message
-            .message_reference
-            .as_ref()
-            .and_then(|r| r["message_id"].as_str())
-            .and_then(|id| {
-                self.store
-                    .channel_messages(&message.channel_id)
-                    .iter()
-                    .find(|m| m.id == id)
-            });
+    pub(super) fn reply_preview(&self, message: &Message, cx: &mut Context<Self>) -> AnyElement {
+        let target = message.message_reference.as_ref().and_then(|reference| {
+            let in_channel = reference["channel_id"]
+                .as_str()
+                .is_none_or(|id| id == message.channel_id);
+            in_channel
+                .then(|| reference["message_id"].as_str())
+                .flatten()
+        });
+        let cached = target.and_then(|id| {
+            self.store
+                .channel_messages(&message.channel_id)
+                .iter()
+                .find(|m| m.id == id)
+        });
         let original = cached
             .map(crate::model::ReferencedMessage::from)
             .or_else(|| message.referenced_message.as_deref().cloned());
         row()
+            .id("reply-preview")
+            .debug_selector({
+                let id = message.id.clone();
+                move || format!("reply-preview-{id}")
+            })
             .relative()
+            .when_some(target.map(str::to_owned), |s, target| {
+                s.cursor_pointer()
+                    .hover(|s| s.text_color(self.color(TEXT)))
+                    .tooltip(|_, cx| cx.new(|_| Hint("Jump to original message".into())).into())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.jump_to_message(&target, window, cx);
+                    }))
+            })
             .h(px(20.))
             .gap_1()
             .min_w_0()

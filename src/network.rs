@@ -16,7 +16,7 @@ use tokio_tungstenite::{
 };
 use zeroize::Zeroizing;
 
-use crate::model::{Channel, Guild, Member, Message, Page, Profile, User};
+use crate::model::{Channel, Guild, Member, Message, Page, PinPage, Profile, User};
 
 pub enum Event {
     EditProfile {
@@ -59,6 +59,15 @@ pub enum Event {
     SignInRequired,
     Status(String),
     Dispatch(String, Value),
+    Pins {
+        request: u64,
+        result: Result<PinPage, String>,
+    },
+    MessageContext {
+        request: u64,
+        started: u64,
+        result: Result<Vec<Message>, String>,
+    },
     History {
         channel: String,
         started: u64,
@@ -135,6 +144,17 @@ pub enum Command {
         remember: bool,
     },
     Disconnect,
+    Pins {
+        channel: String,
+        request: u64,
+        before: Option<String>,
+    },
+    MessageContext {
+        channel: String,
+        target: String,
+        request: u64,
+        started: u64,
+    },
     History {
         channel: String,
         started: u64,
@@ -1034,6 +1054,31 @@ impl Backend {
                                         emit(&events,generation,Event::ProfileEffect{id:id.clone(),guild:guild.clone(),request,effect:effect.map(Box::new),frame:frame.map(Box::new)}).await;
                                         };
                                         tokio::join!(badges,cosmetics);
+                                    });
+                                }
+                                Command::Pins { channel, request, before } => {
+                                    let Some(client) = api.clone() else { continue; };
+                                    if !snowflake(&channel) { continue; }
+                                    let events = events.clone();
+                                    requests.spawn(async move {
+                                        let mut path = format!("/channels/{channel}/messages/pins?limit=50");
+                                        if let Some(before) = before {
+                                            let cursor = reqwest::Url::parse_with_params("https://discord.com", [("before", before)]).expect("static HTTPS URL");
+                                            path.push('&');
+                                            path.push_str(cursor.query().unwrap_or_default());
+                                        }
+                                        let result = client.request(Method::GET, &path, None).await;
+                                        emit(&events, generation, Event::Pins { request, result }).await;
+                                    });
+                                }
+                                Command::MessageContext { channel, target, request, started } => {
+                                    let Some(client) = api.clone() else { continue; };
+                                    if !snowflake(&channel) || !snowflake(&target) { continue; }
+                                    let events = events.clone();
+                                    requests.spawn(async move {
+                                        let path = format!("/channels/{channel}/messages?around={target}&limit=50");
+                                        let result = client.request(Method::GET, &path, None).await;
+                                        emit(&events, generation, Event::MessageContext { request, started, result }).await;
                                     });
                                 }
                                 Command::History { channel, started, request, page, cursor } => {

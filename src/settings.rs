@@ -89,6 +89,13 @@ impl Settings {
         });
         self.recent_gifs.truncate(32);
         for gif in &mut self.recent_gifs {
+            if gif
+                .thumbnail
+                .as_deref()
+                .is_some_and(|url| !crate::expressions::gif_preview(url))
+            {
+                gif.thumbnail = None;
+            }
             if gif.preview.as_deref().is_some_and(|url| {
                 !crate::expressions::gif_preview(url) && !crate::media::cdn_url(url)
             }) {

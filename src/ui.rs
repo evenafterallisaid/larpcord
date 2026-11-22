@@ -15,6 +15,7 @@ mod modules;
 mod panels;
 mod panes;
 mod picker;
+mod pins;
 mod profile;
 mod profile_edit;
 mod text;
@@ -72,6 +73,8 @@ pub struct Larpcord {
     conversation_search: Entity<TextInput>,
     conversation_search_open: bool,
     searched_message: Option<String>,
+    pins: pins::Pins,
+    message_jump: pins::MessageJump,
     composer_tools_open: bool,
     composer_tool_task: Option<Task<()>>,
     composer_tool_result: Option<composer_tools::Outcome>,
@@ -556,6 +559,8 @@ impl Larpcord {
             conversation_search,
             conversation_search_open: false,
             searched_message: None,
+            pins: Default::default(),
+            message_jump: Default::default(),
             composer_tools_open: false,
             composer_tool_task: None,
             composer_tool_result: None,
@@ -734,6 +739,7 @@ impl Larpcord {
         self.close_picker();
         self.close_composer_tools();
         self.reset_conversation_search(cx);
+        self.reset_message_navigation(cx);
         self.login_open = true;
         self.settings_tab = None;
         self.panel_exits.clear();
@@ -756,6 +762,7 @@ impl Larpcord {
     fn connect(&mut self, token: Zeroizing<String>, cx: &mut Context<Self>) {
         self.close_composer_tools();
         self.reset_conversation_search(cx);
+        self.reset_message_navigation(cx);
         self.picker = crate::expressions::Picker {
             recent: self.settings.recent_emoji.clone(),
             ..Default::default()
@@ -827,6 +834,7 @@ impl Larpcord {
     fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.close_composer_tools();
         self.reset_conversation_search(cx);
+        self.reset_message_navigation(cx);
         self.picker = crate::expressions::Picker {
             recent: self.settings.recent_emoji.clone(),
             ..Default::default()
@@ -900,6 +908,7 @@ impl Larpcord {
     fn choose_channel(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.close_composer_tools();
         self.reset_conversation_search(cx);
+        self.reset_message_navigation(cx);
         self.jump_task = None;
         self.jumping = false;
         self.jump_after_latest = None;
@@ -1158,6 +1167,7 @@ impl Larpcord {
         if self.jumping {
             return;
         }
+        self.message_jump.pending = None;
         self.scrolled_away = false;
         let newer = self
             .selected_channel
@@ -1395,6 +1405,14 @@ impl Larpcord {
             return;
         }
         match envelope.event {
+            Event::Pins { request, result } => self.receive_pins(request, result, cx),
+            Event::MessageContext {
+                request,
+                started,
+                result,
+            } => {
+                self.receive_message_context(request, started, result, window, cx);
+            }
             Event::ProfileBadges {
                 id,
                 guild,
@@ -2376,6 +2394,11 @@ impl Larpcord {
                             }
                         }
                     }
+                }
+            }
+            "CHANNEL_PINS_UPDATE" => {
+                if data["channel_id"].as_str() == self.selected_channel.as_deref() {
+                    self.refresh_open_pins(cx);
                 }
             }
             "MESSAGE_UPDATE" => {
@@ -3465,7 +3488,7 @@ impl Larpcord {
         let mut body = column().flex_1().min_w_0().gap_1();
         let reply = message.kind == 19 || message.message_reference.is_some();
         if reply {
-            body = body.child(self.reply_preview(message));
+            body = body.child(self.reply_preview(message, cx));
         }
         if !grouped {
             body = body.child(
@@ -3510,6 +3533,11 @@ impl Larpcord {
                         },
                     )
                     .child(label(time.clone()).text_size(px(12.)))
+                    .when(
+                        message.pinned
+                            && self.modules.feature(crate::modules::NativeFeature::PinIcon),
+                        |s| s.child(icon("pin", 14.).text_color(self.color(MUTED))),
+                    )
                     .when(message.silent(), |s| {
                         s.child(
                             div()
@@ -3793,6 +3821,20 @@ impl Larpcord {
                 })
             })
             .relative()
+            .when(
+                grouped
+                    && message.pinned
+                    && self.modules.feature(crate::modules::NativeFeature::PinIcon),
+                |s| {
+                    s.child(
+                        div()
+                            .absolute()
+                            .left(px(12.))
+                            .top(px(4.))
+                            .child(icon("pin", 14.).text_color(self.color(MUTED))),
+                    )
+                },
+            )
             .when(self.searched_message.as_deref() == Some(&message.id), |s| {
                 s.bg(rgba(0xb9a8f923))
             })
@@ -4006,7 +4048,8 @@ impl Larpcord {
                 },
             )
             .when(channel.is_some(), |s| {
-                s.child(self.conversation_search_button(cx))
+                s.child(self.pins_button(cx))
+                    .child(self.conversation_search_button(cx))
             })
             .when(self.preview, |s| s.child(badge("PREVIEW")));
         let content = column()
@@ -4388,6 +4431,7 @@ impl Larpcord {
             .when(self.conversation_search_open, |s| {
                 s.child(self.conversation_search_panel(cx))
             })
+            .when(self.pins.open, |s| s.child(self.pins_panel(cx)))
             .into_any_element()
     }
 
@@ -5054,6 +5098,8 @@ impl Render for Larpcord {
                     this.animate_panel_close(panels::Panel::Settings, window, cx);
                 } else if this.conversation_search_open {
                     this.animate_panel_close(panels::Panel::Search, window, cx);
+                } else if this.pins.open {
+                    this.animate_panel_close(panels::Panel::Pins, window, cx);
                 } else if this.composer_tools_open {
                     this.close_composer_tools();
                     cx.notify();
@@ -5237,6 +5283,48 @@ mod tests {
         cx.simulate_click(action.center(), Modifiers::default());
         cx.update(|_, cx| assert_eq!(view.read(cx).reply_to.as_ref().unwrap().id, "98765"));
     }
+    #[gpui::test]
+    fn quick_mention_inserts_into_the_existing_draft(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|window, cx| Larpcord::with_preview(window, cx, true));
+        view.update(cx, |v, cx| {
+            let catalog = crate::modules::Catalog::bundled();
+            let entry = catalog
+                .entries
+                .iter()
+                .find(|entry| entry.id() == "quick-mention")
+                .unwrap();
+            v.modules.install(entry, &[]).unwrap();
+            v.modules
+                .set_enabled("quick-mention", true, &mut v.settings.module_grants);
+            v.settings.animations = false;
+            v.store.clear_history();
+            v.store.insert(Message {
+                id: "517".into(),
+                channel_id: "campfire".into(),
+                content: "mention this person".into(),
+                author: User {
+                    id: "848".into(),
+                    username: "friend".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            v.refresh_messages();
+            v.hovered_message = Some("517".into());
+            v.composer.update(cx, |input, cx| input.set("asking ", cx));
+            cx.notify();
+        });
+        let viewport = cx.update(|window, _| window.viewport_size());
+        cx.draw(point(px(0.), px(0.)), viewport, |_, _| view.clone());
+        let button = cx.debug_bounds("quick-mention").unwrap();
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.update(|_, cx| {
+            let v = view.read(cx);
+            assert_eq!(v.composer.read(cx).content.as_ref(), "asking <@848> ");
+            assert_eq!(v.store.cached_messages(), 1);
+        });
+    }
+
     #[test]
     fn media_preview_dimensions_never_upscale_small_art() {
         use super::media_size;

@@ -44,4 +44,6 @@ the catalog uses the same manifest validation as local modules. it contains data
 
 member count and show me your name adapt the behavior of the Vencord plugins. account panel server profile adapts the Equicord shortcut. booster count adapts the Illegalcord plugin for the server rail. they use Larpcord's existing state and render paths. [Vencord plugins](https://vencord.dev/plugins/), [Equicord](https://github.com/Equicord/Equicord), [Illegalcord](https://github.com/ImHisako/Illegalcord)
 
+quick mention inserts a mention at the current draft cursor, pin icon marks pinned messages in the timeline, and fast gif picker prefers provider thumbnails and only animates the hovered result. they are installable and opt-in under Settings → Modules → Discover. [Vencord QuickMention](https://vencord.dev/plugins/QuickMention), [Equicord PinIcon](https://github.com/Equicord/Equicord/tree/main/src/equicordplugins/pinIcon), [Illegalcord FastGifPicker](https://github.com/ImHisako/Illegalcord/tree/main/src/illegalcordplugins/FastGifPicker)
+
 catppuccin mocha, nord and tokyo night map the upstream palettes onto Larpcord's theme colors. [Catppuccin](https://github.com/catppuccin/palette), [Nord](https://www.nordtheme.com/docs/colors-and-palettes), [Tokyo Night](https://github.com/enkia/tokyo-night-vscode-theme)

@@ -618,6 +618,7 @@ mod tests {
             title: "cat".into(),
             url: "https://klipy.com/gifs/cat".into(),
             preview: None,
+            thumbnail: None,
             width: 400,
             height: 240,
         }

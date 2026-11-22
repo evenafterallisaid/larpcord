@@ -25,6 +25,7 @@ impl Larpcord {
         }
         self.close_composer_tools();
         self.close_picker();
+        self.close_pins(cx);
         self.cancel_panel_exit(Panel::Search);
         self.conversation_search_open = true;
         self.searched_message = None;
@@ -107,11 +108,14 @@ impl Larpcord {
                     .child(self.conversation_search.clone()),
             );
         if query.is_empty() {
-            return panel
-                .child(label(
+            return self.panel_transition(
+                panel.child(label(
                     "Searches messages already loaded in this conversation.",
-                ))
-                .into_any_element();
+                )),
+                Panel::Search,
+                "conversation-search-enter",
+                |s, t| s.top(px(55. - 7. * (1. - t))).opacity(t),
+            );
         }
         let messages = self
             .selected_channel
@@ -182,21 +186,7 @@ impl Larpcord {
                             )
                             .child(div().min_w_0().truncate().text_size(px(13.)).child(excerpt))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                if let Some(index) = this
-                                    .rendered_ids
-                                    .iter()
-                                    .position(|rendered| rendered == &id)
-                                {
-                                    this.jumping = false;
-                                    this.jump_task = None;
-                                    this.scrolled_away = index + 1 < this.rendered_ids.len();
-                                    this.searched_message = Some(id.clone());
-                                    this.messages.scroll_to(ListOffset {
-                                        item_ix: index,
-                                        offset_in_item: px(0.),
-                                    });
-                                    this.close_conversation_search(window, cx);
-                                }
+                                this.reveal_message(&id, window, cx);
                             }))
                     })),
             )

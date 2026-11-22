@@ -11,6 +11,7 @@ pub(super) enum Panel {
     Settings,
     Picker,
     Search,
+    Pins,
     Members,
 }
 
@@ -63,6 +64,7 @@ impl Larpcord {
                 cx.notify();
             }
             Panel::Search => self.close_conversation_search(window, cx),
+            Panel::Pins => self.close_pins(cx),
             Panel::Members => {
                 self.members_open = false;
                 self.subscribe_members();

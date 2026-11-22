@@ -860,6 +860,9 @@ impl Larpcord {
             );
         }
 
+        let fast = self
+            .modules
+            .feature(crate::modules::NativeFeature::FastGifPicker);
         uniform_list(
             "gif-picker-grid",
             gifs.len().div_ceil(2),
@@ -874,12 +877,20 @@ impl Larpcord {
                                 |(n, gif)| {
                                     let gif = gif.clone();
                                     let hint = gif.title.clone();
-                                    let image =
-                                        gif.preview.as_deref().and_then(|url| this.media.get(url));
+                                    let animate = !fast
+                                        || this.picker.hovered.as_deref() == Some(gif.url.as_str());
+                                    let preview = if fast {
+                                        gif.thumbnail.as_deref().or(gif.preview.as_deref())
+                                    } else {
+                                        gif.preview.as_deref()
+                                    };
+                                    let image = preview.and_then(|url| this.media.get(url));
                                     let player = gif
                                         .preview
                                         .as_deref()
-                                        .filter(|url| crate::media::animation::image_url(url))
+                                        .filter(|url| {
+                                            animate && crate::media::animation::image_url(url)
+                                        })
                                         .and_then(|url| this.gif_player(url, image.clone(), cx));
                                     let favorite = gif.clone();
                                     let saved =
@@ -933,6 +944,21 @@ impl Larpcord {
                                                 ),
                                         )
                                         .child(this.gif_favorite_button(favorite, saved, cx))
+                                        .when(fast, |s| {
+                                            let key = gif.url.clone();
+                                            s.on_hover(cx.listener(
+                                                move |this, hovered: &bool, _, cx| {
+                                                    if *hovered {
+                                                        this.picker.hovered = Some(key.clone());
+                                                    } else if this.picker.hovered.as_deref()
+                                                        == Some(&key)
+                                                    {
+                                                        this.picker.hovered = None;
+                                                    }
+                                                    cx.notify();
+                                                },
+                                            ))
+                                        })
                                         .tooltip(move |_, cx| cx.new(|_| Hint(hint.clone())).into())
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.send_gif(&gif, window, cx);

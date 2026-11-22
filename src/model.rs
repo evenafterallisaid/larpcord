@@ -445,6 +445,18 @@ impl From<&Message> for ReferencedMessage {
     }
 }
 
+#[derive(Deserialize)]
+pub struct Pin {
+    pub pinned_at: String,
+    pub message: Message,
+}
+
+#[derive(Deserialize)]
+pub struct PinPage {
+    pub items: Vec<Pin>,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Default, Deserialize)]
 pub struct Message {
     pub id: String,
@@ -456,6 +468,8 @@ pub struct Message {
     #[serde(default)]
     pub timestamp: String,
     pub edited_timestamp: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
     #[serde(default)]
@@ -779,6 +793,7 @@ impl Store {
             for key in [
                 "content",
                 "edited_timestamp",
+                "pinned",
                 "attachments",
                 "embeds",
                 "components",
@@ -825,6 +840,9 @@ impl Store {
         }
         if let Some(edited) = patch["edited_timestamp"].as_str() {
             message.edited_timestamp = Some(edited.into());
+        }
+        if let Some(pinned) = patch["pinned"].as_bool() {
+            message.pinned = pinned;
         }
         if let Some(attachments) = patch
             .get("attachments")
@@ -946,6 +964,41 @@ impl Store {
         Self::trim(history, page == Page::Before);
     }
 
+    pub fn merge_context(
+        &mut self,
+        channel: &str,
+        target: &str,
+        fetched: Vec<Message>,
+        started: u64,
+    ) -> bool {
+        let history = self.history(channel);
+        if !fetched.iter().any(|message| message.id == target)
+            || history
+                .deleted
+                .get(target)
+                .is_some_and(|revision| *revision > started)
+        {
+            return false;
+        }
+        let mut ids = fetched.iter().map(|message| message.id.as_str());
+        let first = ids
+            .next()
+            .expect("a response containing the target is nonempty");
+        let compare = |a: &str, b: &str| a.len().cmp(&b.len()).then_with(|| a.cmp(b));
+        let (oldest, newest) = ids.fold((first, first), |(lo, hi), id| {
+            (
+                if compare(id, lo).is_lt() { id } else { lo },
+                if compare(id, hi).is_gt() { id } else { hi },
+            )
+        });
+        // Recent arrivals outside the requested window are fetched on return to latest.
+        history.messages.retain(|message| {
+            !compare(&message.id, oldest).is_lt() && !compare(&message.id, newest).is_gt()
+        });
+        self.merge_history(channel, fetched, started, Page::Latest);
+        true
+    }
+
     fn trim(history: &mut History, keep_oldest: bool) {
         history
             .messages
@@ -960,8 +1013,17 @@ impl Store {
             history.revisions.remove(&old.id);
         }
         history.revisions.retain(|id, _| {
-            history.messages.iter().any(|message| message.id == *id)
-                || history.patches.contains_key(id)
+            history.patches.contains_key(id)
+                || history
+                    .messages
+                    .binary_search_by(|message| {
+                        message
+                            .id
+                            .len()
+                            .cmp(&id.len())
+                            .then_with(|| message.id.cmp(id))
+                    })
+                    .is_ok()
         });
     }
 
@@ -1037,7 +1099,10 @@ impl Store {
             "timestamp":"2026-11-12T18:34:00Z", "content":"same person, a little less clutter. 🙂"
         }))
         .expect("sample message");
-        store.insert(sample.clone());
+        store.insert(Message {
+            pinned: true,
+            ..sample.clone()
+        });
         let mut next = sample.clone();
         next.id = "6".into();
         next.timestamp = "2026-11-12T18:35:00Z".into();

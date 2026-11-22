@@ -212,6 +212,7 @@ impl Favorites {
                 } else {
                     None
                 },
+                thumbnail: None,
                 width: e.width,
                 height: e.height,
             })
@@ -442,6 +443,7 @@ mod tests {
             title: "test".into(),
             url: "https://tenor.com/view/cat-1".into(),
             preview: Some("https://media.tenor.com/cat.gif".into()),
+            thumbnail: None,
             width: 200,
             height: 100,
         };

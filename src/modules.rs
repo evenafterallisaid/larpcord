@@ -73,6 +73,15 @@ pub enum NativeFeature {
     Usernames,
     AccountServerProfile,
     BoosterCount,
+    QuickMention,
+    PinIcon,
+    FastGifPicker,
+}
+
+impl NativeFeature {
+    fn bit(self) -> u16 {
+        1 << self as u16
+    }
 }
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -87,6 +96,17 @@ pub struct ThemePatch {
     accent: Option<u32>,
 }
 impl ThemePatch {
+    fn overlay(&mut self, other: &Self) {
+        macro_rules! overlay {
+            ($($field:ident),*) => {$(
+                self.$field = other.$field.or(self.$field);
+            )*};
+        }
+        overlay!(
+            background, panel, sidebar, surface, border, text, muted, accent
+        );
+    }
+
     pub fn apply(&self, mut tokens: crate::theme::Tokens) -> crate::theme::Tokens {
         macro_rules! apply {($($field:ident),*)=>{$(if let Some(value)=self.$field {tokens.$field=value;})*}}
         apply!(
@@ -256,9 +276,12 @@ impl ComposerTool {
         wasm::transform(&self.bytes, draft)
     }
 }
+#[derive(Default)]
 pub struct Registry {
     pub modules: Vec<Module>,
     pub errors: Vec<String>,
+    features: u16,
+    theme: ThemePatch,
 }
 /// The host gives modules only this presentation projection, never tokens or raw gateway data.
 pub struct MessageView<'a> {
@@ -273,15 +296,24 @@ pub struct Label<'a> {
 }
 impl Registry {
     pub fn feature(&self, feature: NativeFeature) -> bool {
-        self.modules
-            .iter()
-            .any(|module| module.enabled && module.manifest.native_features.contains(&feature))
+        self.features & feature.bit() != 0
     }
+
+    fn refresh_presentation(&mut self) {
+        self.features = 0;
+        self.theme = ThemePatch::default();
+        for module in self.modules.iter().filter(|module| module.enabled) {
+            for feature in &module.manifest.native_features {
+                self.features |= feature.bit();
+            }
+            if let Some(theme) = &module.manifest.theme {
+                self.theme.overlay(theme);
+            }
+        }
+    }
+
     pub fn load(root: Option<&Path>, grants: &[Grant]) -> Self {
-        let mut r = Self {
-            modules: vec![],
-            errors: vec![],
-        };
+        let mut r = Self::default();
         r.add(
             include_bytes!("../examples/modules/media-labels/module.json"),
             grants,
@@ -341,6 +373,7 @@ impl Registry {
                 Err(_) => r.errors.push("Could not read a module manifest".into()),
             }
         }
+        r.refresh_presentation();
         r
     }
     pub fn load_with_catalog(
@@ -376,11 +409,13 @@ impl Registry {
         } else {
             self.modules.push(module);
         }
+        self.refresh_presentation();
         Ok(())
     }
     pub fn uninstall(&mut self, id: &str) {
         self.modules
             .retain(|module| !(module.from_catalog && module.id() == id));
+        self.refresh_presentation();
     }
 
     fn add(&mut self, bytes: &[u8], grants: &[Grant]) {
@@ -444,15 +479,11 @@ impl Registry {
             }
             grants.truncate(32);
             module.enabled = enabled;
+            self.refresh_presentation();
         }
     }
-    pub fn tokens(&self, mut tokens: crate::theme::Tokens) -> crate::theme::Tokens {
-        for module in self.modules.iter().filter(|m| m.enabled) {
-            if let Some(patch) = &module.manifest.theme {
-                tokens = patch.apply(tokens);
-            }
-        }
-        tokens
+    pub fn tokens(&self, tokens: crate::theme::Tokens) -> crate::theme::Tokens {
+        self.theme.apply(tokens)
     }
     pub fn decorate(&self, event: MessageView<'_>) -> Vec<Label<'_>> {
         let mut labels = vec![];
@@ -670,6 +701,28 @@ mod tests {
         assert!(!registry.feature(NativeFeature::MemberCount));
     }
     #[test]
+    fn resolved_theme_preserves_precedence_through_disable_and_uninstall() {
+        let entry = |id: &str, accent| {
+            CatalogEntry(serde_json::json!({
+                "api_version": 1, "id": id, "name": id, "version": "1", "description": id,
+                "permissions": ["theme"], "theme": {"accent": accent}
+            }))
+        };
+        let mut registry = Registry::load(None, &[]);
+        let mut grants = vec![];
+        for (id, accent) in [("first", 0xaa6633), ("second", 0x3366aa)] {
+            registry.install(&entry(id, accent), &grants).unwrap();
+            registry.set_enabled(id, true, &mut grants);
+        }
+        let base = crate::theme::Tokens::default();
+        assert_eq!(registry.tokens(base).accent, 0x3366aa);
+        registry.set_enabled("second", false, &mut grants);
+        assert_eq!(registry.tokens(base).accent, 0xaa6633);
+        registry.uninstall("first");
+        assert_eq!(registry.tokens(base).accent, base.accent);
+    }
+
+    #[test]
     fn catalog_update_requires_a_new_grant_and_cannot_replace_local_modules() {
         let mut entries = Catalog::bundled().entries;
         assert_eq!(
@@ -723,10 +776,7 @@ mod tests {
         assert!(Registry::load(None, &grants).modules[0].enabled);
         let bytes =
             include_str!("../examples/modules/media-labels/module.json").replace("1.0.0", "1.0.1");
-        let mut changed = Registry {
-            modules: vec![],
-            errors: vec![],
-        };
+        let mut changed = Registry::default();
         changed.add(bytes.as_bytes(), &grants);
         assert!(
             !changed.modules[0].enabled,
@@ -763,10 +813,7 @@ mod tests {
     #[test]
     fn theme_hooks_restore_base_tokens_and_bound_outputs() {
         let bytes = include_bytes!("../examples/modules/soft-lavender/module.json");
-        let mut r = Registry {
-            modules: vec![],
-            errors: vec![],
-        };
+        let mut r = Registry::default();
         r.add(bytes, &[]);
         let mut grants = vec![];
         let base = crate::theme::Tokens::default();

@@ -222,6 +222,12 @@ impl Larpcord {
         let content = message.content.clone();
         let add_reaction = message.clone();
         let menu = message.clone();
+        let mention = message.author.id.clone();
+        let channel = message.channel_id.clone();
+        let quick_mention = self
+            .modules
+            .feature(crate::modules::NativeFeature::QuickMention)
+            && crate::expressions::id(&mention);
         row()
             .id("message-actions")
             .debug_selector(|| "message-actions".into())
@@ -251,6 +257,21 @@ impl Larpcord {
                         this.reply_to_message(&reply, window, cx)
                     })),
             )
+            .when(quick_mention, |s| {
+                s.child(
+                    toolbar_button("quick-mention", "at-sign", "Mention author")
+                        .debug_selector(|| "quick-mention".into())
+                        .size(px(32.))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if this.attachment_channel().as_deref() == Some(channel.as_str()) {
+                                this.composer.update(cx, |input, cx| {
+                                    input.insert(&format!("<@{mention}> "), cx)
+                                });
+                                window.focus(&this.composer.focus_handle(cx));
+                            }
+                        })),
+                )
+            })
             .child(
                 toolbar_button("copy-message", "copy", "Copy text")
                     .size(px(32.))

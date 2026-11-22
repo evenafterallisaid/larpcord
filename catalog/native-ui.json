@@ -36,6 +36,33 @@
       "description": "Show boosts and boost level when hovering a server icon after its metadata has loaded. Native adaptation of Illegalcord's BoosterCount.",
       "permissions": ["native_presentation"],
       "native_features": ["booster_count"]
+    },
+    {
+      "api_version": 1,
+      "id": "quick-mention",
+      "name": "Quick Mention",
+      "version": "1.0.0",
+      "description": "Insert a message author's mention at the composer cursor from the hover toolbar. Adapted from Vencord's QuickMention.",
+      "permissions": ["native_presentation"],
+      "native_features": ["quick_mention"]
+    },
+    {
+      "api_version": 1,
+      "id": "pin-icon",
+      "name": "Pin Icon",
+      "version": "1.0.0",
+      "description": "Show a small pin on pinned chat messages. Native adaptation of Equicord's PinIcon.",
+      "permissions": ["native_presentation"],
+      "native_features": ["pin_icon"]
+    },
+    {
+      "api_version": 1,
+      "id": "fast-gif-picker",
+      "name": "Fast GIF Picker",
+      "version": "1.0.0",
+      "description": "Prefer lighter thumbnails when available and animate only the hovered GIF in the picker. Native adaptation of Illegalcord's FastGifPicker.",
+      "permissions": ["native_presentation"],
+      "native_features": ["fast_gif_picker"]
     }
   ]
 }

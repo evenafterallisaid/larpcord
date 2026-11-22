@@ -101,6 +101,8 @@ pub struct Gif {
     pub title: String,
     pub url: String,
     pub preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
     #[serde(default)]
     pub width: u32,
     #[serde(default)]
@@ -155,6 +157,10 @@ pub fn gifs(value: Value) -> Vec<Gif> {
                     .take(120)
                     .collect(),
                 url,
+                thumbnail: v["preview"]
+                    .as_str()
+                    .filter(|url| gif_preview(url) && preview.as_deref() != Some(*url))
+                    .map(str::to_string),
                 preview,
                 width: v["width"].as_u64().unwrap_or(1).min(4096) as u32,
                 height: v["height"].as_u64().unwrap_or(1).min(4096) as u32,
@@ -239,7 +245,7 @@ mod tests {
     #[test]
     fn gif_results_keep_only_provider_links_and_credential_free_image_previews() {
         let page = gifs(serde_json::json!([
-            {"url":"https://klipy.com/gifs/cat","preview":"https://static.klipy.com/cat.gif","title":"cat","gif_src":"https://static.klipy.com/full-cat.gif"},
+            {"url":"https://klipy.com/gifs/cat","preview":"https://static.klipy.com/cat.webp","title":"cat","gif_src":"https://static.klipy.com/full-cat.gif"},
             {"url":"https://klipy.com/gifs/video","preview":"https://evil.invalid/x.gif"},
             {"url":"https://klipy.com.evil.invalid/gifs/x","preview":"https://static.klipy.com/x.gif"},
             {"url":"https://user:password@klipy.com/gifs/x"}
@@ -248,6 +254,10 @@ mod tests {
         assert_eq!(
             page[0].preview.as_deref(),
             Some("https://static.klipy.com/full-cat.gif")
+        );
+        assert_eq!(
+            page[0].thumbnail.as_deref(),
+            Some("https://static.klipy.com/cat.webp")
         );
         assert!(page[1].preview.is_none());
         assert!(!gif_preview("https://static.klipy.com/x.mp4"));
