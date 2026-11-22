@@ -5,6 +5,8 @@ use std::ops::Range;
 struct Choice {
     label: String,
     token: String,
+    emoji: bool,
+    image_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -70,6 +72,20 @@ impl Larpcord {
         if self.mentions_hidden || self.emoji_open || self.reaction_target.is_some() {
             return None;
         }
+        if let Some((range, choices)) = self.emoji_completions(cx) {
+            return Some((
+                range,
+                choices
+                    .into_iter()
+                    .map(|choice| Choice {
+                        label: format!(":{}:", choice.name),
+                        token: choice.token,
+                        emoji: true,
+                        image_url: choice.image_url,
+                    })
+                    .collect(),
+            ));
+        }
         let input = self.composer.read(cx);
         let end = input.mention_cursor()?;
         let prefix = &input.content[..end];
@@ -94,7 +110,12 @@ impl Larpcord {
                     || (!alternative.is_empty() && alternative.to_lowercase().contains(&query)))
                 && !choices.iter().any(|c| c.token == token)
             {
-                choices.push(Choice { label, token });
+                choices.push(Choice {
+                    label,
+                    token,
+                    emoji: false,
+                    image_url: None,
+                });
             }
         };
         let guild = channel
@@ -165,9 +186,16 @@ impl Larpcord {
         let Some(choice) = choices.get(index.min(choices.len() - 1)) else {
             return false;
         };
-        let token = format!("{} ", choice.token);
+        let token = if choice.emoji {
+            choice.token.clone()
+        } else {
+            format!("{} ", choice.token)
+        };
         self.composer
             .update(cx, |input, cx| input.replace_draft_range(range, &token, cx));
+        if choice.emoji {
+            self.remember_emoji(token, cx);
+        }
         self.mention_choice = 0;
         cx.notify();
         true
@@ -229,9 +257,31 @@ impl Larpcord {
                         .rounded_md()
                         .px_3()
                         .h(px(30.))
+                        .gap_2()
+                        .debug_selector(move || format!("completion-choice-{index}"))
                         .cursor_pointer()
                         .when(index == selected, |s| s.bg(self.color(SURFACE)))
                         .hover(|s| s.bg(self.color(SURFACE)))
+                        .when(choice.emoji, |s| {
+                            s.child(row().size(px(22.)).justify_center().child(
+                                if let Some(url) = &choice.image_url {
+                                    self.media
+                                        .get(url)
+                                        .map(|image| {
+                                            img(image)
+                                                .size(px(19.))
+                                                .object_fit(ObjectFit::Contain)
+                                                .into_any_element()
+                                        })
+                                        .unwrap_or_else(|| icon("smile", 17.).into_any_element())
+                                } else {
+                                    div()
+                                        .text_size(px(18.))
+                                        .child(choice.token)
+                                        .into_any_element()
+                                },
+                            ))
+                        })
                         .child(div().truncate().child(choice.label))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.select_mention(index, cx);

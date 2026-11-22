@@ -219,12 +219,25 @@ impl Picker {
     }
 }
 
-pub fn unicode_alias(key: &str) -> Option<&'static str> {
+pub fn unicode_aliases() -> impl Iterator<Item = (&'static str, &'static str)> {
     include_str!("../assets/emoji-aliases.tsv")
         .lines()
-        .filter_map(|l| l.split_once('\t'))
-        .find(|(name, _)| *name == key.trim_matches(':'))
-        .map(|(_, emoji)| emoji)
+        .filter_map(|line| line.split_once('\t'))
+}
+
+pub fn unicode_alias(key: &str) -> Option<&'static str> {
+    static ALIASES: std::sync::OnceLock<std::collections::HashMap<&str, &str>> =
+        std::sync::OnceLock::new();
+    ALIASES
+        .get_or_init(|| {
+            let mut aliases = std::collections::HashMap::new();
+            for (name, emoji) in unicode_aliases() {
+                aliases.entry(name).or_insert(emoji);
+            }
+            aliases
+        })
+        .get(key.trim_matches(':'))
+        .copied()
 }
 pub fn unicode_catalog() -> &'static Vec<(&'static str, &'static str)> {
     static CATALOG: std::sync::OnceLock<Vec<(&str, &str)>> = std::sync::OnceLock::new();

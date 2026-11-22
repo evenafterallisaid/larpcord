@@ -1,5 +1,8 @@
 use super::*;
-use crate::expressions::{Emoji, Sticker, Tab};
+use crate::{
+    expressions::{Emoji, Sticker, Tab},
+    model::Guild,
+};
 
 #[derive(Clone)]
 struct EmojiChoice {
@@ -193,19 +196,11 @@ impl Larpcord {
         if self.preview {
             return;
         }
-        if self.picker.tab != Tab::Gifs
-            && !self.picker.recents_loading
-            && self
-                .picker
-                .recents_checked
-                .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(60))
-        {
-            self.picker.recents_loading = true;
-            self.picker.recents_checked = Some(std::time::Instant::now());
-            if let Err(error) = self.backend.command(Command::EmojiRecents) {
-                self.picker.recents_loading = false;
-                self.picker.recents_error = Some(error);
-            }
+        if self.picker.tab != Tab::Gifs {
+            self.load_emoji_history();
+        }
+        if self.picker.tab == Tab::Stickers {
+            self.load_recent_stickers();
         }
         if self.picker.tab == Tab::Gifs
             && !self.picker.favorites_loaded
@@ -248,6 +243,51 @@ impl Larpcord {
         }
         cx.notify();
     }
+    pub(super) fn load_emoji_history(&mut self) {
+        if self.preview
+            || self.status != "Connected"
+            || self.picker.recents_loading
+            || self
+                .picker
+                .recents_checked
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60))
+        {
+            return;
+        }
+        self.picker.recents_loading = true;
+        self.picker.recents_checked = Some(std::time::Instant::now());
+        if let Err(error) = self.backend.command(Command::EmojiRecents) {
+            self.picker.recents_loading = false;
+            self.picker.recents_error = Some(error);
+        }
+    }
+
+    pub(super) fn remember_emoji(&mut self, token: String, cx: &mut Context<Self>) {
+        self.picker.remember(token);
+        self.settings.recent_emoji = self.picker.recent.clone();
+        self.persist(cx);
+    }
+
+    pub(super) fn emoji_lock_reason(&self, guild: &Guild, emoji: &Emoji) -> Option<&'static str> {
+        if emoji.available == Some(false) {
+            Some("This emoji is unavailable")
+        } else if self.store.user.premium_type == Some(0)
+            && (emoji.animated || self.selected_guild.as_ref() != Some(&guild.id))
+        {
+            Some("Nitro is required to use this emoji here")
+        } else if !emoji.roles.is_empty()
+            && self
+                .store
+                .own_roles
+                .get(&guild.id)
+                .is_some_and(|own| !emoji.roles.iter().any(|role| own.contains(role)))
+        {
+            Some("This emoji is restricted to server roles")
+        } else {
+            None
+        }
+    }
+
     pub(super) fn picker_changed(&mut self, cx: &mut Context<Self>) {
         self.picker_sections.reset(0);
         self.picker.pending_scope = None;
@@ -327,24 +367,7 @@ impl Larpcord {
                 {
                     continue;
                 }
-                let premium = self.store.user.premium_type;
-                let locked = if emoji.available == Some(false) {
-                    Some("This emoji is unavailable")
-                } else if premium == Some(0)
-                    && (emoji.animated || self.selected_guild.as_ref() != Some(&guild.id))
-                {
-                    Some("Nitro is required to use this emoji here")
-                } else if !emoji.roles.is_empty()
-                    && self
-                        .store
-                        .own_roles
-                        .get(&guild.id)
-                        .is_some_and(|own| !emoji.roles.iter().any(|role| own.contains(role)))
-                {
-                    Some("This emoji is restricted to server roles")
-                } else {
-                    None
-                };
+                let locked = self.emoji_lock_reason(guild, emoji);
                 choices.push(EmojiChoice {
                     text: emoji.markup(),
                     name: emoji.name.clone(),
@@ -732,9 +755,7 @@ impl Larpcord {
                     }))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if choice.locked.is_none() {
-                            this.picker.remember(choice.text.clone());
-                            this.settings.recent_emoji = this.picker.recent.clone();
-                            this.persist(cx);
+                            this.remember_emoji(choice.text.clone(), cx);
                             if let Some(message) = this.reaction_target.clone() {
                                 this.react_to(&message, &choice.text, cx);
                                 this.close_picker();

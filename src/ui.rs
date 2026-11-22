@@ -18,6 +18,7 @@ mod picker;
 mod pins;
 mod profile;
 mod profile_edit;
+mod shortcodes;
 mod text;
 mod video;
 
@@ -475,6 +476,8 @@ impl Larpcord {
                 this.mention_choice = 0;
                 this.mentions_hidden = false;
                 this.composer_tool_result = None;
+                this.sync_shortcode_history(cx);
+                this.expand_shortcode(cx);
                 cx.notify();
                 if this.composer.read(cx).content.is_empty()
                     || this.home_page
@@ -1477,7 +1480,9 @@ impl Larpcord {
                         self.picker
                             .sticker_details
                             .retain(|id, _| self.picker.account_stickers.contains(id));
-                        self.load_recent_stickers();
+                        if self.emoji_open && self.picker.tab == crate::expressions::Tab::Stickers {
+                            self.load_recent_stickers();
+                        }
                         self.picker.recents_error = None;
                     }
                     Err(error) => self.picker.recents_error = Some(error),
@@ -1611,6 +1616,9 @@ impl Larpcord {
                     self.opening_dm = None;
                 }
                 self.status = status;
+                if self.status == "Connected" {
+                    self.load_emoji_history();
+                }
             }
             Event::Error(error) => {
                 if self.login_open {
