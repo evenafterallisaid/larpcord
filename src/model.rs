@@ -755,6 +755,19 @@ impl Store {
         self.histories.values().map(|h| h.messages.len()).sum()
     }
 
+    /// Keep the viewed history and the most recently used neighboring history.
+    pub fn trim_background_history(&mut self) {
+        let neighbor = self
+            .recent
+            .iter()
+            .rev()
+            .find(|id| Some(*id) != self.pinned.as_ref());
+        self.histories
+            .retain(|id, _| Some(id) == self.pinned.as_ref() || Some(id) == neighbor);
+        self.recent.retain(|id| self.histories.contains_key(id));
+        self.histories.shrink_to_fit();
+    }
+
     pub fn clear_history(&mut self) {
         self.histories.clear();
         self.recent.clear();
@@ -1354,6 +1367,24 @@ mod tests {
         assert!(store.channel_messages("0").is_empty());
         assert_eq!(store.channel_messages("19")[0].id, "100");
         assert_eq!(store.channel_messages("19").last().unwrap().id, "299");
+    }
+
+    #[test]
+    fn background_trim_retains_the_active_history_and_unread_state() {
+        let mut store = Store::default();
+        store.pin("active");
+        store.insert(message(1, "active"));
+        store.insert(message(2, "older"));
+        store.insert(message(3, "recent"));
+        store.unread.insert("older".into());
+
+        store.trim_background_history();
+
+        assert_eq!(store.cached_messages(), 2);
+        assert!(store.has_history("active"));
+        assert!(store.has_history("recent"));
+        assert!(!store.has_history("older"));
+        assert!(store.unread.contains("older"));
     }
 
     #[test]

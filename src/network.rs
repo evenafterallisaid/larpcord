@@ -20,6 +20,14 @@ use crate::gif_favorites::{Recents, emoji_usage};
 use crate::model::{Channel, Guild, Member, Message, Page, PinPage, Profile, User};
 
 pub enum Event {
+    MessageEdited {
+        request: u64,
+        result: Result<Value, String>,
+    },
+    SearchHistory {
+        request: u64,
+        result: Result<SearchPage, String>,
+    },
     EditProfile {
         id: String,
         saved: bool,
@@ -119,6 +127,21 @@ pub struct Envelope {
 }
 
 pub enum Command {
+    EditMessage {
+        channel: String,
+        message: String,
+        author: String,
+        content: String,
+        request: u64,
+    },
+    SearchHistory {
+        channel: String,
+        guild: Option<String>,
+        query: String,
+        offset: u16,
+        request: u64,
+    },
+    CancelSearch,
     RefreshCatalog(tokio::sync::oneshot::Sender<Result<crate::modules::Catalog, String>>),
     EditProfile {
         id: String,
@@ -294,6 +317,14 @@ impl From<&str> for RequestFailure {
 fn retry_delay(attempt: u32) -> Duration {
     Duration::from_secs(2u64.saturating_pow(attempt.min(5)).min(30))
 }
+
+pub struct SearchPage {
+    pub matches: Vec<Message>,
+    pub total: usize,
+}
+
+pub const SEARCH_PAGE_SIZE: u16 = 25;
+pub const MAX_SEARCH_OFFSET: u16 = 2000;
 
 impl Api {
     async fn validate(&self, events: &Sender<Envelope>, generation: u64) -> bool {
@@ -669,6 +700,71 @@ impl Api {
         Ok(attachments)
     }
 
+    async fn search_history(
+        &self,
+        channel: &str,
+        guild: Option<&str>,
+        query: &str,
+        offset: u16,
+    ) -> Result<SearchPage, String> {
+        if !snowflake(channel)
+            || guild.is_some_and(|id| !snowflake(id))
+            || query.trim().is_empty()
+            || query.len() > 1024
+            || offset > MAX_SEARCH_OFFSET
+        {
+            return Err("Enter a search between 1 and 1024 bytes.".into());
+        }
+        let mut params = reqwest::Url::parse("https://discord.com").unwrap();
+        params
+            .query_pairs_mut()
+            .append_pair("content", query)
+            .append_pair("limit", &SEARCH_PAGE_SIZE.to_string())
+            .append_pair("sort_by", "timestamp")
+            .append_pair("sort_order", "desc")
+            .append_pair("offset", &offset.to_string());
+        let route = if let Some(guild) = guild {
+            params.query_pairs_mut().append_pair("channel_id", channel);
+            format!("/guilds/{guild}/messages/search")
+        } else {
+            format!("/channels/{channel}/messages/search")
+        };
+        let request = format!("{route}?{}", params.query().unwrap_or_default());
+        let reply: Value = self.request(Method::GET, &request, None).await?;
+        if reply["code"]
+            .as_u64()
+            .is_some_and(|code| (110000..120000).contains(&code))
+        {
+            return Err("Discord is indexing this conversation. Try again shortly.".into());
+        }
+        let groups = reply["messages"]
+            .as_array()
+            .ok_or("Discord did not return search results.")?;
+        let mut seen = std::collections::HashSet::new();
+        let matches = groups
+            .iter()
+            .take(SEARCH_PAGE_SIZE.into())
+            .filter_map(|group| {
+                let group = group.as_array()?;
+                let hit = group
+                    .iter()
+                    .find(|message| message["hit"].as_bool() == Some(true))
+                    .or_else(|| (group.len() == 1).then(|| &group[0]))?;
+                let id = hit["id"].as_str()?;
+                if hit["channel_id"].as_str() != Some(channel) || !snowflake(id) || !seen.insert(id)
+                {
+                    return None;
+                }
+                serde_json::from_value::<Message>(hit.clone()).ok()
+            })
+            .collect();
+        let total = reply["total_results"]
+            .as_u64()
+            .unwrap_or_default()
+            .min(10000) as usize;
+        Ok(SearchPage { matches, total })
+    }
+
     async fn request<T: DeserializeOwned>(
         &self,
         method: Method,
@@ -890,6 +986,7 @@ impl Backend {
                 let mut tasks = JoinSet::new();
                 let mut requests = JoinSet::new();
                 let mut gif_request:Option<tokio::task::AbortHandle>=None;
+                let mut history_search:Option<tokio::task::AbortHandle>=None;
                 let mut auth = JoinSet::new();
                 let mut emoji_saves = JoinSet::new();
                 let mut emoji_batch = emoji_usage::Batch::default();
@@ -1038,6 +1135,25 @@ impl Backend {
                                 Command::GifFavorites(change) => {
                                     let Some(client)=api.as_ref().map(Api::discovery) else {continue;};let events=events.clone();
                                     requests.spawn(async move {let result=client.gif_favorites(change).await;emit(&events,generation,Event::GifFavorites(result)).await;});
+                                }
+                                Command::CancelSearch => {
+                                    if let Some(old) = history_search.take() {
+                                        old.abort();
+                                    }
+                                }
+                                Command::SearchHistory { channel, guild, query, offset, request } => {
+                                    if let Some(old) = history_search.take() {
+                                        old.abort();
+                                    }
+                                    let client = api.clone();
+                                    let events = events.clone();
+                                    history_search = Some(requests.spawn(async move {
+                                        let result = match client {
+                                            Some(client) => client.search_history(&channel, guild.as_deref(), &query, offset).await,
+                                            None => Err("Connect to search Discord history.".into()),
+                                        };
+                                        emit(&events, generation, Event::SearchHistory { request, result }).await;
+                                    }));
                                 }
                                 Command::CancelGifs => {if let Some(old)=gif_request.take() {old.abort();}}
                                 Command::Gifs {request,query} => {
@@ -1192,6 +1308,30 @@ impl Backend {
                                     let Some(client) = api.clone() else { continue; };
                                     if !snowflake(&channel) { continue; }
                                     requests.spawn(async move {let _ = client.request::<()>(Method::POST,&format!("/channels/{channel}/typing"),None).await;});
+                                }
+                                Command::EditMessage { channel, message, author, content, request } => {
+                                    let client = api.clone();
+                                    let events = events.clone();
+                                    requests.spawn(async move {
+                                        let result = async {
+                                            let client = client.ok_or("Wait for a connection before editing.")?;
+                                            if !snowflake(&channel) || !snowflake(&message) || !snowflake(&author)
+                                                || content.trim().is_empty() || content.chars().count() > 2000 {
+                                                return Err("This edit could not be saved.".into());
+                                            }
+                                            let reply: Value = client.request(
+                                                Method::PATCH,
+                                                &format!("/channels/{channel}/messages/{message}"),
+                                                Some(json!({"content": content, "allowed_mentions": {"parse": []}})),
+                                            ).await?;
+                                            if reply["id"].as_str() != Some(&message) || reply["channel_id"].as_str() != Some(&channel)
+                                                || reply["author"]["id"].as_str() != Some(&author) || reply["content"].as_str().is_none() {
+                                                return Err("Discord returned a different message.".into());
+                                            }
+                                            Ok(reply)
+                                        }.await;
+                                        emit(&events, generation, Event::MessageEdited { request, result }).await;
+                                    });
                                 }
                                 Command::Send { channel, content, nonce,reply,ping_reply,sticker,files } => {
                                     let client = api.clone();
@@ -1704,6 +1844,53 @@ fn profile_badges(value: &Value) -> Vec<crate::model::ProfileBadge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn search_encodes_text_and_excludes_context_and_other_channels() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut api = Api::new(Zeroizing::new("synthetic-session".into())).unwrap();
+        api.endpoint = Some(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut line = String::new();
+            socket.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with("GET /guilds/2/messages/search?content=x%26offset%3D9&"));
+            assert!(line.contains("&offset=25&channel_id=1 "));
+            loop {
+                line.clear();
+                assert!(socket.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let body = json!({"total_results":61,"messages":[
+                [{"id":"2","channel_id":"1","content":"context"},
+                 {"id":"3","channel_id":"1","content":"match","hit":true}],
+                [{"id":"3","channel_id":"1","content":"duplicate","hit":true}],
+                [{"id":"4","channel_id":"2","content":"unrelated","hit":true}]
+            ]})
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .get_mut()
+                .write_all(response.as_bytes())
+                .await
+                .unwrap();
+        });
+        let page = api
+            .search_history("1", Some("2"), "x&offset=9", 25)
+            .await
+            .unwrap();
+        assert_eq!(page.total, 61);
+        assert_eq!(page.matches.len(), 1);
+        assert_eq!(page.matches[0].content, "match");
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn profile_save_checks_the_exact_fields_against_a_fresh_profile() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};

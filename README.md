@@ -3,9 +3,9 @@
 <p align="center">a little room to breathe.</p>
 <p align="center">a native discord client, written in rust with gpui.</p>
 
-this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. the current published preview is available in [releases](https://github.com/evenafterallisaid/larpcord/releases/tag/v0.2.0-dev.16).
+this is kawaicord's native sibling. same obsession with keeping background work small, with a fresh interface and its own codebase. first milestone is getting the everyday text client right. then we tackle native calls, media and mod adapters. get the desktop packages and checksums from [GitHub Releases](https://github.com/evenafterallisaid/larpcord/releases).
 
-**0.2.0-dev.16 is a development preview.** this release adds animated panels, anchored profile previews, native module and palette ports, badge catalog compatibility, and a remembered reply mention preference. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
+**0.2.0 is the stable text-chat release.** it includes conversation history search, editing your own messages, synced emoji usage and lower background cache retention. the login screen offers qr sign-in and a clearly labelled offline sample workspace. connecting an account enables the real rest and gateway implementation. live account sign-in, sending and receiving have been confirmed on macos. existing kawaicord installs and sessions are separate.
 
 ## what works in this milestone
 
@@ -26,14 +26,15 @@ this is kawaicord's native sibling. same obsession with keeping background work 
 - server icons, banners and group chat icons, saved server order and folders, unread/mention badges, a flat single-color home mark and custom typing indicators
 - silent, bounded gifv autoplay and image gif/apng motion; click-to-play video attachments, cdn video embeds and components v2 video galleries, with a native viewer, seeking, volume and mute
 - opt-in [modules](docs/modules.md) with searchable catalogs, permission review, message labels, theme tokens and local Wasm composer tools
-- search loaded messages in the open conversation with the header search button or Command/Ctrl+F
+- instant search of loaded messages with Command/Ctrl+F, paged Discord history search with Enter, and jump to the matching message
+- edit your own text messages from the message menu or press Up in an empty composer to edit your latest loaded message
 - floating settings with mouse, scroll and keyboard isolation; charcoal, onyx, midnight and rose themes with a semantic custom-theme token file
 - gateway heartbeats, acknowledgement checks, session resume, reconnection backoff and automatic retry after a transient startup failure
 - desktop notifications for direct messages, mentions and incoming call signals
 - optional saved login in keychain, credential manager or secret service
 - per-conversation drafts, compact spacing, notification privacy and background connection settings
 
-clicking a gif sends it immediately as its own message, while preserving your text and staged sticker. emoji and stickers still go into the composer for review before sending. local emoji, sticker and gif history survives restarts. the emoji picker also reads the account’s synced message/reaction rankings, so saved official-client and kawaicord usage carries over. selections made here are prioritized locally; pending usage not yet saved by the other client is unavailable. custom emoji render inline in the composer while the send payload retains native markup. the gif selector also reads discord favorites and offers explicit star changes without replacing unrelated saved records. sticker messages use native sticker ids and preserve per-channel drafts; png/apng/gif artwork is supported, while lottie artwork currently uses a named placeholder.
+clicking a gif sends it immediately as its own message, while preserving your text and staged sticker. emoji and stickers still go into the composer for review before sending. local emoji, sticker and gif history survives restarts. the emoji picker reads the account’s synced message/reaction rankings and batches new usage back to the account. selections made here are prioritized locally; pending usage not yet saved by the other client is unavailable. custom emoji render inline in the composer while the send payload retains native markup. the gif selector also reads discord favorites and offers explicit star changes without replacing unrelated saved records. sticker messages use native sticker ids and preserve per-channel drafts; png/apng/gif artwork is supported, while lottie artwork currently uses a named placeholder.
 
 voice and video calls, email/password login, quest integration and javascript plugin compatibility are future work. normal reactions can be added or removed using quick actions, the emoji picker or existing reaction chips. native nitro name motion approximates the effect ids; exact proprietary shader parity and lottie sticker playback are not implemented yet. incoming call notifications are informational until native voice is implemented. this milestone adds native qr login through discord mobile, with manual session entry retained under advanced sign-in. the ui never reads a token from another application. the live qr handshake passed on 2026-11-12. the user has also confirmed account access and real message delivery; the exact sign-in route was not separately recorded.
 
@@ -56,7 +57,7 @@ an account session token is a password. keep it private. larpcord is an independ
 - only visible messages, server icons and direct-message rows are laid out and painted
 - actual videos start after a click in one viewer and release when it closes, with bounded queues and two software decoder threads; gifv and image gif loops share at most four visible players, release offscreen and pause when inactive; image gifs decode one requested frame at a time instead of storing a low-resolution loop, with one queued result and 800 × 600 output bounds
 - at most 12 conversation histories, with 200 messages each, live in memory
-- switching conversations evicts the least recently used history while retaining the active one
+- switching conversations evicts the least recently used history while retaining the active one; after 30 seconds in the background, keep only the active and most recently used neighboring histories and retire offscreen decoded media
 - public encoded images have a bounded 64 mib disk cache, reused after scrolling or restarting; portraits/icons have four dedicated download slots and content has two, with one decode permit reserved for each queue
 - recently viewed member lists are retained for up to 60 seconds, with at most two previous channel views
 - visible images decode off the ui thread; portraits and content have separate soft allowances of 8 mib and 12 mib, with 768 and 384 soft entry allowances respectively; a visible working set can use up to three times its byte allowance, with artwork retention guarded at twice the entry allowance

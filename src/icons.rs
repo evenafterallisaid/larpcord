@@ -15,6 +15,7 @@ pub static ASSETS: &[(&str, &[u8])] = &[
     ),
     ("icons/pin.svg", include_bytes!("../assets/icons/pin.svg")),
     ("icons/plus.svg", include_bytes!("../assets/icons/plus.svg")),
+    ("icons/edit.svg", include_bytes!("../assets/icons/edit.svg")),
     ("icons/file.svg", include_bytes!("../assets/icons/file.svg")),
     (
         "icons/bell-off.svg",

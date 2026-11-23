@@ -280,9 +280,9 @@ impl Media {
                                         let cache = disk.clone();
                                         tokio::task::spawn_blocking(move || {
                                             let image = if key.ends_with("#motion") {
-                                                decode_motion(data.clone(), decode_bounds(&key))
+                                                decode_motion(&data, decode_bounds(&key))
                                             } else {
-                                                decode(data.clone(), decode_bounds(&key))
+                                                decode(&data, decode_bounds(&key))
                                             };
                                             if image.is_some() && !from_disk {
                                                 cache.write(&key, &data);
@@ -331,16 +331,17 @@ impl Media {
 
     // requests happen only for rendered rows. failed images retry on a later render, without a timer.
     pub fn get(&self, url: &str) -> Option<Arc<RenderImage>> {
-        if !cdn_url(url) && !gif_preview(url) {
+        let mut cache = self.cache.borrow_mut();
+        let known = cache.entries.contains_key(url);
+        if !known && !cdn_url(url) && !gif_preview(url) {
             return None;
         }
-        let mut cache = self.cache.borrow_mut();
         cache.clock += 1;
         let clock = cache.clock;
-        if cache.visible.len() < 256 {
+        if cache.visible.len() < 256 && !cache.visible.contains(url) {
             cache.visible.insert(url.to_string());
         }
-        if let Some(entry) = cache.entries.get_mut(url) {
+        let (identity, failures) = if let Some(entry) = cache.entries.get_mut(url) {
             entry.used = clock;
             if entry.pending
                 || entry.image.is_some()
@@ -349,18 +350,16 @@ impl Media {
             {
                 return entry.image.clone();
             }
-        }
-        let failures = cache.entries.get(url).map_or(0, |e| e.failures);
-        let queue = if identity_asset(url) {
-            &self.portraits
+            (entry.identity, entry.failures)
         } else {
-            &self.tx
+            (identity_asset(url), 0)
         };
+        let queue = if identity { &self.portraits } else { &self.tx };
         if queue.try_send(url.to_string()).is_ok() {
             cache.entries.insert(
                 url.to_string(),
                 Entry {
-                    identity: identity_asset(url),
+                    identity,
                     image: None,
                     bytes: 0,
                     used: clock,
@@ -371,6 +370,27 @@ impl Media {
             );
         }
         None
+    }
+
+    pub fn trim_background(&self) -> Vec<Arc<RenderImage>> {
+        let mut cache = self.cache.borrow_mut();
+        let Cache {
+            entries,
+            visible,
+            bytes,
+            ..
+        } = &mut *cache;
+        let mut retired = Vec::new();
+        entries.retain(|url, entry| {
+            if entry.pending || visible.contains(url) {
+                return true;
+            }
+            *bytes -= entry.bytes;
+            retired.extend(entry.image.take());
+            false
+        });
+        entries.shrink_to_fit();
+        retired
     }
 
     pub fn receive(&self, loaded: Loaded) -> Vec<Arc<RenderImage>> {
@@ -502,9 +522,9 @@ async fn download(client: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn decode(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
+fn decode(bytes: &[u8], bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
     if bytes.len() <= 512 * 1024
-        && std::str::from_utf8(&bytes).ok().is_some_and(|s| {
+        && std::str::from_utf8(bytes).ok().is_some_and(|s| {
             s.trim_start().starts_with("<svg")
                 || (s.trim_start().starts_with("<?xml") && s.contains("<svg"))
         })
@@ -516,7 +536,7 @@ fn decode(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
             },
             ..Default::default()
         };
-        let tree = resvg::usvg::Tree::from_data(&bytes, &options).ok()?;
+        let tree = resvg::usvg::Tree::from_data(bytes, &options).ok()?;
         let source = tree.size();
         if source.width() > 8192. || source.height() > 8192. {
             return None;
@@ -541,7 +561,7 @@ fn decode(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
         let image = image::RgbaImage::from_raw(pixmap.width(), pixmap.height(), pixels)?;
         return Some(Arc::new(RenderImage::new(vec![Frame::new(image)])));
     }
-    let mut reader = ImageReader::new(Cursor::new(&bytes))
+    let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
     let mut limits = image::Limits::default();
@@ -597,16 +617,16 @@ pub fn animation_delay(delay: image::Delay, gif: bool) -> image::Delay {
     }
 }
 
-fn decode_motion(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
-    let fallback = || decode(bytes.clone(), bounds);
-    let format = image::guess_format(&bytes).ok()?;
+fn decode_motion(bytes: &[u8], bounds: (u32, u32)) -> Option<Arc<RenderImage>> {
+    let fallback = || decode(bytes, bounds);
+    let format = image::guess_format(bytes).ok()?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(2048);
     limits.max_image_height = Some(2048);
     limits.max_alloc = Some(32 * 1024 * 1024);
     let frames = match format {
         image::ImageFormat::Png => {
-            let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(&bytes)).ok()?;
+            let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(bytes)).ok()?;
             decoder.set_limits(limits).ok()?;
             if !decoder.is_apng().ok()? {
                 return fallback();
@@ -614,7 +634,7 @@ fn decode_motion(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>>
             decoder.apng().ok()?.into_frames()
         }
         image::ImageFormat::WebP => {
-            let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(&bytes)).ok()?;
+            let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
             decoder.set_limits(limits).ok()?;
             if !decoder.has_animation() {
                 return fallback();
@@ -622,7 +642,7 @@ fn decode_motion(bytes: Vec<u8>, bounds: (u32, u32)) -> Option<Arc<RenderImage>>
             decoder.into_frames()
         }
         image::ImageFormat::Gif => {
-            let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(&bytes)).ok()?;
+            let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
             decoder.set_limits(limits).ok()?;
             decoder.into_frames()
         }
@@ -745,7 +765,7 @@ mod tests {
     #[test]
     fn badge_svg_rasterization_is_bounded_and_keeps_alpha() {
         let svg=br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><circle cx="50" cy="50" r="45" fill="red"/></svg>"#.to_vec();
-        let image = decode(svg, (32, 32)).unwrap();
+        let image = decode(&svg, (32, 32)).unwrap();
         assert_eq!(image.size(0).width.0, 32);
         assert_eq!(image.size(0).height.0, 32);
         assert_eq!(image.as_bytes(0).unwrap()[3], 0);
@@ -975,7 +995,7 @@ mod tests {
                     .unwrap();
             }
         }
-        let decoded = decode_motion(bytes, (8, 8)).unwrap();
+        let decoded = decode_motion(&bytes, (8, 8)).unwrap();
         assert_eq!(decoded.frame_count(), 3);
         assert_eq!(decoded.delay(1).numer_denom_ms(), (100, 1));
         assert_eq!(&decoded.as_bytes(1).unwrap()[..4], &[0, 0, 255, 255]);
@@ -1012,7 +1032,7 @@ mod tests {
                     .unwrap();
             }
         }
-        let image = decode_motion(bytes, (320, 180)).unwrap();
+        let image = decode_motion(&bytes, (320, 180)).unwrap();
         assert_eq!(
             image.frame_count(),
             24,
@@ -1048,7 +1068,7 @@ mod tests {
                     .unwrap();
             }
         }
-        let image = decode_motion(bytes, (8, 8)).unwrap();
+        let image = decode_motion(&bytes, (8, 8)).unwrap();
         assert!(image.frame_count() <= 240);
         let ms = (0..image.frame_count())
             .map(|n| std::time::Duration::from(image.delay(n)).as_millis())
@@ -1065,9 +1085,9 @@ mod tests {
         let image = image::RgbaImage::from_pixel(2000, 1000, image::Rgba([200, 80, 30, 255]));
         let mut bytes = Cursor::new(Vec::new());
         image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
-        let decoded = decode(bytes.into_inner(), (640, 480)).unwrap();
+        let decoded = decode(&bytes.into_inner(), (640, 480)).unwrap();
         assert_eq!(&decoded.as_bytes(0).unwrap()[..4], &[30, 80, 200, 255]);
         assert!(decoded.as_bytes(0).unwrap().len() <= 640 * 480 * 4);
-        assert!(decode(b"not an image".to_vec(), (640, 480)).is_none());
+        assert!(decode(b"not an image", (640, 480)).is_none());
     }
 }

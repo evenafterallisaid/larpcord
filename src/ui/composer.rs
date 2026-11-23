@@ -334,7 +334,11 @@ impl Larpcord {
             (3, "Copy Message ID", "hash"),
             (4, "View Profile", "user"),
             (5, "Add Reaction…", "reaction"),
+            (6, "Edit Message…", "edit"),
         ] {
+            if index == 6 && !self.can_edit_message(message) {
+                continue;
+            }
             let message = message.clone();
             let guild = self.selected_guild.clone().unwrap_or_else(|| "@me".into());
             menu = menu.child(
@@ -367,6 +371,7 @@ impl Larpcord {
                                 cx.write_to_clipboard(ClipboardItem::new_string(message.id.clone()))
                             }
                             5 => this.open_reaction_picker(message.clone(), window, cx),
+                            6 => this.open_message_edit(&message, window, cx),
                             _ => this.open_profile(message.author.clone(), window, cx),
                         };
                         cx.notify();

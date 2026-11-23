@@ -2,11 +2,77 @@ use super::{panels::Panel, *};
 
 const MAX_RESULTS: usize = 20;
 
+#[derive(Default)]
+pub(super) struct HistorySearch {
+    request: u64,
+    offset: u16,
+    pending: bool,
+    result: Option<Result<crate::network::SearchPage, String>>,
+}
+
 impl Larpcord {
+    pub(super) fn reset_history_search(&mut self) {
+        if self.history_search.pending {
+            self.command(Command::CancelSearch);
+        }
+        self.history_search = HistorySearch {
+            request: self.history_search.request.wrapping_add(1),
+            ..HistorySearch::default()
+        };
+    }
+
+    pub(super) fn search_history(&mut self, offset: u16, cx: &mut Context<Self>) {
+        if self.preview || self.status != "Connected" || !self.conversation_search_open {
+            return;
+        }
+        let Some(channel) = self.selected_channel.clone() else {
+            return;
+        };
+        let query = self.conversation_search.read(cx).content.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        let request = self.history_search.request.wrapping_add(1);
+        self.history_search = HistorySearch {
+            request,
+            offset,
+            pending: true,
+            result: None,
+        };
+        let guild = self
+            .store
+            .channels
+            .get(&channel)
+            .and_then(|c| c.guild_id.clone());
+        if let Err(error) = self.backend.command(Command::SearchHistory {
+            channel,
+            guild,
+            query,
+            offset,
+            request,
+        }) {
+            self.history_search.pending = false;
+            self.history_search.result = Some(Err(error));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn receive_history_search(
+        &mut self,
+        request: u64,
+        result: Result<crate::network::SearchPage, String>,
+    ) {
+        if self.conversation_search_open && self.history_search.request == request {
+            self.history_search.pending = false;
+            self.history_search.result = Some(result);
+        }
+    }
+
     pub(super) fn reset_conversation_search(&mut self, cx: &mut Context<Self>) {
         self.cancel_panel_exit(Panel::Search);
         self.conversation_search_open = false;
         self.searched_message = None;
+        self.reset_history_search();
         self.conversation_search
             .update(cx, |input, cx| input.set("", cx));
     }
@@ -40,12 +106,13 @@ impl Larpcord {
     ) {
         self.cancel_panel_exit(Panel::Search);
         self.conversation_search_open = false;
+        self.reset_history_search();
         window.focus(&self.composer.focus_handle(cx));
         cx.notify();
     }
 
     pub(super) fn conversation_search_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        toolbar_button("conversation-search", "search", "Search loaded messages")
+        toolbar_button("conversation-search", "search", "Search messages")
             .when(self.conversation_search_open, |s| s.bg(self.color(SURFACE)))
             .on_click(cx.listener(|this, _, window, cx| {
                 if this.conversation_search_open && !this.panel_closing(Panel::Search) {
@@ -110,7 +177,7 @@ impl Larpcord {
         if query.is_empty() {
             return self.panel_transition(
                 panel.child(label(
-                    "Searches messages already loaded in this conversation.",
+                    "Search loaded messages as you type, or press Enter to search Discord history.",
                 )),
                 Panel::Search,
                 "conversation-search-enter",
@@ -125,17 +192,72 @@ impl Larpcord {
             .iter()
             .rev()
             .filter(|message| message.content.to_lowercase().contains(&query));
-        let matches = results.by_ref().take(MAX_RESULTS).collect::<Vec<_>>();
+        let loaded = results.by_ref().take(MAX_RESULTS).collect::<Vec<_>>();
         let more = results.next().is_some();
+        let history = self.history_search.result.as_ref();
+        let pending = self.history_search.pending;
+        let matches = match history {
+            Some(Ok(page)) => page.matches.iter().collect(),
+            _ if !pending => loaded,
+            _ => Vec::new(),
+        };
+        if !self.preview && self.status == "Connected" {
+            panel = panel.child(
+                button(
+                    "search-history",
+                    if pending {
+                        "Searching…"
+                    } else {
+                        "Search history"
+                    },
+                )
+                .when(!pending, |s| {
+                    s.on_click(cx.listener(|this, _, _, cx| this.search_history(0, cx)))
+                }),
+            );
+        }
         panel = panel.child(
-            label(match matches.len() {
-                0 => "No matches in loaded messages".to_string(),
-                1 => "1 match".to_string(),
-                count if more => format!("{count}+ matches"),
-                count => format!("{count} matches"),
+            label(match history {
+                Some(Ok(page)) => format!("{} matches in Discord history", page.total),
+                Some(Err(error)) => error.clone(),
+                None if pending => "Searching Discord history…".to_string(),
+                None => match matches.len() {
+                    0 => "No matches in loaded messages".to_string(),
+                    1 => "1 match".to_string(),
+                    count if more => format!("{count}+ matches"),
+                    count => format!("{count} matches"),
+                },
             })
             .text_size(px(11.)),
         );
+        if let Some(Ok(page)) = history {
+            use crate::network::{MAX_SEARCH_OFFSET, SEARCH_PAGE_SIZE};
+            let offset = self.history_search.offset;
+            let next = offset + SEARCH_PAGE_SIZE;
+            if offset > 0 || usize::from(next) < page.total && next <= MAX_SEARCH_OFFSET {
+                panel = panel.child(
+                    row()
+                        .gap_2()
+                        .when(offset > 0, |s| {
+                            s.child(button("back-search-history", "Previous").on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.search_history(offset - SEARCH_PAGE_SIZE, cx)
+                                }),
+                            ))
+                        })
+                        .when(
+                            usize::from(next) < page.total && next <= MAX_SEARCH_OFFSET,
+                            |s| {
+                                s.child(button("more-search-history", "Next").on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.search_history(next, cx)
+                                    }),
+                                ))
+                            },
+                        ),
+                );
+            }
+        }
         panel
             .child(
                 column()
@@ -186,7 +308,7 @@ impl Larpcord {
                             )
                             .child(div().min_w_0().truncate().text_size(px(13.)).child(excerpt))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.reveal_message(&id, window, cx);
+                                this.jump_to_message(&id, window, cx);
                             }))
                     })),
             )

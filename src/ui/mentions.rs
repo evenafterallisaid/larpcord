@@ -231,6 +231,8 @@ impl Larpcord {
                     self.mention_choice = (self.mention_choice + change) % choices.len();
                     cx.notify();
                     cx.stop_propagation();
+                } else if event.keystroke.key == "up" && self.edit_last_message(window, cx) {
+                    cx.stop_propagation();
                 }
             }
             "tab" if self.select_mention(self.mention_choice, cx) => cx.stop_propagation(),

@@ -11,6 +11,7 @@ mod friends;
 mod gif;
 mod members;
 mod mentions;
+mod message_edit;
 mod modules;
 mod panels;
 mod panes;
@@ -73,6 +74,7 @@ pub struct Larpcord {
     catalog_search: Entity<TextInput>,
     conversation_search: Entity<TextInput>,
     conversation_search_open: bool,
+    history_search: conversation_search::HistorySearch,
     searched_message: Option<String>,
     pins: pins::Pins,
     message_jump: pins::MessageJump,
@@ -83,6 +85,7 @@ pub struct Larpcord {
     preview: bool,
     preview_only: bool,
     window_active: bool,
+    background_trim: Option<Task<()>>,
     status: String,
     selected_guild: Option<String>,
     home_page: bool,
@@ -100,6 +103,9 @@ pub struct Larpcord {
     reaction_replays: HashMap<String, u64>,
     collapsed_categories: HashSet<String>,
     composer: Entity<TextInput>,
+    edit_input: Entity<TextInput>,
+    message_edit: Option<message_edit::Editor>,
+    edit_sequence: u64,
     mention_choice: usize,
     mentions_hidden: bool,
     attachment_drafts: HashMap<String, Vec<crate::attachments::DraftFile>>,
@@ -377,12 +383,16 @@ impl Larpcord {
                             view.profile_started = std::time::Instant::now();
                         }
                         crate::media::retire(view.media.receive(image), window, 3);
-                        view.media_retry = view.media.retry_after().map(|delay| {
-                            cx.spawn_in(window, async move |view, cx| {
-                                cx.background_executor().timer(delay).await;
-                                let _ = view.update(cx, |_, cx| cx.notify());
-                            })
-                        });
+                        view.media_retry = window
+                            .is_window_active()
+                            .then(|| view.media.retry_after())
+                            .flatten()
+                            .map(|delay| {
+                                cx.spawn_in(window, async move |view, cx| {
+                                    cx.background_executor().timer(delay).await;
+                                    let _ = view.update(cx, |_, cx| cx.notify());
+                                })
+                            });
                         cx.notify();
                     })
                     .is_err()
@@ -436,7 +446,39 @@ impl Larpcord {
             cx.new(|cx| TextInput::new("Filter by name or description", false, cx));
         let conversation_search = cx.new(|cx| TextInput::new("Search loaded messages", false, cx));
         let friend_search = cx.new(|cx| TextInput::new("Search friends", false, cx));
+        let edit_input = cx.new(|cx| TextInput::new("Edit message", false, cx));
         let subscriptions = vec![
+            cx.subscribe_in(&edit_input, window, |this, _, _: &Submit, window, cx| {
+                this.submit_message_edit(window, cx);
+            }),
+            cx.observe_window_activation(window, |this, window, cx| {
+                this.window_active = window.is_window_active();
+                this.background_trim = None;
+                if this.window_active {
+                    this.mark_view_read(window, cx);
+                    cx.notify();
+                    return;
+                }
+                gif::Pool::pause(&this.gif_pool, cx);
+                gif::Pool::pause(&this.banner_pool, cx);
+                this.media_retry = None;
+                if !this.preview {
+                    this.background_trim = Some(cx.spawn_in(window, async move |view, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(30))
+                            .await;
+                        let _ = view.update_in(cx, |this, window, _| {
+                            if !window.is_window_active() {
+                                this.store.trim_background_history();
+                                this.profiles.clear();
+                                this.profile_effect_timings.get_mut().clear();
+                                crate::media::retire(this.media.trim_background(), window, 3);
+                            }
+                        });
+                    }));
+                }
+                cx.notify();
+            }),
             cx.observe_window_activation(window, |this, window, cx| {
                 gif::Pool::pause(&this.gif_pool, cx);
                 gif::Pool::pause(&this.banner_pool, cx);
@@ -470,7 +512,13 @@ impl Larpcord {
                 cx.notify();
             }),
             cx.subscribe(&catalog_search, |_, _, _: &Changed, cx| cx.notify()),
-            cx.subscribe(&conversation_search, |_, _, _: &Changed, cx| cx.notify()),
+            cx.subscribe(&conversation_search, |this, _, _: &Changed, cx| {
+                this.reset_history_search();
+                cx.notify();
+            }),
+            cx.subscribe(&conversation_search, |this, _, _: &Submit, cx| {
+                this.search_history(0, cx);
+            }),
             cx.subscribe(&search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe(&friend_search, |_, _, _: &Changed, cx| cx.notify()),
             cx.subscribe_in(&composer, window, |this, _, _: &Changed, window, cx| {
@@ -562,6 +610,7 @@ impl Larpcord {
             catalog_search,
             conversation_search,
             conversation_search_open: false,
+            history_search: Default::default(),
             searched_message: None,
             pins: Default::default(),
             message_jump: Default::default(),
@@ -578,6 +627,7 @@ impl Larpcord {
             preview: true,
             preview_only,
             window_active: window.is_window_active(),
+            background_trim: None,
             status: "Preview".into(),
             home_page: false,
             friends_online: true,
@@ -595,6 +645,9 @@ impl Larpcord {
             reaction_replays: HashMap::new(),
             collapsed_categories: HashSet::new(),
             composer,
+            edit_input,
+            message_edit: None,
+            edit_sequence: 0,
             mention_choice: 0,
             mentions_hidden: false,
             attachment_drafts: HashMap::new(),
@@ -743,6 +796,7 @@ impl Larpcord {
         }
         self.close_picker();
         self.close_composer_tools();
+        self.reset_message_edit(cx);
         self.reset_conversation_search(cx);
         self.reset_message_navigation(cx);
         self.login_open = true;
@@ -766,6 +820,7 @@ impl Larpcord {
 
     fn connect(&mut self, token: Zeroizing<String>, cx: &mut Context<Self>) {
         self.close_composer_tools();
+        self.reset_message_edit(cx);
         self.reset_conversation_search(cx);
         self.reset_message_navigation(cx);
         self.picker = crate::expressions::Picker {
@@ -838,6 +893,7 @@ impl Larpcord {
 
     fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.close_composer_tools();
+        self.reset_message_edit(cx);
         self.reset_conversation_search(cx);
         self.reset_message_navigation(cx);
         self.picker = crate::expressions::Picker {
@@ -912,6 +968,7 @@ impl Larpcord {
 
     fn choose_channel(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.close_composer_tools();
+        self.reset_message_edit(cx);
         self.reset_conversation_search(cx);
         self.reset_message_navigation(cx);
         self.jump_task = None;
@@ -1410,6 +1467,12 @@ impl Larpcord {
             return;
         }
         match envelope.event {
+            Event::MessageEdited { request, result } => {
+                self.receive_message_edit(request, result, window, cx);
+            }
+            Event::SearchHistory { request, result } => {
+                self.receive_history_search(request, result);
+            }
             Event::Pins { request, result } => self.receive_pins(request, result, cx),
             Event::MessageContext {
                 request,
@@ -4239,6 +4302,9 @@ impl Larpcord {
                         .when(!self.typing.is_empty(), |s| {
                             s.child(self.typing_indicator())
                         })
+                        .when(self.message_edit.is_some(), |s| {
+                            s.child(self.message_edit_panel(cx))
+                        })
                         .when(self.reply_to.is_some(), |s| s.child(self.reply_banner(cx)))
                         .when(self.composer_tools_open, |s| {
                             s.child(self.composer_tools(cx))
@@ -5105,6 +5171,10 @@ impl Render for Larpcord {
                         window.focus(&focus);
                     }
                     cx.notify();
+                } else if this.message_edit.is_some()
+                    && this.edit_input.focus_handle(cx).is_focused(window)
+                {
+                    this.close_message_edit(window, cx);
                 } else if this.emoji_open {
                     this.animate_panel_close(panels::Panel::Picker, window, cx);
                 } else if this.hide_mention_picker(window, cx) {
