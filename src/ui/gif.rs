@@ -672,7 +672,7 @@ mod tests {
         use std::{path::Path, time::Duration};
 
         let player = cx.new(|cx| {
-            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video.mp4");
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video.webm");
             let mut player = Loop::new(Source::File(path), None, cx);
             assert!(player.player.read(cx).player().is_none());
             player.set_active(true, cx);
@@ -683,7 +683,11 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(40));
         cx.run_until_parked();
         player.update(cx, |view, cx| {
-            assert!(view.player.read(cx).is_playing());
+            assert!(
+                view.player.read(cx).is_playing(),
+                "decoder state: {:?}",
+                view.player.read(cx).state()
+            );
             view.set_active(false, cx);
             assert!(!view.player.read(cx).is_playing());
         });
